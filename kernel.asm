@@ -1,4 +1,951 @@
-  cpuid
+; ============================================================
+;  kernel.asm — NarcOs Kernel v2.0
+;  Yenilikler:
+;    - Komut geçmişi (yukarı/aşağı ok, 8 komut)
+;    - echo --red/green/yellow/cyan/white
+;    - sys komutu (CPU vendor, bellek, disk)
+;    - Uptime sayacı (PIT IRQ0 ile)
+;    - calc komutu (toplama, çıkarma, çarpma, bölme)
+;    - anim komutu (ASCII boot animasyonu)
+; ============================================================
+[BITS 32]
+[ORG 0x10000]
+
+VGA_BASE     equ 0xB8000
+VGA_COLS     equ 80
+VGA_ROWS     equ 25
+
+; Renkler (arka plan siyah)
+COLOR_NORMAL equ 0x0A   ; Açık yeşil
+COLOR_BRIGHT equ 0x0B   ; Açık cyan
+COLOR_DIM    equ 0x08   ; Koyu gri
+COLOR_WARN   equ 0x0E   ; Sarı
+COLOR_ERR    equ 0x0C   ; Açık kırmızı
+COLOR_PROMPT equ 0x0A   ; Yeşil prompt
+COLOR_RED    equ 0x0C
+COLOR_GREEN  equ 0x0A
+COLOR_YELLOW equ 0x0E
+COLOR_CYAN   equ 0x0B
+COLOR_WHITE  equ 0x0F
+COLOR_BLUE   equ 0x09
+
+; ── Giriş ────────────────────────────────────────────────
+kernel_main:
+    call init_pic
+    call init_idt
+    call init_pit           ; Uptime için timer
+    call clear_screen
+    call print_splash
+    call print_meminfo
+    call shell_main
+    cli
+    hlt
+
+; ============================================================
+;  PIC (8259A)
+; ============================================================
+init_pic:
+    mov al, 0x11
+    out 0x20, al
+    out 0xA0, al
+    mov al, 0x20            ; IRQ0-7  → INT 0x20-0x27
+    out 0x21, al
+    mov al, 0x28            ; IRQ8-15 → INT 0x28-0x2F
+    out 0xA1, al
+    mov al, 0x04
+    out 0x21, al
+    mov al, 0x02
+    out 0xA1, al
+    mov al, 0x01
+    out 0x21, al
+    out 0xA1, al
+    mov al, 11111100b       ; IRQ0 (timer) + IRQ1 (klavye) açık
+    out 0x21, al
+    mov al, 11111111b
+    out 0xA1, al
+    sti
+    ret
+
+; ============================================================
+;  PIT — IRQ0 Timer (uptime sayacı)
+;  18.2 Hz varsayılan frekans → biz 100 Hz ayarlıyoruz
+; ============================================================
+init_pit:
+    mov al, 0x36            ; Kanal 0, lobyte/hibyte, mod 3
+    out 0x43, al
+    mov ax, 11932           ; 1193182 / 100 ≈ 11932 → 100 Hz
+    out 0x40, al
+    mov al, ah
+    out 0x40, al
+    ret
+
+; ============================================================
+;  IDT
+; ============================================================
+init_idt:
+    mov ecx, 256
+    mov edi, idt_table
+.fill:
+    mov eax, default_handler
+    mov word [edi],   ax
+    mov word [edi+2], 0x08
+    mov byte [edi+4], 0x00
+    mov byte [edi+5], 10001110b
+    shr eax, 16
+    mov word [edi+6], ax
+    add edi, 8
+    loop .fill
+
+    ; INT 0x20 → timer_handler
+    mov edi, idt_table + (0x20 * 8)
+    mov eax, timer_handler
+    mov word [edi],   ax
+    mov word [edi+2], 0x08
+    mov byte [edi+4], 0x00
+    mov byte [edi+5], 10001110b
+    shr eax, 16
+    mov word [edi+6], ax
+
+    ; INT 0x21 → keyboard_handler
+    mov edi, idt_table + (0x21 * 8)
+    mov eax, keyboard_handler
+    mov word [edi],   ax
+    mov word [edi+2], 0x08
+    mov byte [edi+4], 0x00
+    mov byte [edi+5], 10001110b
+    shr eax, 16
+    mov word [edi+6], ax
+
+    lidt [idt_descriptor]
+    ret
+
+default_handler:
+    pusha
+    mov al, 0x20
+    out 0x20, al
+    popa
+    iret
+
+; ── Timer Handler (IRQ0) ─────────────────────────────────
+timer_handler:
+    pusha
+    inc dword [uptime_ticks]    ; Her tick'te artır (100 Hz)
+    mov al, 0x20
+    out 0x20, al
+    popa
+    iret
+
+; ── Klavye Handler (IRQ1) ────────────────────────────────
+keyboard_handler:
+    pusha
+    in al, 0x60
+    test al, 0x80
+    jnz .eoi
+
+    ; Özel tuşlar: yukarı ok (0x48), aşağı ok (0x50)
+    cmp al, 0x48
+    je  .arrow_up
+    cmp al, 0x50
+    je  .arrow_down
+
+    movzx eax, al
+    mov al, [scancode_map + eax]
+    or  al, al
+    jz  .eoi
+
+    mov ebx, [input_pos]
+    cmp ebx, 126
+    jge .eoi
+
+    cmp al, 0x0D
+    je  .enter
+    cmp al, 0x08
+    je  .backspace
+
+    mov [input_buf + ebx], al
+    inc dword [input_pos]
+    mov bl, COLOR_NORMAL
+    call vga_putchar
+    jmp .eoi
+
+.backspace:
+    cmp dword [input_pos], 0
+    je  .eoi
+    dec dword [input_pos]
+    mov ebx, [input_pos]
+    mov byte [input_buf + ebx], 0
+    call vga_backspace
+    jmp .eoi
+
+.enter:
+    mov ebx, [input_pos]
+    mov byte [input_buf + ebx], 0
+    call save_history           ; Geçmişe kaydet
+    mov byte [input_ready], 1
+    call vga_newline
+    jmp .eoi
+
+.arrow_up:
+    call history_prev
+    jmp .eoi
+
+.arrow_down:
+    call history_next
+    jmp .eoi
+
+.eoi:
+    mov al, 0x20
+    out 0x20, al
+    popa
+    iret
+
+; ============================================================
+;  KOMUT GEÇMİŞİ (8 slot, dairesel)
+; ============================================================
+HIST_SIZE equ 8
+HIST_LEN  equ 128
+
+save_history:
+    pusha
+    ; Boş komutları kaydetme
+    cmp byte [input_buf], 0
+    je  .done
+
+    ; Geçmişe yaz: history_buf + (hist_write * HIST_LEN)
+    mov eax, [hist_write]
+    mov ecx, HIST_LEN
+    mul ecx
+    mov edi, history_buf
+    add edi, eax
+    mov esi, input_buf
+    mov ecx, HIST_LEN
+    rep movsb
+
+    ; hist_write ilerlet (dairesel)
+    inc dword [hist_write]
+    mov eax, [hist_write]
+    cmp eax, HIST_SIZE
+    jl  .no_wrap
+    mov dword [hist_write], 0
+.no_wrap:
+    ; hist_count artır (max HIST_SIZE)
+    mov eax, [hist_count]
+    cmp eax, HIST_SIZE
+    jge .done
+    inc dword [hist_count]
+.done:
+    ; hist_pos = hist_write (en yeni konuma sıfırla)
+    mov eax, [hist_write]
+    mov [hist_pos], eax
+    popa
+    ret
+
+history_prev:
+    pusha
+    cmp dword [hist_count], 0
+    je  .done
+
+    ; hist_pos bir geri al
+    mov eax, [hist_pos]
+    dec eax
+    cmp eax, 0
+    jge .no_wrap
+    mov eax, HIST_SIZE - 1
+.no_wrap:
+    mov [hist_pos], eax
+
+    ; O slottaki komutu input_buf'a kopyala
+    mov ecx, HIST_LEN
+    mul ecx
+    mov esi, history_buf
+    add esi, eax
+    cmp byte [esi], 0       ; Boş slot
+    je  .done
+
+    ; Mevcut satırı temizle
+    call clear_input_line
+
+    ; Kopyala ve ekrana yaz
+    mov edi, input_buf
+    mov dword [input_pos], 0
+.copy:
+    mov al, [esi]
+    or  al, al
+    jz  .done
+    mov [edi], al
+    inc esi
+    inc edi
+    inc dword [input_pos]
+    mov bl, COLOR_NORMAL
+    call vga_putchar
+    jmp .copy
+.done:
+    popa
+    ret
+
+history_next:
+    pusha
+    cmp dword [hist_count], 0
+    je  .done
+
+    mov eax, [hist_pos]
+    inc eax
+    cmp eax, HIST_SIZE
+    jl  .no_wrap
+    mov eax, 0
+.no_wrap:
+    mov [hist_pos], eax
+
+    mov ecx, HIST_LEN
+    mul ecx
+    mov esi, history_buf
+    add esi, eax
+
+    call clear_input_line
+
+    cmp byte [esi], 0
+    je  .done
+
+    mov edi, input_buf
+    mov dword [input_pos], 0
+.copy:
+    mov al, [esi]
+    or  al, al
+    jz  .done
+    mov [edi], al
+    inc esi
+    inc edi
+    inc dword [input_pos]
+    mov bl, COLOR_NORMAL
+    call vga_putchar
+    jmp .copy
+.done:
+    popa
+    ret
+
+; Mevcut input satırını VGA'dan sil ve buffer'ı temizle
+clear_input_line:
+    pusha
+    ; input_pos kadar backspace yap
+    mov ecx, [input_pos]
+    or  ecx, ecx
+    jz  .done
+.bs:
+    call vga_backspace
+    loop .bs
+    ; Buffer temizle
+    mov dword [input_pos], 0
+    mov ecx, 128
+    mov edi, input_buf
+    xor al, al
+    rep stosb
+.done:
+    popa
+    ret
+
+; ============================================================
+;  VGA SÜRÜCÜSÜ
+; ============================================================
+clear_screen:
+    mov edi, VGA_BASE
+    mov ecx, VGA_COLS * VGA_ROWS
+    mov ax, (COLOR_NORMAL << 8) | ' '
+.lp:
+    mov word [edi], ax
+    add edi, 2
+    loop .lp
+    mov dword [cursor_x], 0
+    mov dword [cursor_y], 0
+    call update_hw_cursor
+    ret
+
+; AL = karakter, BL = renk
+vga_putchar:
+    cmp al, 0x0D
+    je  .cr
+    mov ecx, [cursor_y]
+    imul ecx, VGA_COLS
+    add ecx, [cursor_x]
+    shl ecx, 1
+    add ecx, VGA_BASE
+    mov ah, bl
+    mov word [ecx], ax
+    inc dword [cursor_x]
+    cmp dword [cursor_x], VGA_COLS
+    jl  .done
+    mov dword [cursor_x], 0
+    inc dword [cursor_y]
+    cmp dword [cursor_y], VGA_ROWS
+    jl  .done
+    call vga_scroll
+.done:
+    call update_hw_cursor
+    ret
+.cr:
+    mov dword [cursor_x], 0
+    call update_hw_cursor
+    ret
+
+vga_putchar_al:
+    mov bl, COLOR_NORMAL
+    jmp vga_putchar
+
+vga_newline:
+    mov dword [cursor_x], 0
+    inc dword [cursor_y]
+    cmp dword [cursor_y], VGA_ROWS
+    jl  .done
+    call vga_scroll
+.done:
+    call update_hw_cursor
+    ret
+
+vga_backspace:
+    cmp dword [cursor_x], 0
+    je  .done
+    dec dword [cursor_x]
+    mov ecx, [cursor_y]
+    imul ecx, VGA_COLS
+    add ecx, [cursor_x]
+    shl ecx, 1
+    add ecx, VGA_BASE
+    mov word [ecx], (COLOR_NORMAL << 8) | ' '
+    call update_hw_cursor
+.done:
+    ret
+
+vga_scroll:
+    mov esi, VGA_BASE + VGA_COLS * 2
+    mov edi, VGA_BASE
+    mov ecx, VGA_COLS * (VGA_ROWS - 1)
+    rep movsw
+    mov ecx, VGA_COLS
+    mov ax, (COLOR_NORMAL << 8) | ' '
+.cl:
+    mov word [edi], ax
+    add edi, 2
+    loop .cl
+    mov dword [cursor_y], VGA_ROWS - 1
+    ret
+
+update_hw_cursor:
+    mov eax, [cursor_y]
+    imul eax, VGA_COLS
+    add eax, [cursor_x]
+    mov ecx, eax
+    mov dx, 0x3D4
+    mov al, 0x0F
+    out dx, al
+    mov dx, 0x3D5
+    mov al, cl
+    out dx, al
+    mov dx, 0x3D4
+    mov al, 0x0E
+    out dx, al
+    mov dx, 0x3D5
+    mov al, ch
+    out dx, al
+    ret
+
+; ESI = string, BL = renk
+print_str:
+    pusha
+.lp:
+    mov al, [esi]
+    or  al, al
+    jz  .done
+    call vga_putchar
+    inc esi
+    jmp .lp
+.done:
+    popa
+    ret
+
+println:
+    call print_str
+    call vga_newline
+    ret
+
+; 0x0A ile bölünmüş çok satırlı string
+print_multiline:
+    pusha
+.lp:
+    mov al, [esi]
+    inc esi
+    or  al, al
+    jz  .done
+    cmp al, 0x0A
+    je  .nl
+    call vga_putchar
+    jmp .lp
+.nl:
+    push esi
+    call vga_newline
+    pop esi
+    jmp .lp
+.done:
+    call vga_newline
+    popa
+    ret
+
+; EAX = sayı, BL = renk
+; ECX kullanmaz (vga_putchar ve div çakışmasını önler)
+print_dec:
+    mov [pd_color], bl
+    mov [pd_num], eax
+
+    ; Sıfır özel durumu
+    or  eax, eax
+    jnz .build
+    mov al, '0'
+    mov bl, [pd_color]
+    call vga_putchar
+    ret
+
+.build:
+    ; dec_buf[10] = null, geriye doğru doldur
+    mov byte [dec_buf+10], 0
+    mov ebx, 10             ; current index
+    mov eax, [pd_num]
+.loop:
+    xor edx, edx
+    push ebx
+    mov ebx, 10
+    div ebx                 ; EAX=quotient, EDX=remainder
+    pop ebx
+    add dl, '0'
+    dec ebx
+    mov [dec_buf + ebx], dl
+    or  eax, eax
+    jnz .loop
+
+    ; ebx = başlangıç indexi
+    lea esi, [dec_buf + ebx]
+.print:
+    mov al, [esi]
+    or  al, al
+    jz  .done
+    mov bl, [pd_color]
+    call vga_putchar
+    inc esi
+    jmp .print
+.done:
+    ret
+
+; ============================================================
+;  SPLASH
+; ============================================================
+print_splash:
+    mov esi, splash_border
+    mov bl, COLOR_DIM
+    call println
+    mov esi, splash_l1
+    mov bl, COLOR_BRIGHT
+    call println
+    mov esi, splash_l2
+    call println
+    mov esi, splash_l3
+    call println
+    mov esi, splash_l4
+    call println
+    mov esi, splash_l5
+    call println
+    mov esi, splash_l6
+    call println
+    mov esi, splash_name
+    mov bl, COLOR_WARN
+    call println
+    mov esi, splash_sub
+    mov bl, COLOR_DIM
+    call println
+    mov esi, splash_border
+    call println
+    mov esi, splash_hint
+    mov bl, COLOR_NORMAL
+    call println
+    mov esi, splash_empty
+    call println
+    ret
+
+; ============================================================
+;  BELLEK
+; ============================================================
+print_meminfo:
+    mov esi, mem_hdr
+    mov bl, COLOR_WARN
+    call print_str
+    mov esi, mem_conv
+    mov bl, COLOR_NORMAL
+    call print_str
+    mov esi, mem_conv_val
+    call println
+    mov esi, mem_ext
+    call print_str
+    mov esi, mem_ext_val
+    call println
+    mov esi, splash_empty
+    call println
+    ret
+
+; ============================================================
+;  SHELL
+; ============================================================
+shell_main:
+.lp:
+    mov esi, prompt_str
+    mov bl, COLOR_PROMPT
+    call print_str
+    call wait_input
+    call process_command
+    jmp .lp
+
+wait_input:
+    mov byte [input_ready], 0
+.w:
+    cmp byte [input_ready], 1
+    jne .w
+    ret
+
+process_command:
+    cmp byte [input_buf], 0
+    je  .done
+
+    ; ── Tam eşleşmeler ──
+    mov esi, input_buf
+    mov edi, cmd_help
+    call strcmp
+    je  do_help
+
+    mov esi, input_buf
+    mov edi, cmd_clear
+    call strcmp
+    je  do_clear
+
+    mov esi, input_buf
+    mov edi, cmd_ver
+    call strcmp
+    je  do_ver
+
+    mov esi, input_buf
+    mov edi, cmd_mem
+    call strcmp
+    je  do_mem
+
+    mov esi, input_buf
+    mov edi, cmd_ls
+    call strcmp
+    je  do_ls
+
+    mov esi, input_buf
+    mov edi, cmd_date
+    call strcmp
+    je  do_date
+
+    mov esi, input_buf
+    mov edi, cmd_reboot
+    call strcmp
+    je  do_reboot
+
+    mov esi, input_buf
+    mov edi, cmd_sys
+    call strcmp
+    je  do_sys
+
+    mov esi, input_buf
+    mov edi, cmd_uptime
+    call strcmp
+    je  do_uptime
+
+    mov esi, input_buf
+    mov edi, cmd_anim
+    call strcmp
+    je  do_anim
+
+    mov esi, input_buf
+    mov edi, cmd_hist
+    call strcmp
+    je  do_hist
+
+    ; ── Prefix eşleşmeler ──
+    mov esi, input_buf
+    mov edi, cmd_echo
+    call strncmp
+    je  do_echo
+
+    mov esi, input_buf
+    mov edi, cmd_cat
+    call strncmp
+    je  do_cat
+
+    mov esi, input_buf
+    mov edi, cmd_calc
+    call strncmp
+    je  do_calc
+
+    ; Bilinmeyen
+    mov esi, err_unk1
+    mov bl, COLOR_ERR
+    call print_str
+    mov esi, input_buf
+    call print_str
+    mov esi, err_unk2
+    call println
+
+.done:
+    mov dword [input_pos], 0
+    mov ecx, 128
+    mov edi, input_buf
+    xor al, al
+    rep stosb
+    ret
+
+; ── help ─────────────────────────────────────────────────
+do_help:
+    mov esi, help_hdr
+    mov bl, COLOR_WARN
+    call println
+    mov esi, help_body
+    mov bl, COLOR_NORMAL
+    call print_multiline
+    jmp process_command.done
+
+; ── clear ────────────────────────────────────────────────
+do_clear:
+    call clear_screen
+    call print_splash
+    call print_meminfo
+    jmp process_command.done
+
+; ── ver ──────────────────────────────────────────────────
+do_ver:
+    mov esi, ver_str
+    mov bl, COLOR_BRIGHT
+    call println
+    jmp process_command.done
+
+; ── mem ──────────────────────────────────────────────────
+do_mem:
+    call print_meminfo
+    jmp process_command.done
+
+; ── ls ───────────────────────────────────────────────────
+do_ls:
+    mov esi, ls_hdr
+    mov bl, COLOR_WARN
+    call println
+    mov esi, ls_files
+    mov bl, COLOR_NORMAL
+    call print_multiline
+    jmp process_command.done
+
+; ── cat ──────────────────────────────────────────────────
+do_cat:
+    mov esi, input_buf + 4
+    mov edi, cat_f_readme
+    call strcmp
+    je  .readme
+    mov edi, cat_f_motd
+    call strcmp
+    je  .motd
+    mov esi, cat_notfound1
+    mov bl, COLOR_ERR
+    call print_str
+    mov esi, input_buf + 4
+    call print_str
+    mov esi, cat_notfound2
+    call println
+    jmp process_command.done
+.readme:
+    mov esi, cat_readme
+    mov bl, COLOR_NORMAL
+    call print_multiline
+    jmp process_command.done
+.motd:
+    mov esi, cat_motd
+    mov bl, COLOR_BRIGHT
+    call print_multiline
+    jmp process_command.done
+
+; ── date ─────────────────────────────────────────────────
+do_date:
+    mov esi, date_lbl
+    mov bl, COLOR_WARN
+    call print_str
+    mov al, 0x04
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    mov al, ':'
+    mov bl, COLOR_DIM
+    call vga_putchar
+    mov al, 0x02
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    mov al, ':'
+    call vga_putchar
+    mov al, 0x00
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    mov esi, date_sep
+    mov bl, COLOR_DIM
+    call print_str
+    mov al, 0x07
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    mov al, '/'
+    call vga_putchar
+    mov al, 0x08
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    mov al, '/'
+    call vga_putchar
+    mov al, 0x09
+    out 0x70, al
+    in  al, 0x71
+    call print_bcd
+    call vga_newline
+    jmp process_command.done
+
+print_bcd:
+    push eax
+    push ebx
+    mov bl, COLOR_NORMAL
+    mov ah, al
+    shr ah, 4
+    and al, 0x0F
+    add ah, '0'
+    add al, '0'
+    push eax
+    mov al, ah
+    call vga_putchar
+    pop eax
+    call vga_putchar
+    pop ebx
+    pop eax
+    ret
+
+; ── reboot ───────────────────────────────────────────────
+do_reboot:
+    mov esi, reboot_msg
+    mov bl, COLOR_ERR
+    call println
+    mov al, 0xFE
+    out 0x64, al
+    hlt
+
+; ── echo --color <metin> ─────────────────────────────────
+; Sözdizimi: echo --red Merhaba
+;            echo Merhaba  (varsayılan yeşil)
+do_echo:
+    mov esi, input_buf + 5  ; "echo " sonrası
+    ; Renk flag kontrolü: "--" ile başlıyor mu?
+    cmp byte [esi], '-'
+    jne .plain
+    cmp byte [esi+1], '-'
+    jne .plain
+
+    ; Renk adını belirle
+    lea edi, [esi+2]        ; "--" sonrası
+
+    push edi
+    mov edi, echo_red
+    call strcmp
+    je  .do_red
+    pop edi
+    push edi
+    mov edi, echo_green
+    call strcmp
+    je  .do_green
+    pop edi
+    push edi
+    mov edi, echo_yellow
+    call strcmp
+    je  .do_yellow
+    pop edi
+    push edi
+    mov edi, echo_cyan
+    call strcmp
+    je  .do_cyan
+    pop edi
+    push edi
+    mov edi, echo_white
+    call strcmp
+    je  .do_white
+    pop edi
+    jmp .plain              ; Tanınmayan flag → düz yaz
+
+.do_red:
+    pop edi
+    add esi, 2 + 3 + 1      ; "--red " = 6
+    mov bl, COLOR_RED
+    jmp .print
+.do_green:
+    pop edi
+    add esi, 2 + 5 + 1      ; "--green " = 8
+    mov bl, COLOR_GREEN
+    jmp .print
+.do_yellow:
+    pop edi
+    add esi, 2 + 6 + 1      ; "--yellow " = 9
+    mov bl, COLOR_YELLOW
+    jmp .print
+.do_cyan:
+    pop edi
+    add esi, 2 + 4 + 1      ; "--cyan " = 7
+    mov bl, COLOR_CYAN
+    jmp .print
+.do_white:
+    pop edi
+    add esi, 2 + 5 + 1      ; "--white " = 8
+    mov bl, COLOR_WHITE
+    jmp .print
+.plain:
+    mov bl, COLOR_NORMAL
+.print:
+    call println
+    jmp process_command.done
+
+; ── sys — CPU vendor + bellek + disk ─────────────────────
+do_sys:
+    mov esi, sys_hdr
+    mov bl, COLOR_WARN
+    call println
+
+    ; CPU Vendor (CPUID leaf 0)
+    mov esi, sys_cpu
+    mov bl, COLOR_BRIGHT
+    call print_str
+
+    ; CPUID → EBX:EDX:ECX = vendor string (12 karakter)
+    xor eax, eax
+    cpuid
+    ; Vendor stringi: EBX, EDX, ECX sırasıyla (her biri 4 byte)
+    mov [cpu_vendor],    ebx
+    mov [cpu_vendor+4],  edx
+    mov [cpu_vendor+8],  ecx
+    mov byte [cpu_vendor+12], 0
+
+    mov esi, cpu_vendor
+    mov bl, COLOR_NORMAL
+    call println
+
+    ; CPU Marka (CPUID leaf 0x80000002-4)
+    mov esi, sys_cpu_brand
+    mov bl, COLOR_BRIGHT
+    call print_str
+
+    mov eax, 0x80000002
+    cpuid
+    mov [cpu_brand],    eax
+    mov [cpu_brand+4],  ebx
+    mov [cpu_brand+8],  ecx
+    mov [cpu_brand+12], edx
+    mov eax, 0x80000003
+    cpuid
     mov [cpu_brand+16], eax
     mov [cpu_brand+20], ebx
     mov [cpu_brand+24], ecx
