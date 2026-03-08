@@ -1,13 +1,12 @@
 ; ============================================================
-;  boot.asm — Stage 1 MBR Bootloader
-;  Görev: Stage 2'yi diskten yükle (sektör 2-9) ve zıpla
+; boot.asm - Stage 1 MBR Bootloader
 ; ============================================================
 [BITS 16]
 [ORG 0x7C00]
 
 STAGE2_LOAD_SEG equ 0x0000
 STAGE2_LOAD_OFF equ 0x7E00
-STAGE2_SECTORS  equ 16          ; 8 KB stage2 için
+STAGE2_SECTORS  equ 16
 
 start:
     cli
@@ -17,21 +16,21 @@ start:
     mov ss, ax
     mov sp, 0x7C00
     sti
-    mov [boot_drive], dl        ; BIOS boot diskini sakla
+    mov [boot_drive], dl
 
-    ; Ekranı temizle
+
     mov ax, 0x0003
     int 0x10
 
     mov si, msg_boot
     call print
 
-    ; ── Disk okuma (INT 13h LBA benzeri CHS) ──────────────
+    ; Load Stage 2
     mov ah, 0x02
     mov al, STAGE2_SECTORS
-    mov ch, 0x00                ; Silindir 0
-    mov cl, 0x02                ; Sektör 2'den başla
-    mov dh, 0x00                ; Kafa 0
+    mov ch, 0x00
+    mov cl, 0x02
+    mov dh, 0x00
     mov dl, [boot_drive]
     mov bx, STAGE2_LOAD_OFF
     int 0x13
