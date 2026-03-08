@@ -4,6 +4,7 @@
 #include "fs.h"
 #include "rtc.h"
 #include "editor.h"
+#include "memory_alloc.h"
 
 extern void outb(uint16_t port, uint8_t val);
 // (screen.c)
@@ -140,11 +141,16 @@ void execute_command(char* cmd) {
         vga_println("  cat    - Read file (cat <file>)");
         vga_println("  write  - Write to file (write <file> <text>)");
         vga_println("  edit   - Open file in NarcVim (edit <file>)");
+        vga_println("  mkdir  - Create directory (mkdir <name>)");
+        vga_println("  cd     - Change directory (cd <name> or cd ..)");
         vga_println("  rm     - Delete file (rm <file>)");
+        vga_println("  malloc_test - Test dynamic heap memory");
     } else if (strcmp(arg1, "clear") == 0) {
         clear_screen();
     } else if (strcmp(arg1, "mem") == 0) {
         print_memory_info();
+    } else if (strcmp(arg1, "malloc_test") == 0) {
+        malloc_test();
     } else if (strcmp(arg1, "ver") == 0) {
         vga_println("NarcOs");
     } else if (strcmp(arg1, "uptime") == 0) {
@@ -229,6 +235,24 @@ void execute_command(char* cmd) {
         clear_screen();
         vga_print_color("Exited NarcVim. ", 0x0A);
         vga_println(arg2);
+    } else if (strcmp(arg1, "mkdir") == 0) {
+        if (arg2[0] == '\0') {
+            vga_print_color("Usage: mkdir <name>\n", 0x0E);
+            return;
+        }
+        if (fs_create_dir(arg2) == 0) {
+            vga_println("Directory created.");
+        } else {
+            vga_print_color("error: Failed to create directory.\n", 0x0C);
+        }
+    } else if (strcmp(arg1, "cd") == 0) {
+        if (arg2[0] == '\0') {
+            vga_print_color("Usage: cd <name>\n", 0x0E);
+            return;
+        }
+        if (fs_change_dir(arg2) != 0) {
+            vga_print_color("error: Directory not found.\n", 0x0C);
+        }
     } else if (strcmp(arg1, "rm") == 0) {
         if (arg2[0] == '\0') {
             vga_print_color("Usage: rm <file>\n", 0x0E);
@@ -251,24 +275,42 @@ void execute_command(char* cmd) {
 extern char cmd_to_execute[128];
 extern volatile int cmd_ready;
 
+extern int current_dir_index;
+
+
+extern void get_current_dir_name(char* buf); // Define a helper in fs.c
+
+void print_prompt() {
+    vga_print_color("root@narc:", 0x0A);
+    vga_print_color("/", 0x0B);
+    
+    char dname[32];
+    get_current_dir_name(dname);
+    if (dname[0] != '\0') {
+        vga_print_color(dname, 0x0B);
+    }
+    vga_print_color("$ ", 0x0A);
+}
+
 void kmain() {
     init_pic();
     init_pit();
     load_idt();
     init_keyboard();
     init_fs();
+    init_heap();
     clear_screen();
 
     vga_print_color("\nNarcOs\n", 0x0B);
     vga_print_color("=====================================\n\n", 0x0B);
 
-    vga_print_color("root@narc:~$ ", 0x0A);
+    print_prompt();
 
     while (1) {
         if (cmd_ready) {
             execute_command(cmd_to_execute);
             cmd_ready = 0;
-            vga_print_color("root@narc:~$ ", 0x0A);
+            print_prompt();
         }
         else if (!snake_running) {
             asm volatile("hlt");
