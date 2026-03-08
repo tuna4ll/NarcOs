@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "string.h"
 #include "fs.h"
+#include "rtc.h"
+#include "editor.h"
 
 extern void outb(uint16_t port, uint8_t val);
 // (screen.c)
@@ -132,9 +134,12 @@ void execute_command(char* cmd) {
         vga_println("  snake  - Snake game");
         vga_println("  ver    - Show version");
         vga_println("  uptime - Show system uptime in seconds");
+        vga_println("  date   - Show current date (RTC)");
+        vga_println("  time   - Show current time (RTC)");
         vga_println("  ls     - List files");
         vga_println("  cat    - Read file (cat <file>)");
         vga_println("  write  - Write to file (write <file> <text>)");
+        vga_println("  edit   - Open file in NarcVim (edit <file>)");
         vga_println("  rm     - Delete file (rm <file>)");
     } else if (strcmp(arg1, "clear") == 0) {
         clear_screen();
@@ -145,6 +150,29 @@ void execute_command(char* cmd) {
     } else if (strcmp(arg1, "uptime") == 0) {
         vga_print("System Uptime (seconds): ");
         vga_print_int(timer_ticks / 100);
+        vga_println("");
+    } else if (strcmp(arg1, "date") == 0) {
+        read_rtc();
+        vga_print("Current Date: 20");
+        vga_print_int(get_year());
+        vga_print("-");
+        if (get_month() < 10) vga_print("0");
+        vga_print_int(get_month());
+        vga_print("-");
+        if (get_day() < 10) vga_print("0");
+        vga_print_int(get_day());
+        vga_println("");
+    } else if (strcmp(arg1, "time") == 0) {
+        read_rtc();
+        vga_print("Current Time: ");
+        if (get_hour() < 10) vga_print("0");
+        vga_print_int(get_hour());
+        vga_print(":");
+        if (get_minute() < 10) vga_print("0");
+        vga_print_int(get_minute());
+        vga_print(":");
+        if (get_second() < 10) vga_print("0");
+        vga_print_int(get_second());
         vga_println("");
     } else if (strcmp(arg1, "snake") == 0) {
         snake_main();
@@ -192,6 +220,15 @@ void execute_command(char* cmd) {
         } else {
             vga_print_color("error: Failed to create file or not enough space.\n", 0x0C);
         }
+    } else if (strcmp(arg1, "edit") == 0) {
+        if (arg2[0] == '\0') {
+            vga_print_color("Usage: edit <file>\n", 0x0E);
+            return;
+        }
+        editor_start(arg2);
+        clear_screen();
+        vga_print_color("Exited NarcVim. ", 0x0A);
+        vga_println(arg2);
     } else if (strcmp(arg1, "rm") == 0) {
         if (arg2[0] == '\0') {
             vga_print_color("Usage: rm <file>\n", 0x0E);

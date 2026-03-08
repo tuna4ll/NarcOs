@@ -54,6 +54,10 @@ void init_keyboard()
 extern volatile int snake_running;
 extern volatile int snake_next_dir;
 
+extern volatile int editor_running;
+extern volatile int editor_input_key;
+extern volatile int editor_special_key;
+
 
 void handle_keyboard()
 {
@@ -83,6 +87,31 @@ void handle_keyboard()
         return;
     }
 
+    if (editor_running) {
+        int is_shift = lshift_pressed || rshift_pressed;
+        char c = is_shift ? scancode_map_shift[scancode] : scancode_map[scancode];
+        
+        switch (scancode) {
+            case 0x48: editor_special_key = 1; break;
+            case 0x50: editor_special_key = 2; break;
+            case 0x4B: editor_special_key = 3; break;
+            case 0x4D: editor_special_key = 4; break;
+            case 0x0E: editor_special_key = 5; break;
+            case 0x1C: editor_special_key = 6; break;
+            case 0x1F: if (lshift_pressed == 0 && rshift_pressed == 0 && c != 'S') editor_special_key = 7; else editor_input_key = c; break;
+            case 0x3C: editor_special_key = 7; break;
+            case 0x01: editor_special_key = 8; break;
+            default:
+                if (c != 0) {
+                    if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
+                    else if (capslock_active && c >= 'A' && c <= 'Z') c += 32;
+                    editor_input_key = c;
+                }
+                break;
+        }
+        outb(0x20, 0x20);
+        return;
+    }
 
     if      (scancode == 0x2A) lshift_pressed  = 1;
     else if (scancode == 0x36) rshift_pressed  = 1;
