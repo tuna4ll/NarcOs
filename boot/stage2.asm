@@ -9,6 +9,8 @@ KERNEL_LBA      equ 18
 KERNEL_SECTORS  equ 256
 
 stage2_main:
+    mov [boot_drive], dl
+
     mov si, msg_s2
     call print16
 
@@ -76,7 +78,7 @@ load_kernel:
 
 .read_loop:
     mov ah, 0x42
-    mov dl, 0x80
+    mov dl, [boot_drive]
     mov si, dap
     int 0x13
     jnc .ok
@@ -84,7 +86,7 @@ load_kernel:
     dec byte [disk_retry]
     jz .err
     mov ah, 0x00
-    mov dl, 0x80
+    mov dl, [boot_drive]
     int 0x13
     jmp .read_loop
 
@@ -120,6 +122,7 @@ dap_lba_hi:
 
 sectors_left  dw KERNEL_SECTORS
 disk_retry    db 3
+boot_drive    db 0
 
 print16:
     lodsb

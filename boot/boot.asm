@@ -38,6 +38,7 @@ start:
 
     mov si, msg_ok
     call print
+    mov dl, [boot_drive]
     jmp STAGE2_LOAD_SEG:STAGE2_LOAD_OFF
 
 .disk_err:
