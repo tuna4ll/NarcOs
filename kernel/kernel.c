@@ -1,37 +1,40 @@
-
 #include <stdint.h>
 #include "string.h"
 #include "fs.h"
 #include "rtc.h"
 #include "editor.h"
 #include "memory_alloc.h"
+#include "vbe.h"
+#include "mouse.h"
 
 extern void outb(uint16_t port, uint8_t val);
-// (screen.c)
 extern void clear_screen();
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
 extern void vga_print_int(int num);
+extern void vga_set_window_pos(int x, int y);
+extern int vga_get_window_x();
+extern int vga_get_window_y();
+extern int vga_get_window_w();
+extern int vga_get_window_h();
+extern int vga_get_title_h();
+extern void vga_refresh_window();
+extern void* vga_get_window_buffer();
 
-// (keyboard.c)
 extern void init_keyboard();
 
-// (memory.c)
 extern void print_memory_info();
 
-// (snake.c)
 extern void snake_main();
 extern int snake_running;
 
-// --- IDT and Interrupt Subsystem ---
-
 typedef struct {
-    uint16_t isr_low;      // ISR Address Low 16-bit
-    uint16_t kernel_cs;    // Kernel Code Segment (GDT Selector)
-    uint8_t  reserved;     // 0
-    uint8_t  attributes;   // Type and Attributes
-    uint16_t isr_high;     // ISR Address High 16-bit
+    uint16_t isr_low;
+    uint16_t kernel_cs;
+    uint8_t  reserved;
+    uint8_t  attributes;
+    uint16_t isr_high;
 } __attribute__((packed)) idt_entry_t;
 
 typedef struct {
@@ -47,26 +50,27 @@ volatile uint32_t timer_ticks = 0;
 extern void isr_default();
 extern void irq0_timer();
 extern void irq1_keyboard();
+extern void irq12_mouse();
 
 void set_idt_gate(int n, uint32_t handler) {
     idt[n].isr_low = (uint16_t)(handler & 0xFFFF);
-    idt[n].kernel_cs = 0x08; // GDT'deki kod segment selector (bknz stage2.asm)
+    idt[n].kernel_cs = 0x08;
     idt[n].reserved = 0;
-    idt[n].attributes = 0x8E; // Interrupt Gate, Ring 0, Present
+    idt[n].attributes = 0x8E;
     idt[n].isr_high = (uint16_t)((handler >> 16) & 0xFFFF);
 }
 
 void init_pic() {
     outb(0x20, 0x11);
     outb(0xA0, 0x11);
-    outb(0x21, 0x20); // Master PIC Vector Offset (0x20 = 32)
-    outb(0xA1, 0x28); // Slave PIC Vector Offset (0x28 = 40)
+    outb(0x21, 0x20);
+    outb(0xA1, 0x28);
     outb(0x21, 0x04);
     outb(0xA1, 0x02);
     outb(0x21, 0x01);
     outb(0xA1, 0x01);
-    outb(0x21, 0xFC); 
-    outb(0xA1, 0xFF); 
+    outb(0x21, 0xF8);
+    outb(0xA1, 0xEF);
 }
 
 void init_pit() {
@@ -80,53 +84,42 @@ void init_pit() {
 void load_idt() {
     idtr.base = (uint32_t)&idt;
     idtr.limit = 256 * sizeof(idt_entry_t) - 1;
-
     for (int i = 0; i < 256; i++) {
         set_idt_gate(i, (uint32_t)isr_default);
     }
-
     set_idt_gate(32, (uint32_t)irq0_timer);
     set_idt_gate(33, (uint32_t)irq1_keyboard);
-
+    set_idt_gate(44, (uint32_t)irq12_mouse);
     asm volatile("lidt %0" : : "m"(idtr));
-    asm volatile("sti"); // Interruptlari Ac
+    asm volatile("sti");
 }
 
-// Timer C Handler
 void handle_timer() {
     timer_ticks++;
-    // EOI (End of Interrupt) 
     outb(0x20, 0x20);
 }
 
 void isr_handler_default() {
-    outb(0x20, 0x20); // Master EOI
-    outb(0xA0, 0x20); // Slave EOI
+    outb(0x20, 0x20);
+    outb(0xA0, 0x20);
 }
-
 
 void execute_command(char* cmd) {
     if (cmd[0] == '\0') return;
-
     char arg1[32] = {0};
     char arg2[128] = {0};
     int i = 0, j = 0;
-    
     while (cmd[i] != ' ' && cmd[i] != '\0' && i < 31) {
         arg1[i] = cmd[i];
         i++;
     }
     arg1[i] = '\0';
-    
     while (cmd[i] == ' ') i++;
-    
     while (cmd[i] != '\0' && j < 127) {
         arg2[j] = cmd[i];
         i++; j++;
     }
     arg2[j] = '\0';
-
-
     if (strcmp(arg1, "help") == 0) {
         vga_println("NarcOs Shell");
         vga_println("  help   - Show this menu");
@@ -202,25 +195,19 @@ void execute_command(char* cmd) {
             vga_print_color("Usage: write <file> <text>\n", 0x0E);
             return;
         }
-        
         char file_name[32] = {0};
         int k = 0;
-        
         while(arg2[k] != ' ' && arg2[k] != '\0' && k < 31) {
             file_name[k] = arg2[k];
             k++;
         }
         file_name[k] = '\0';
-        
         while (arg2[k] == ' ') k++;
-        
         char* file_content = &arg2[k];
-        
         if (file_content[0] == '\0') {
             vga_print_color("hata: Metin bos olamaz.\n", 0x0C);
             return;
         }
-        
         if (fs_write_file(file_name, file_content) == 0) {
             vga_println("Success.");
         } else {
@@ -270,20 +257,14 @@ void execute_command(char* cmd) {
     }
 }
 
-
-// Keyboard Variables
 extern char cmd_to_execute[128];
 extern volatile int cmd_ready;
-
 extern int current_dir_index;
-
-
-extern void get_current_dir_name(char* buf); // Define a helper in fs.c
+extern void get_current_dir_name(char* buf);
 
 void print_prompt() {
     vga_print_color("root@narc:", 0x0A);
     vga_print_color("/", 0x0B);
-    
     char dname[32];
     get_current_dir_name(dname);
     if (dname[0] != '\0') {
@@ -299,21 +280,87 @@ void kmain() {
     init_keyboard();
     init_fs();
     init_heap();
+    init_vbe();
+    init_mouse();
     clear_screen();
-
-    vga_print_color("\nNarcOs\n", 0x0B);
-    vga_print_color("=====================================\n\n", 0x0B);
-
+    vga_print_color("\n  NarcOs GUI Initialized.\n", 0x0B);
+    vga_print_color("  ========================\n", 0x0B);
+    vga_println("  Welcome to NarcOs Desktop!");
     print_prompt();
-
+    vga_print("  Video Mode: ");
+    vga_print_int(vbe_get_width());
+    vga_print("x");
+    vga_print_int(vbe_get_height());
+    vga_print(" @ ");
+    vga_print_int(vbe_get_bpp());
+    vga_println("bpp");
+    int last_mx = -1, last_my = -1;
+    int last_lp = -1;
+    int last_wx = -1, last_wy = -1;
+    int dragging = 0;
+    int drag_off_x = 0;
+    int drag_off_y = 0;
+    int mx = get_mouse_x();
+    int my = get_mouse_y();
+    int lp = mouse_left_pressed();
+    int wx = vga_get_window_x();
+    int wy = vga_get_window_y();
+    vga_refresh_window();
+    vbe_compose_scene(wx, wy); 
     while (1) {
+        mx = get_mouse_x();
+        my = get_mouse_y();
+        lp = mouse_left_pressed();
+        wx = vga_get_window_x();
+        wy = vga_get_window_y();
+        if (lp && !dragging) {
+            int th = vga_get_title_h();
+            if (mx >= wx && mx <= wx + vga_get_window_w() && my >= wy && my <= wy + th) {
+                dragging = 1;
+                drag_off_x = mx - wx;
+                drag_off_y = my - wy;
+            }
+        } else if (!lp) {
+            dragging = 0;
+        }
+        if (dragging) {
+            int new_wx = mx - drag_off_x;
+            int new_wy = my - drag_off_y;
+            if (new_wx < 0) new_wx = 0;
+            if (new_wy < 0) new_wy = 0;
+            if (new_wx > (int)vbe_get_width() - 50) new_wx = vbe_get_width() - 50;
+            if (new_wy > (int)vbe_get_height() - 50) new_wy = vbe_get_height() - 50;
+            if (new_wx != wx || new_wy != wy) {
+                vga_set_window_pos(new_wx, new_wy);
+                wx = new_wx;
+                wy = new_wy;
+                gui_needs_redraw = 1;
+            }
+        }
+        if (mx != last_mx || my != last_my || lp != last_lp || wx != last_wx || wy != last_wy || gui_needs_redraw || cmd_ready) {
+            if (wx != last_wx || wy != last_wy || gui_needs_redraw || cmd_ready) {
+                vbe_compose_scene(wx, wy);
+                vbe_prepare_frame_from_composition();
+                vbe_render_mouse(mx, my);
+                wait_vsync();
+                vbe_update();
+            } else {
+                wait_vsync();
+                if (last_mx != -1) {
+                    vbe_blit_rect(last_mx, last_my, 12, 12, (uint8_t*)0x2000000, vbe_get_width()); 
+                }
+                vbe_render_mouse_direct(mx, my);
+            }
+            last_mx = mx; last_my = my;
+            last_lp = lp; last_wx = wx; last_wy = wy;
+            gui_needs_redraw = 0;
+        }
         if (cmd_ready) {
             execute_command(cmd_to_execute);
             cmd_ready = 0;
             print_prompt();
         }
-        else if (!snake_running) {
-            asm volatile("hlt");
+        else if (!snake_running && !dragging) {
         }
     }
 }
