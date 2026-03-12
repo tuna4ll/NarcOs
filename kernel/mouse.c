@@ -77,8 +77,8 @@ void handle_mouse() {
         mouse_y -= y_rel;
         if (mouse_x < 0) mouse_x = 0;
         if (mouse_y < 0) mouse_y = 0;
-        if (mouse_x > 1012) mouse_x = 1012; 
-        if (mouse_y > 756) mouse_y = 756; 
+        if (mouse_x > (int)vbe_get_width()) mouse_x = vbe_get_width(); 
+        if (mouse_y > (int)vbe_get_height()) mouse_y = vbe_get_height(); 
     }
     outb(0x20, 0x20);
     outb(0xA0, 0x20);
