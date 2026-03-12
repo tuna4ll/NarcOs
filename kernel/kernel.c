@@ -297,11 +297,15 @@ void kmain() {
     int last_mx = -1, last_my = -1;
     int last_lp = -1;
     int last_wx = -1, last_wy = -1;
-    int dragging = 0, exp_dragging = 0;
+    int dragging = 0, exp_dragging = 0, pad_dragging = 0;
     int drag_off_x = 0, drag_off_y = 0;
     extern int win_visible;
+    extern disk_fs_node_t dir_cache[MAX_FILES];
     int start_menu_visible = 0;
     int exp_visible = 0, exp_x = 200, exp_y = 150, exp_cur_dir = -1;
+    int pad_visible = 0, pad_x = 250, pad_y = 200;
+    char pad_title[32] = "NarcPad";
+    char pad_content[1024] = {0};
     uint32_t last_clock_tick = 0;
     uint32_t last_click_tick = 0;
     int mx = get_mouse_x();
@@ -310,7 +314,7 @@ void kmain() {
     int wx = vga_get_window_x();
     int wy = vga_get_window_y();
     vga_refresh_window();
-    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir); 
+    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content); 
     while (1) {
         mx = get_mouse_x();
         my = get_mouse_y();
@@ -321,18 +325,40 @@ void kmain() {
             int double_click = (timer_ticks - last_click_tick < 40);
             last_click_tick = timer_ticks;
             if (my <= 35) {
-                if (mx >= 5 && mx <= 75) {
-                    start_menu_visible = !start_menu_visible;
-                    gui_needs_redraw = 1;
-                } else if (mx >= 80 && mx <= 170) {
-                    win_visible = !win_visible;
-                    start_menu_visible = 0;
-                    gui_needs_redraw = 1;
+                if (mx >= 5 && mx <= 75) { start_menu_visible = !start_menu_visible; gui_needs_redraw = 1; }
+                else if (mx >= 80 && mx <= 170) { win_visible = !win_visible; start_menu_visible = 0; gui_needs_redraw = 1; }
+            } else if (pad_visible && mx >= pad_x && mx <= pad_x + 500 && my >= pad_y && my <= pad_y + 400) {
+                if (my <= pad_y + 25) {
+                    if (mx >= pad_x + 500 - 25) { pad_visible = 0; gui_needs_redraw = 1; }
+                    else { pad_dragging = 1; drag_off_x = mx - pad_x; drag_off_y = my - pad_y; }
                 }
             } else if (exp_visible && mx >= exp_x && mx <= exp_x + 600 && my >= exp_y && my <= exp_y + 400) {
                 if (my <= exp_y + 25) {
                     if (mx >= exp_x + 600 - 25) { exp_visible = 0; gui_needs_redraw = 1; }
                     else { exp_dragging = 1; drag_off_x = mx - exp_x; drag_off_y = my - exp_y; }
+                } else if (my <= exp_y + 45) {
+                    if (mx >= exp_x + 5 && mx <= exp_x + 70) { exp_cur_dir = -1; gui_needs_redraw = 1; }
+                } else if (double_click) {
+                    int ix = (mx - (exp_x + 20)) / 80;
+                    int iy = (my - (exp_y + 55)) / 70;
+                    if (ix >= 0 && ix < 8 && iy >= 0) {
+                        int hit_idx = -1, cur_item = 0;
+                        int target_item = iy * 8 + ix;
+                        for (int i = 0; i < MAX_FILES; i++) {
+                            if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == exp_cur_dir) {
+                                if (cur_item == target_item) { hit_idx = i; break; }
+                                cur_item++;
+                            }
+                        }
+                        if (hit_idx != -1) {
+                            if (dir_cache[hit_idx].flags == 2) { exp_cur_dir = hit_idx; gui_needs_redraw = 1; }
+                            else {
+                                strncpy(pad_title, dir_cache[hit_idx].name, 31);
+                                fs_read_file(dir_cache[hit_idx].name, pad_content, 1023);
+                                pad_visible = 1; gui_needs_redraw = 1;
+                            }
+                        }
+                    }
                 }
             } else if (win_visible && mx >= wx && mx <= wx + vga_get_window_w() && my >= wy && my <= wy + 475) {
                 if (my <= wy + vga_get_title_h()) {
@@ -348,7 +374,7 @@ void kmain() {
                 }
             }
         } else if (!lp) {
-            dragging = 0; exp_dragging = 0;
+            dragging = 0; exp_dragging = 0; pad_dragging = 0;
         }
         if (dragging && win_visible) {
             int new_wx = mx - drag_off_x, new_wy = my - drag_off_y;
@@ -362,11 +388,17 @@ void kmain() {
             if (exp_y < 35) exp_y = 35;
             gui_needs_redraw = 1;
         }
+        if (pad_dragging && pad_visible) {
+            pad_x = mx - drag_off_x; pad_y = my - drag_off_y;
+            if (pad_x < 0) pad_x = 0; 
+            if (pad_y < 35) pad_y = 35;
+            gui_needs_redraw = 1;
+        }
         if (timer_ticks - last_clock_tick >= 100) {
             read_rtc(); last_clock_tick = timer_ticks; gui_needs_redraw = 1;
         }
         if (mx != last_mx || my != last_my || lp != last_lp || wx != last_wx || wy != last_wy || gui_needs_redraw || cmd_ready) {
-            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir);
+            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content);
             vbe_prepare_frame_from_composition();
             vbe_render_mouse(mx, my);
             wait_vsync();

@@ -379,7 +379,36 @@ uint32_t vbe_get_bpp()    { return mode_info->bpp; }
 
 void* vbe_get_window_buffer() { return window_buffer; }
 
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir) {
+void vbe_draw_breadcrumb(int x, int y, int current_dir) {
+    vbe_fill_rect(x, y, 600, 20, 0x222222);
+    vbe_draw_string(x + 5, y + 5, "Path: /", 0xAAAAAA);
+    if (current_dir != -1) {
+        vbe_draw_string(x + 55, y + 5, dir_cache[current_dir].name, 0xFFFFFF);
+    }
+}
+void vbe_draw_narcpad(int x, int y, const char* title, const char* content) {
+    vbe_fill_rect(x, y, 500, 400, 0xFCFCFC);
+    vbe_draw_rect(x, y, 500, 400, 0x888888);
+    vbe_fill_rect(x, y, 500, 25, 0xDDDDDD);
+    vbe_draw_string(x + 10, y + 5, title, 0x333333);
+    vbe_fill_rect(x + 500 - 20, y + 5, 12, 12, 0xFF5555);
+    int line_y = y + 40;
+    char line_buf[55];
+    int char_idx = 0;
+    while (*content && line_y < y + 380) {
+        if (*content == '\n' || char_idx == 54) {
+            line_buf[char_idx] = '\0';
+            vbe_draw_string(x + 15, line_y, line_buf, 0x000000);
+            line_y += 15;
+            char_idx = 0;
+            if (*content == '\n') { content++; continue; }
+        }
+        line_buf[char_idx++] = *content++;
+    }
+    line_buf[char_idx] = '\0';
+    if (char_idx > 0) vbe_draw_string(x + 15, line_y, line_buf, 0x000000);
+}
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
@@ -396,8 +425,10 @@ void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, 
         vbe_fill_rect(exp_x, exp_y, 600, 25, 0x333333);
         vbe_draw_string(exp_x + 10, exp_y + 5, "NarcExplorer", 0xFFFFFF);
         vbe_fill_rect(exp_x + 600 - 20, exp_y + 5, 12, 12, 0xFF5555);
-        vbe_draw_explorer_content(exp_x, exp_y, exp_dir);
+        vbe_draw_breadcrumb(exp_x, exp_y + 25, exp_dir);
+        vbe_draw_explorer_content(exp_x, exp_y + 15, exp_dir);
     }
+    if (pad_vis) vbe_draw_narcpad(pad_x, pad_y, pad_title, pad_content);
     vbe_draw_taskbar(start_vis);
     if (start_vis) vbe_draw_start_menu();
     vbe_draw_clock();
