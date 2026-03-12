@@ -14,6 +14,13 @@ int  input_pos  = 0;
 volatile int cmd_ready = 0;
 char cmd_to_execute[INPUT_BUF_SIZE];
 
+/* Command History */
+#define HISTORY_MAX 10
+char history[HISTORY_MAX][INPUT_BUF_SIZE];
+int history_count = 0;
+int history_current_idx = -1; // Current browsing position in history
+int history_write_idx = 0;    // Where to write the next command
+
 
 int lshift_pressed  = 0;
 int rshift_pressed  = 0;
@@ -127,12 +134,100 @@ void handle_keyboard()
         vga_newline();
         input_buf[input_pos] = '\0';
 
+        if (input_pos > 0) {
+            // Save to history
+            int last_idx = (history_write_idx + HISTORY_MAX - 1) % HISTORY_MAX;
+            // Don't save if it's the same as the last command
+            int is_same = 0;
+            if (history_count > 0) {
+                int k = 0;
+                is_same = 1;
+                while (input_buf[k] != '\0' || history[last_idx][k] != '\0') {
+                    if (input_buf[k] != history[last_idx][k]) {
+                        is_same = 0;
+                        break;
+                    }
+                    k++;
+                }
+            }
+
+            if (!is_same) {
+                int k = 0;
+                while (input_buf[k] != '\0' && k < INPUT_BUF_SIZE - 1) {
+                    history[history_write_idx][k] = input_buf[k];
+                    k++;
+                }
+                history[history_write_idx][k] = '\0';
+                history_write_idx = (history_write_idx + 1) % HISTORY_MAX;
+                if (history_count < HISTORY_MAX) history_count++;
+            }
+        }
+        history_current_idx = -1; // Reset history browser
+
         for (int i = 0; i < INPUT_BUF_SIZE; i++)
             cmd_to_execute[i] = input_buf[i];
 
         cmd_ready = 1;
         input_pos = 0;
         for (int i = 0; i < INPUT_BUF_SIZE; i++) input_buf[i] = 0;
+    }
+    else if (scancode == 0x48) { // Up Arrow
+        if (history_count > 0) {
+            if (history_current_idx == -1) {
+                history_current_idx = (history_write_idx + HISTORY_MAX - 1) % HISTORY_MAX;
+            } else {
+                int next_back = (history_current_idx + HISTORY_MAX - 1) % HISTORY_MAX;
+                // Don't go back further than what we have
+                int oldest_idx = history_count < HISTORY_MAX ? 0 : history_write_idx;
+                if (history_current_idx != oldest_idx) {
+                    history_current_idx = next_back;
+                }
+            }
+
+            // Clear current line
+            while (input_pos > 0) {
+                input_pos--;
+                vga_backspace();
+            }
+
+            // Load from history
+            int k = 0;
+            while (history[history_current_idx][k] != '\0') {
+                char c = history[history_current_idx][k];
+                input_buf[input_pos++] = c;
+                vga_putchar(c);
+                k++;
+            }
+            input_buf[input_pos] = '\0';
+        }
+    }
+    else if (scancode == 0x50) { // Down Arrow
+        if (history_current_idx != -1) {
+            int next_forward = (history_current_idx + 1) % HISTORY_MAX;
+            
+            // Clear current line
+            while (input_pos > 0) {
+                input_pos--;
+                vga_backspace();
+            }
+
+            if (next_forward == history_write_idx) {
+                // Return to empty prompt
+                history_current_idx = -1;
+                input_pos = 0;
+                input_buf[0] = '\0';
+            } else {
+                history_current_idx = next_forward;
+                int k = 0;
+                while (history[history_current_idx][k] != '\0') {
+                    char c = history[history_current_idx][k];
+                    input_buf[input_pos++] = c;
+                    vga_putchar(c);
+                    k++;
+                }
+                input_buf[input_pos] = '\0';
+            }
+        }
     }
     else {
         int  is_shift = lshift_pressed || rshift_pressed;
