@@ -45,7 +45,7 @@ void init_fs() {
         fs_write_file("readme.txt", "NarcFS Driver Active!\nThis file is persistent.\nTry writing to me.\n");
     }
 }
-static int _fs_find_file(const char* name, int type) {
+static int _fs_find_file(const char* name, uint32_t type) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags == type && dir_cache[i].parent_index == current_dir_index && strcmp(dir_cache[i].name, name) == 0) {
             return i;
