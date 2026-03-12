@@ -49,8 +49,14 @@ extern volatile int snake_next_dir;
 extern volatile int editor_running;
 extern volatile int editor_input_key;
 extern volatile int editor_special_key;
+extern int win_visible;
 void handle_keyboard()
 {
+    if (!win_visible && !snake_running && !editor_running) {
+        uint8_t scancode = inb(0x60);
+        outb(0x20, 0x20);
+        return;
+    }
     uint8_t scancode = inb(0x60);
     if (scancode & 0x80) {
         uint8_t key = scancode & 0x7F;

@@ -6,6 +6,7 @@
 #define WIN_TITLE_H 25
 static int win_x = 150;
 static int win_y = 120;
+int win_visible = 0;
 void vga_set_window_pos(int x, int y) {
     win_x = x;
     win_y = y;

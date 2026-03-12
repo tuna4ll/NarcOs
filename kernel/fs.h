@@ -4,6 +4,14 @@
 #include <stddef.h>
 #define MAX_FILES 16
 #define MAX_FILE_SIZE 512
+typedef struct {
+    char name[32];
+    uint32_t size;
+    uint32_t lba;
+    uint32_t flags;
+    int32_t  parent_index; 
+    uint8_t  reserved[16];
+} __attribute__((packed)) disk_fs_node_t;
 void init_fs();
 int fs_create_file(const char* name);
 int fs_create_dir(const char* name);

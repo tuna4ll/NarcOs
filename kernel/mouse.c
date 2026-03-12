@@ -73,12 +73,16 @@ void handle_mouse() {
         int y_rel = (int)mouse_packet[2];
         if (mouse_packet[0] & 0x10) x_rel |= 0xFFFFFF00;
         if (mouse_packet[0] & 0x20) y_rel |= 0xFFFFFF00;
-        mouse_x += x_rel;
-        mouse_y -= y_rel;
-        if (mouse_x < 0) mouse_x = 0;
-        if (mouse_y < 0) mouse_y = 0;
-        if (mouse_x > (int)vbe_get_width()) mouse_x = vbe_get_width(); 
-        if (mouse_y > (int)vbe_get_height()) mouse_y = vbe_get_height(); 
+        int new_x = mouse_x + x_rel;
+        int new_y = mouse_y - y_rel;
+        int max_w = (int)vbe_get_width();
+        int max_h = (int)vbe_get_height();
+        if (new_x < 0) new_x = 0;
+        if (new_y < 0) new_y = 0;
+        if (new_x >= max_w) new_x = max_w - 1;
+        if (new_y >= max_h) new_y = max_h - 1;
+        mouse_x = new_x;
+        mouse_y = new_y;
     }
     outb(0x20, 0x20);
     outb(0xA0, 0x20);

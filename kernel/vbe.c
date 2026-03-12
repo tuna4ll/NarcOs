@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "vbe.h"
+#include "string.h"
 typedef struct {
     uint16_t attributes;
     uint8_t  win_a, win_b;
@@ -114,6 +115,24 @@ uint16_t mouse_cursor_bitmap[12] = {
     0b110000000000, 0b111000000000, 0b111100000000, 0b111110000000,
     0b111111000000, 0b111111100000, 0b111111110000, 0b111111111000,
     0b111111111100, 0b111111000000, 0b110111000000, 0b100011000000
+};
+uint16_t folder_icon_bitmap[16] = {
+    0b0111100000000000, 0b1111110000000000, 0b1111111111111110, 0b1111111111111110,
+    0b1100000000000010, 0b1100000000000010, 0b1100000000000010, 0b1100000000000010,
+    0b1100000000000010, 0b1100000000000010, 0b1100000000000010, 0b1100000000000010,
+    0b1111111111111110, 0b1111111111111110, 0b0000000000000000, 0b0000000000000000
+};
+uint16_t file_icon_bitmap[16] = {
+    0b0011111111110000, 0b0011111111111000, 0b0011111111111100, 0b0011111100111110,
+    0b0011111100011110, 0b0011111100001110, 0b0011111111111110, 0b0011111111111110,
+    0b0011111111111110, 0b0011111111111110, 0b0011111111111110, 0b0011111111111110,
+    0b0011111111111110, 0b0011111111111110, 0b0000000000000000, 0b0000000000000000
+};
+uint16_t pc_icon_bitmap[16] = {
+    0b1111111111111111, 0b1111111111111111, 0b1100000000000011, 0b1100000000000011,
+    0b1100001111000011, 0b1100001111000011, 0b1100000000000011, 0b1100000000000011,
+    0b1111111111111111, 0b1111111111111111, 0b0000001111000000, 0b0000001111000000,
+    0b0001111111111000, 0b0001111111111000, 0b0000000000000000, 0b0000000000000000
 };
 
 void* vbe_get_backbuffer() { return backbuffer; }
@@ -264,6 +283,84 @@ void vbe_fill_rect(int x, int y, int w, int h, uint32_t color) {
         for (int j = 0; j < w; j++) vbe_put_pixel(x + j, y + i, color);
     }
 }
+void vbe_draw_taskbar(int start_btn_active) {
+    uint32_t w = mode_info->width;
+    uint32_t tb_h = 35;
+    for (uint32_t i = 0; i < tb_h; i++) {
+        uint32_t color = (20 << 16) | (20 << 8) | 30; 
+        vbe_fill_rect(0, i, w, 1, color);
+    }
+    vbe_fill_rect(0, tb_h - 1, w, 1, 0x444444);
+    uint32_t btn_color = start_btn_active ? 0x00AAFF : 0x222222;
+    vbe_fill_rect(5, 3, 70, 28, btn_color);
+    vbe_draw_string(15, 12, "NARC", 0xFFFFFF);
+    vbe_fill_rect(80, 3, 90, 28, 0x333333);
+    vbe_draw_string(90, 12, "TERMINAL", 0xAAAAAA);
+}
+void vbe_draw_start_menu() {
+    vbe_fill_rect(5, 35, 200, 300, 0x111111);
+    vbe_draw_rect(5, 35, 200, 300, 0x444444);
+    vbe_draw_string(20, 50, "APPLICATIONS", 0x00AAFF);
+    vbe_draw_string(20, 80, "> Terminal", 0xFFFFFF);
+    vbe_draw_string(20, 100, "> Snake", 0xFFFFFF);
+    vbe_draw_string(20, 120, "> NarcVim", 0xFFFFFF);
+    vbe_fill_rect(5, 280, 200, 1, 0x333333);
+    vbe_draw_string(20, 300, "SYSTEM INFO", 0x00AAFF);
+    vbe_draw_string(20, 320, "NarcOs v1.0", 0xAAAAAA);
+}
+extern uint8_t get_hour();
+extern uint8_t get_minute();
+extern uint8_t get_second();
+void vbe_draw_clock() {
+    uint32_t w = mode_info->width;
+    char time_str[9];
+    uint8_t hh = get_hour();
+    uint8_t mm = get_minute();
+    uint8_t ss = get_second();
+    time_str[0] = (hh / 10) + '0'; time_str[1] = (hh % 10) + '0'; time_str[2] = ':';
+    time_str[3] = (mm / 10) + '0'; time_str[4] = (mm % 10) + '0'; time_str[5] = ':';
+    time_str[6] = (ss / 10) + '0'; time_str[7] = (ss % 10) + '0'; time_str[8] = '\0';
+    vbe_draw_string(w - 90, 12, time_str, 0x00FF00);
+}
+void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
+    uint16_t* bitmap;
+    uint32_t color;
+    if (type == 0) { bitmap = folder_icon_bitmap; color = 0xFFAA00; }
+    else if (type == 1) { bitmap = file_icon_bitmap; color = 0xAAAAAA; }
+    else { bitmap = pc_icon_bitmap; color = 0x00AAFF; }
+    if (selected) vbe_fill_rect(x - 5, y - 5, 40, 50, (60 << 16) | (60 << 8) | 80);
+    for (int i = 0; i < 16; i++) {
+        for (int j = 0; j < 16; j++) {
+            if (bitmap[i] & (1 << (15 - j))) {
+                vbe_put_pixel(x + j * 2, y + i * 2, color);
+                vbe_put_pixel(x + j * 2 + 1, y + i * 2, color);
+                vbe_put_pixel(x + j * 2, y + i * 2 + 1, color);
+                vbe_put_pixel(x + j * 2 + 1, y + i * 2 + 1, color);
+            }
+        }
+    }
+    int label_x = x + 16 - (strlen(label) * 9) / 2;
+    vbe_draw_string(label_x, y + 35, label, 0xFFFFFF);
+}
+#include "fs.h"
+extern disk_fs_node_t dir_cache[MAX_FILES];
+void vbe_draw_explorer_content(int wx, int wy, int current_dir) {
+    int x_off = 20, y_off = 40;
+    int col = 0;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == current_dir) {
+            int type = (dir_cache[i].flags == 2) ? 0 : 1;
+            vbe_draw_icon(wx + x_off + col * 80, wy + y_off, type, dir_cache[i].name, 0);
+            col++;
+            if (col > 7) { col = 0; y_off += 70; }
+        }
+    }
+}
+void vbe_draw_desktop_icons() {
+    vbe_draw_icon(20, 60, 2, "This PC", 0);
+    vbe_draw_icon(20, 140, 1, "Terminal", 0);
+    vbe_draw_icon(20, 220, 0, "Users", 0);
+}
 
 void vbe_draw_rect(int x, int y, int w, int h, uint32_t color) {
     for (int j = 0; j < w; j++) {
@@ -282,14 +379,30 @@ uint32_t vbe_get_bpp()    { return mode_info->bpp; }
 
 void* vbe_get_window_buffer() { return window_buffer; }
 
-void vbe_compose_scene(int wx, int wy) {
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
+    uint8_t* old_target = current_target;
+    uint32_t old_width = current_target_width;
+    vbe_set_target(composition_buffer, mode_info->width);
+    vbe_draw_desktop_icons();
     uint8_t* old_back = backbuffer;
     backbuffer = composition_buffer;
-    vbe_blit_window(wx, wy, 700, 475, window_buffer);
+    if (win_vis) vbe_blit_window(wx, wy, 700, 475, window_buffer);
+    if (exp_vis) {
+        vbe_fill_rect(exp_x, exp_y, 600, 400, 0x111111);
+        vbe_draw_rect(exp_x, exp_y, 600, 400, 0x444444);
+        vbe_fill_rect(exp_x, exp_y, 600, 25, 0x333333);
+        vbe_draw_string(exp_x + 10, exp_y + 5, "NarcExplorer", 0xFFFFFF);
+        vbe_fill_rect(exp_x + 600 - 20, exp_y + 5, 12, 12, 0xFF5555);
+        vbe_draw_explorer_content(exp_x, exp_y, exp_dir);
+    }
+    vbe_draw_taskbar(start_vis);
+    if (start_vis) vbe_draw_start_menu();
+    vbe_draw_clock();
     backbuffer = old_back;
+    vbe_set_target(old_target, old_width);
     gui_needs_redraw = 0;
 }
 

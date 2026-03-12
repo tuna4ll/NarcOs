@@ -6,14 +6,6 @@ extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
 extern void vga_print_int(int num);
 #define DIR_SECTOR 50
-typedef struct {
-    char name[32];
-    uint32_t size;
-    uint32_t lba;
-    uint32_t flags;
-    int32_t  parent_index; 
-    uint8_t  reserved[16];
-} __attribute__((packed)) disk_fs_node_t;
 disk_fs_node_t dir_cache[MAX_FILES];
 uint8_t sector_buffer[512];
 int current_dir_index = -1;
