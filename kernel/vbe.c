@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include "vbe.h"
 #include "string.h"
+#include "fs.h"
+extern disk_fs_node_t dir_cache[MAX_FILES];
 typedef struct {
     uint16_t attributes;
     uint8_t  win_a, win_b;
@@ -111,6 +113,10 @@ unsigned char vbe_font[256][8] = {
     ['.'] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00},
 };
 
+void vbe_draw_char(int x, int y, char c, uint32_t color) {
+    vbe_draw_char_hd(x, y, c, color, 1);
+}
+
 void vbe_draw_int(int x, int y, int num, uint32_t color) {
     char buf[16];
     int pos = 0;
@@ -206,6 +212,58 @@ void vbe_put_pixel_to(uint8_t* buffer, uint32_t buf_width, int x, int y, uint32_
     }
 }
 
+uint32_t vbe_get_pixel(int x, int y) {
+    if (x < 0 || (uint32_t)x >= current_target_width || y < 0 || (uint32_t)y >= mode_info->height) return 0;
+    uint32_t bpp_bytes = mode_info->bpp / 8;
+    int offset = (y * current_target_width + x) * bpp_bytes;
+    if (mode_info->bpp == 32) {
+        return *(uint32_t*)(current_target + offset);
+    } else if (mode_info->bpp == 24) {
+        return (current_target[offset + 2] << 16) | (current_target[offset + 1] << 8) | current_target[offset];
+    } else if (mode_info->bpp == 16) {
+        uint16_t c = *(uint16_t*)(current_target + offset);
+        uint32_t r = ((c >> 11) & 0x1F) << 3;
+        uint32_t g = ((c >> 5) & 0x3F) << 2;
+        uint32_t b = (c & 0x1F) << 3;
+        return (r << 16) | (g << 8) | b;
+    }
+    return 0;
+}
+
+uint32_t vbe_mix_color(uint32_t c1, uint32_t c2, int alpha) {
+    if (alpha >= 255) return c1;
+    if (alpha <= 0) return c2;
+    // Fast bitwise alpha blending (approximate: / 256 instead of / 255)
+    uint32_t rb1 = c1 & 0xFF00FF;
+    uint32_t g1  = c1 & 0x00FF00;
+    uint32_t rb2 = c2 & 0xFF00FF;
+    uint32_t g2  = c2 & 0x00FF00;
+
+    uint32_t rb = ((rb1 * alpha + rb2 * (256 - alpha)) >> 8) & 0xFF00FF;
+    uint32_t g  = ((g1 * alpha + g2 * (256 - alpha)) >> 8) & 0x00FF00;
+    
+    return rb | g;
+}
+
+void vbe_put_pixel_alpha(int x, int y, uint32_t color, int alpha) {
+    if (alpha >= 255) { vbe_put_pixel(x, y, color); return; }
+    if (alpha <= 0) return;
+    uint32_t old_color = vbe_get_pixel(x, y);
+    vbe_put_pixel(x, y, vbe_mix_color(color, old_color, alpha));
+}
+
+// Anti-Aliased Circle Edge Helper (Linear Falloff)
+static int get_aa_alpha(int dx, int dy, int r, int base_alpha) {
+    int r2 = r * r;
+    int d2 = dx * dx + dy * dy;
+    if (d2 <= (r - 1) * (r - 1)) return base_alpha;
+    if (d2 > r * r) return 0;
+    int diff_r2 = r * r - (r - 1) * (r - 1);
+    if (diff_r2 <= 0) return base_alpha;
+    int dist_pct = (r2 - d2) * 255 / diff_r2;
+    return (base_alpha * dist_pct) >> 8;
+}
+
 void vbe_put_pixel(int x, int y, uint32_t color) {
     vbe_put_pixel_to(current_target, current_target_width, x, y, color);
 }
@@ -240,20 +298,50 @@ void vbe_clear(uint32_t color) {
     vbe_fill_rect(0, 0, mode_info->width, mode_info->height, color);
 }
 
-void vbe_draw_char(int x, int y, char c, uint32_t color) {
-    for (int row = 0; row < 8; row++) {
-        for (int col = 0; col < 8; col++) {
-            if (vbe_font[(uint8_t)c][row] & (1 << (7 - col))) vbe_put_pixel(x + col, y + row, color);
+void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
+    if (scale <= 1) {
+        for (int row = 0; row < 8; row++) {
+            for (int col = 0; col < 8; col++) {
+                if (vbe_font[(uint8_t)c][row] & (1 << (7 - col))) vbe_put_pixel_alpha(x + col, y + row, color, 255);
+            }
+        }
+        return;
+    }
+
+    // Ultra-Smooth Scaling (Sub-pixel Anti-Aliasing)
+    for (int row = 0; row < 8 * scale; row++) {
+        for (int col = 0; col < 8 * scale; col++) {
+            // Find map to original pixel
+            int ox = col / scale;
+            int oy = row / scale;
+            
+            // If it's a font pixel
+            if (vbe_font[(uint8_t)c][oy] & (1 << (7 - ox))) {
+                // Calculate distance to edge for smoothing
+                int fx = col % scale;
+                int fy = row % scale;
+                int edge_dist = 0;
+                
+                // Simple AA: Pixels near the edges of the scaled block get lower alpha
+                if (fx == 0 || fx == scale-1 || fy == 0 || fy == scale-1) edge_dist = 160;
+                else edge_dist = 255;
+                
+                vbe_put_pixel_alpha(x + col, y + row, color, edge_dist);
+            }
         }
     }
 }
 
-void vbe_draw_string(int x, int y, const char* s, uint32_t color) {
+void vbe_draw_string_hd(int x, int y, const char* s, uint32_t color, int scale) {
     int cur_x = x;
     while (*s) {
-        vbe_draw_char(cur_x, y, *s++, color);
-        cur_x += 9;
+        vbe_draw_char_hd(cur_x, y, *s++, color, scale);
+        cur_x += 8 * scale + 2;
     }
+}
+
+void vbe_draw_string(int x, int y, const char* s, uint32_t color) {
+    vbe_draw_string_hd(x, y, s, color, 1);
 }
 
 void vbe_render_mouse(int x, int y) { vbe_draw_cursor(x, y); }
@@ -272,18 +360,33 @@ void vbe_copy_to_buffer(void* source) {
     vbe_memcpy(backbuffer, source, size);
 }
 
+// Modern Design Colors
+#define COLOR_GLASS_BG     0x1A1A1A
+#define COLOR_GLASS_BORDER 0x444444
+#define COLOR_ACCENT       0x0078D7
+#define COLOR_ACCENT_GLOW  0x00A2FF
+#define COLOR_TITLEBAR     0x222222
+#define COLOR_TEXT         0xFFFFFF
+#define COLOR_TEXT_DIM     0xAAAAAA
+
 void vbe_blit_window(int x, int y, int w, int h, uint8_t* win_buf) {
+    // Draw Shadow
+    vbe_draw_shadow(x + 5, y + 5, w, h, 12);
+    
+    // Draw Window Background (Glassmorphism)
+    vbe_draw_rounded_rect(x, y, w, h, 12, COLOR_GLASS_BG, 230);
+    vbe_draw_rounded_rect(x, y, w, h, 12, COLOR_GLASS_BORDER, 255); // Border
+    
+    // Titlebar with Gradient
+    vbe_fill_rect_gradient(x, y, w, 28, COLOR_TITLEBAR, 0x111111, 1);
+    vbe_draw_rounded_rect(x, y, w, 28, 12, COLOR_GLASS_BORDER, 100); // Highlight top edge
+    
+    // Content Blit (with offset for border/titlebar)
     uint32_t bpp = mode_info->bpp / 8;
-    for (int i = 0; i < h; i++) {
-        if (y + i < 0 || (uint32_t)(y + i) >= mode_info->height) continue;
-        uint32_t draw_x = (x < 0) ? 0 : x;
-        uint32_t win_off_x = (x < 0) ? -x : 0;
-        uint32_t draw_w = (x + w > (int)mode_info->width) ? (mode_info->width - draw_x) : (w - win_off_x);
-        if (draw_w > 0) {
-            uint8_t* dest = backbuffer + ((y + i) * mode_info->width + draw_x) * bpp;
-            uint8_t* src  = win_buf + (i * w + win_off_x) * bpp;
-            vbe_memcpy_sse(dest, src, draw_w * bpp);
-        }
+    for (int i = 28; i < h - 4; i++) {
+        uint8_t* dest = backbuffer + ((y + i) * mode_info->width + (x + 4)) * bpp;
+        uint8_t* src  = win_buf + (i * w + 4) * bpp;
+        vbe_memcpy_sse(dest, src, (w - 8) * bpp);
     }
 }
 
@@ -300,38 +403,122 @@ void vbe_blit_rect(int x, int y, int w, int h, uint8_t* src_buf, uint32_t src_st
 }
 
 void vbe_fill_rect(int x, int y, int w, int h, uint32_t color) {
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)current_target_width) w = current_target_width - x;
+    if (y + h > (int)mode_info->height) h = mode_info->height - y;
+    if (w <= 0 || h <= 0) return;
+
+    uint32_t bpp = mode_info->bpp / 8;
     for (int i = 0; i < h; i++) {
-        for (int j = 0; j < w; j++) vbe_put_pixel(x + j, y + i, color);
+        uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
+        if (bpp == 4) {
+            for (int j = 0; j < w; j++) ((uint32_t*)p)[j] = color;
+        } else {
+            for (int j = 0; j < w; j++) {
+                p[j * 3]     = color & 0xFF;
+                p[j * 3 + 1] = (color >> 8) & 0xFF;
+                p[j * 3 + 2] = (color >> 16) & 0xFF;
+            }
+        }
     }
+}
+
+void vbe_fill_rect_alpha(int x, int y, int w, int h, uint32_t color, int alpha) {
+    if (alpha <= 0) return;
+    if (alpha >= 255) { vbe_fill_rect(x, y, w, h, color); return; }
+    
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)current_target_width) w = current_target_width - x;
+    if (y + h > (int)mode_info->height) h = mode_info->height - y;
+    if (w <= 0 || h <= 0) return;
+
+    uint32_t bpp = mode_info->bpp / 8;
+    for (int i = 0; i < h; i++) {
+        uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
+        for (int j = 0; j < w; j++) {
+            uint32_t old;
+            if (bpp == 4) old = *(uint32_t*)p;
+            else old = (p[2] << 16) | (p[1] << 8) | p[0];
+            
+            uint32_t mixed = vbe_mix_color(color, old, alpha);
+            
+            if (bpp == 4) { *(uint32_t*)p = mixed; p += 4; }
+            else { p[0] = mixed & 0xFF; p[1] = (mixed >> 8) & 0xFF; p[2] = (mixed >> 16) & 0xFF; p += 3; }
+        }
+    }
+}
+
+void vbe_draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color, int alpha) {
+    if (r <= 0) { vbe_fill_rect_alpha(x, y, w, h, color, alpha); return; }
+
+    vbe_fill_rect_alpha(x + r, y, w - 2 * r, h, color, alpha);
+    vbe_fill_rect_alpha(x, y + r, r, h - 2 * r, color, alpha);
+    vbe_fill_rect_alpha(x + w - r, y + r, r, h - 2 * r, color, alpha);
+
+    for (int i = 0; i < r; i++) {
+        for (int j = 0; j < r; j++) {
+            vbe_put_pixel_alpha(x + j, y + i, color, get_aa_alpha(r - j, r - i, r, alpha)); // TL
+            vbe_put_pixel_alpha(x + w - r + j, y + i, color, get_aa_alpha(j + 1, r - i, r, alpha)); // TR
+            vbe_put_pixel_alpha(x + j, y + h - r + i, color, get_aa_alpha(r - j, i + 1, r, alpha)); // BL
+            vbe_put_pixel_alpha(x + w - r + j, y + h - r + i, color, get_aa_alpha(j + 1, i + 1, r, alpha)); // BR
+        }
+    }
+}
+
+void vbe_draw_shadow(int x, int y, int w, int h, int r) {
+    // Highly optimized shadow: Just 3 passes with larger radii
+    vbe_draw_rounded_rect(x + 2, y + 2, w + 4, h + 4, r + 2, 0x000000, 30);
+    vbe_draw_rounded_rect(x + 4, y + 4, w + 8, h + 8, r + 4, 0x000000, 15);
 }
 void vbe_draw_taskbar(int start_btn_active) {
     uint32_t w = mode_info->width;
     uint32_t tb_h = 35;
-    for (uint32_t i = 0; i < tb_h; i++) {
-        uint32_t color = (20 << 16) | (20 << 8) | 30; 
-        vbe_fill_rect(0, i, w, 1, color);
-    }
-    vbe_fill_rect(0, tb_h - 1, w, 1, 0x444444);
-    uint32_t btn_color = start_btn_active ? 0x00AAFF : 0x222222;
-    vbe_fill_rect(5, 3, 70, 28, btn_color);
-    vbe_draw_string(15, 12, "NARC", 0xFFFFFF);
-    vbe_fill_rect(80, 3, 90, 28, 0x333333);
-    vbe_draw_string(90, 12, "TERMINAL", 0xAAAAAA);
+    // Glassy Gradient Taskbar
+    vbe_fill_rect_gradient(0, 0, w, tb_h, 0x222222, 0x050505, 1);
+    vbe_fill_rect_alpha(0, 0, w, 1, 0x555555, 100); // Top shine
+    
+    uint32_t btn_color = start_btn_active ? COLOR_ACCENT : 0x222222;
+    vbe_draw_rounded_rect(5, 4, 75, 27, 8, btn_color, 255);
+    vbe_draw_string(15, 12, "NARC", COLOR_TEXT);
+    
+    vbe_draw_rounded_rect(90, 4, 100, 27, 8, 0x333333, 200);
+    vbe_draw_string(100, 12, "DEV", COLOR_TEXT_DIM);
 }
+
 void vbe_draw_start_menu() {
-    vbe_fill_rect(5, 35, 200, 300, 0x111111);
-    vbe_draw_rect(5, 35, 200, 300, 0x444444);
-    vbe_draw_string(20, 50, "APPLICATIONS", 0x00AAFF);
-    vbe_draw_string(20, 80, "> Terminal", 0xFFFFFF);
-    vbe_draw_string(20, 100, "> Snake", 0xFFFFFF);
-    vbe_draw_string(20, 120, "> NarcVim", 0xFFFFFF);
-    vbe_fill_rect(5, 280, 200, 1, 0x333333);
-    vbe_draw_string(20, 300, "SYSTEM INFO", 0x00AAFF);
-    vbe_draw_string(20, 320, "NarcOs v1.0", 0xAAAAAA);
+    vbe_draw_shadow(5, 35, 220, 350, 12);
+    vbe_draw_rounded_rect(5, 35, 220, 350, 12, COLOR_GLASS_BG, 240);
+    vbe_draw_rounded_rect(5, 35, 220, 350, 12, COLOR_GLASS_BORDER, 255);
+    
+    vbe_draw_string(20, 50, "APPLICATIONS", COLOR_ACCENT);
+    vbe_draw_string(20, 80, "> Terminal", COLOR_TEXT);
+    vbe_draw_string(20, 110, "> Snake", COLOR_TEXT);
+    vbe_draw_string(20, 140, "> NarcPad", COLOR_TEXT);
+    
+    vbe_draw_rounded_rect(5, 300, 220, 1, 0, 0x333333, 255);
+    vbe_draw_string(20, 320, "SYSTEM INFO", COLOR_ACCENT);
+    vbe_draw_string(20, 340, "NarcOs 2.0 Ultra", COLOR_TEXT_DIM);
 }
 extern uint8_t get_hour();
 extern uint8_t get_minute();
 extern uint8_t get_second();
+void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
+    (void)vertical; // Suppress unused warning for now
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)current_target_width) w = current_target_width - x;
+    if (y + h > (int)mode_info->height) h = mode_info->height - y;
+    if (w <= 0 || h <= 0) return;
+
+    for (int i = 0; i < h; i++) {
+        int ratio = (i * 255) / h;
+        uint32_t color = vbe_mix_color(c2, c1, ratio);
+        vbe_fill_rect(x, y + i, w, 1, color);
+    }
+}
+
 void vbe_draw_clock() {
     uint32_t w = mode_info->width;
     char time_str[9];
@@ -343,38 +530,77 @@ void vbe_draw_clock() {
     time_str[6] = (ss / 10) + '0'; time_str[7] = (ss % 10) + '0'; time_str[8] = '\0';
     vbe_draw_string(w - 90, 12, time_str, 0x00FF00);
 }
-void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
-    uint16_t* bitmap;
-    uint32_t color;
-    if (type == 0) { bitmap = folder_icon_bitmap; color = 0xFFAA00; }
-    else if (type == 1) { bitmap = file_icon_bitmap; color = 0xAAAAAA; }
-    else if (type == 2) { bitmap = pc_icon_bitmap; color = 0x00AAFF; }
-    else { bitmap = snake_icon_bitmap; color = 0x00FF00; }
-    if (selected) vbe_fill_rect(x - 5, y - 5, 40, 50, (60 << 16) | (60 << 8) | 80);
-    for (int i = 0; i < 16; i++) {
-        for (int j = 0; j < 16; j++) {
-            if (bitmap[i] & (1 << (15 - j))) {
-                vbe_put_pixel(x + j * 2, y + i * 2, color);
-                vbe_put_pixel(x + j * 2 + 1, y + i * 2, color);
-                vbe_put_pixel(x + j * 2, y + i * 2 + 1, color);
-                vbe_put_pixel(x + j * 2 + 1, y + i * 2 + 1, color);
-            }
-        }
+
+void vbe_draw_vector_folder(int x, int y, int selected) {
+    uint32_t base_col = selected ? COLOR_ACCENT : 0xFFD700;
+    
+    // Folder Body
+    vbe_draw_rounded_rect(x, y + 6, 36, 26, 4, base_col, 255);
+    // Folder Tab (The little sticking out part)
+    vbe_draw_rounded_rect(x, y + 2, 14, 8, 3, base_col, 255);
+    // Detail / Inner shading
+    vbe_fill_rect_alpha(x + 2, y + 10, 32, 1, 0xFFFFFF, 80);
+}
+
+void vbe_draw_vector_file(int x, int y, int selected) {
+    (void)selected;
+    uint32_t base_col = 0xEEEEEE;
+    // Main paper
+    vbe_draw_rounded_rect(x + 4, y, 28, 36, 2, base_col, 255);
+    // Folded corner
+    vbe_fill_rect(x + 24, y, 8, 8, 0xCCCCCC);
+    // Lines (Content Representation)
+    for (int i = 0; i < 4; i++) {
+        vbe_fill_rect_alpha(x + 10, y + 14 + i * 5, 16, 1, 0x000000, 40);
     }
-    int label_x = x + 16 - (strlen(label) * 9) / 2;
-    vbe_draw_string(label_x, y + 35, label, 0xFFFFFF);
+}
+
+void vbe_draw_vector_pc(int x, int y) {
+    uint32_t silver = 0xB0B0B0;
+    // Monitor
+    vbe_draw_rounded_rect(x + 2, y, 32, 24, 3, 0x333333, 255);
+    vbe_draw_rounded_rect(x + 4, y + 2, 28, 20, 1, 0x0078D7, 200); // Screen GLow
+    // Stand
+    vbe_fill_rect(x + 16, y + 24, 4, 6, silver);
+    vbe_draw_rounded_rect(x + 10, y + 28, 16, 4, 2, silver, 255);
+}
+
+void vbe_draw_vector_snake(int x, int y) {
+    // A cute AA snake head
+    vbe_draw_rounded_rect(x + 4, y + 4, 28, 28, 8, 0x00FF00, 255);
+    // Eyes
+    vbe_draw_rounded_rect(x + 10, y + 12, 4, 4, 2, 0xFFFFFF, 255);
+    vbe_draw_rounded_rect(x + 22, y + 12, 4, 4, 2, 0xFFFFFF, 255);
+    // Pupils
+    vbe_fill_rect(x + 11, y + 13, 2, 2, 0x000000);
+    vbe_fill_rect(x + 23, y + 13, 2, 2, 0x000000);
+}
+
+void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
+    if (selected) {
+        vbe_draw_rounded_rect(x - 10, y - 8, 56, 65, 10, COLOR_ACCENT, 80);
+        vbe_draw_rounded_rect(x - 10, y - 8, 56, 65, 10, COLOR_ACCENT_GLOW, 40);
+    }
+    
+    if (type == 0) vbe_draw_vector_folder(x, y, selected);
+    else if (type == 2) vbe_draw_vector_pc(x, y);
+    else if (type == 3) vbe_draw_vector_snake(x, y);
+    else vbe_draw_vector_file(x, y, selected);
+
+    vbe_draw_string(x - 8, y + 42, label, COLOR_TEXT);
 }
 #include "fs.h"
 extern disk_fs_node_t dir_cache[MAX_FILES];
-void vbe_draw_explorer_content(int wx, int wy, int current_dir) {
-    int x_off = 20, y_off = 40;
+void vbe_draw_explorer_content(int wx, int wy, int current_dir, int width) {
+    int x_off = 24, y_off = 45;
     int col = 0;
+    int icons_per_row = (width - 40) / 90;
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == current_dir) {
             int type = (dir_cache[i].flags == 2) ? 0 : 1;
-            vbe_draw_icon(wx + x_off + col * 80, wy + y_off, type, dir_cache[i].name, 0);
+            vbe_draw_icon(wx + x_off + col * 90, wy + y_off, type, dir_cache[i].name, 0);
             col++;
-            if (col > 7) { col = 0; y_off += 70; }
+            if (col >= icons_per_row) { col = 0; y_off += 85; }
         }
     }
 }
@@ -413,20 +639,21 @@ uint32_t vbe_get_bpp()    { return mode_info->bpp; }
 
 void* vbe_get_window_buffer() { return window_buffer; }
 
-void vbe_draw_breadcrumb(int x, int y, int current_dir) {
-    vbe_fill_rect(x, y, 600, 20, 0x222222);
-    vbe_draw_string(x + 5, y + 5, "Path: /", 0xAAAAAA);
+void vbe_draw_breadcrumb(int x, int y, int current_dir, int width) {
+    vbe_draw_rounded_rect(x + 5, y, width - 10, 24, 6, 0x222222, 180);
+    vbe_draw_string(x + 12, y + 5, "Path: /", COLOR_TEXT_DIM);
     if (current_dir != -1) {
-        vbe_draw_string(x + 55, y + 5, dir_cache[current_dir].name, 0xFFFFFF);
+        vbe_draw_string(x + 65, y + 5, dir_cache[current_dir].name, COLOR_TEXT);
     }
 }
 void vbe_draw_narcpad(int x, int y, const char* title, const char* content) {
-    vbe_fill_rect(x, y, 500, 400, 0xFCFCFC);
-    vbe_draw_rect(x, y, 500, 400, 0x888888);
-    vbe_fill_rect(x, y, 500, 25, 0xDDDDDD);
-    vbe_draw_string(x + 10, y + 5, title, 0x333333);
-    vbe_fill_rect(x + 500 - 20, y + 5, 12, 12, 0xFF5555);
-    int line_y = y + 40;
+    vbe_draw_shadow(x + 5, y + 5, 500, 400, 12);
+    vbe_draw_rounded_rect(x, y, 500, 400, 12, 0xFCFCFC, 255);
+    vbe_draw_rounded_rect(x, y, 500, 400, 12, COLOR_GLASS_BORDER, 255);
+    vbe_draw_rounded_rect(x, y, 500, 28, 12, 0xEEEEEE, 255);
+    vbe_draw_string(x + 12, y + 8, title, 0x333333);
+    vbe_fill_rect(x + 500 - 20, y + 8, 12, 12, 0xFF5555);
+    int line_y = y + 45;
     char line_buf[55];
     int char_idx = 0;
     while (*content && line_y < y + 380) {
@@ -441,6 +668,13 @@ void vbe_draw_narcpad(int x, int y, const char* title, const char* content) {
     }
     line_buf[char_idx] = '\0';
     if (char_idx > 0) vbe_draw_string(x + 15, line_y, line_buf, 0x000000);
+    
+    // Draw Pulsing Caret
+    extern uint32_t timer_ticks;
+    if ((timer_ticks / 20) % 2 == 0) {
+        int caret_x = x + 15 + char_idx * 9;
+        vbe_fill_rect(caret_x, line_y, 2, 12, 0x000000);
+    }
 }
 void vbe_draw_snake_game(int x, int y, int* px, int* py, int len, int ax, int ay, int dead, int score, int best) {
     vbe_fill_rect(x, y, 400, 325, 0x111111);
@@ -462,7 +696,7 @@ void vbe_draw_snake_game(int x, int y, int* px, int* py, int len, int ax, int ay
         }
     }
 }
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best, int desktop_dir, int drag_file_idx, int mx, int my) {
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
@@ -472,17 +706,32 @@ void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, 
     vbe_draw_desktop_icons(desktop_dir);
     uint8_t* old_back = backbuffer;
     backbuffer = composition_buffer;
-    if (win_vis) vbe_blit_window(wx, wy, 700, 475, window_buffer);
+    // HD Scaling: Position windows relatively
+    int win_w = (mode_info->width > 1280) ? 800 : 700;
+    int win_h = (mode_info->width > 1280) ? 600 : 475;
+    
+    if (win_vis) vbe_blit_window(wx, wy, win_w, win_h, window_buffer);
     if (exp_vis) {
-        vbe_fill_rect(exp_x, exp_y, 600, 400, 0x111111);
-        vbe_draw_rect(exp_x, exp_y, 600, 400, 0x444444);
-        vbe_fill_rect(exp_x, exp_y, 600, 25, 0x333333);
-        vbe_draw_string(exp_x + 10, exp_y + 5, "NarcExplorer", 0xFFFFFF);
-        vbe_fill_rect(exp_x + 600 - 20, exp_y + 5, 12, 12, 0xFF5555);
-        vbe_draw_breadcrumb(exp_x, exp_y + 25, exp_dir);
-        vbe_draw_explorer_content(exp_x, exp_y + 15, exp_dir);
+        int exp_w = (mode_info->width > 1280) ? 800 : 600;
+        int exp_h = (mode_info->width > 1280) ? 500 : 400;
+        vbe_draw_shadow(exp_x + 5, exp_y + 5, exp_w, exp_h, 12);
+        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, exp_h, 12, COLOR_GLASS_BG, 230);
+        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, exp_h, 12, COLOR_GLASS_BORDER, 255);
+        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, 28, 12, COLOR_TITLEBAR, 240);
+        vbe_draw_string(exp_x + 12, exp_y + 8, "NarcExplorer", COLOR_TEXT);
+        vbe_fill_rect(exp_x + exp_w - 20, exp_y + 8, 12, 12, 0xFF5555);
+        vbe_draw_breadcrumb(exp_x, exp_y + 28, exp_dir, exp_w);
+        vbe_draw_explorer_content(exp_x, exp_y + 20, exp_dir, exp_w);
     }
-    if (snk_vis) vbe_draw_snake_game(snk_x, snk_y, snk_px, snk_py, snk_len, ax, ay, dead, score, best);
+    if (pad_vis) vbe_draw_narcpad(pad_x, pad_y, pad_title, pad_content);
+    if (snk_vis) {
+        vbe_draw_shadow(snk_x + 5, snk_y + 5, 400, 325, 12);
+        vbe_draw_rounded_rect(snk_x, snk_y, 400, 325, 12, 0x000000, 240);
+        vbe_draw_rounded_rect(snk_x, snk_y, 400, 325, 12, COLOR_GLASS_BORDER, 255);
+        vbe_draw_rounded_rect(snk_x, snk_y, 400, 28, 12, 0x111111, 255);
+        vbe_draw_string(snk_x + 12, snk_y + 8, "NarcSnake", COLOR_TEXT);
+        vbe_draw_snake_game(snk_x, snk_y, snk_px, snk_py, snk_len, ax, ay, dead, score, best);
+    }
     
     // Draw Dragging Ghost Icon
     if (drag_file_idx != -1) {
@@ -492,6 +741,7 @@ void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, 
 
     vbe_draw_taskbar(start_vis);
     if (start_vis) vbe_draw_start_menu();
+    if (ctx_vis) vbe_draw_context_menu(ctx_x, ctx_y, ctx_items, ctx_count, ctx_sel);
     vbe_draw_clock();
     backbuffer = old_back;
     vbe_set_target(old_target, old_width);
@@ -502,4 +752,21 @@ void vbe_prepare_frame_from_composition() {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(backbuffer, composition_buffer, size);
+}
+
+void vbe_draw_context_menu(int x, int y, const char** items, int count, int selected_idx) {
+    int w = 130;
+    int h = count * 22 + 8;
+    vbe_draw_shadow(x + 3, y + 3, w, h, 8);
+    vbe_draw_rounded_rect(x, y, w, h, 8, COLOR_GLASS_BG, 245);
+    vbe_draw_rounded_rect(x, y, w, h, 8, COLOR_GLASS_BORDER, 255);
+    
+    for (int i = 0; i < count; i++) {
+        if (i == selected_idx) {
+            vbe_draw_rounded_rect(x + 4, y + 4 + i * 22, w - 8, 20, 6, COLOR_ACCENT, 255);
+            vbe_draw_string(x + 12, y + 6 + i * 22, items[i], COLOR_TEXT);
+        } else {
+            vbe_draw_string(x + 12, y + 6 + i * 22, items[i], COLOR_TEXT);
+        }
+    }
 }

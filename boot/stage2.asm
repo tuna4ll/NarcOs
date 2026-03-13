@@ -19,23 +19,27 @@ stage2_main:
     int 0x10
     cmp ax, 0x004F
     jne .vbe_failed
-    mov cx, 0x411B
+
+    ; Preferred Modes List: 1080p, 1600x1200, 1280x1024, 1024x768
+    mov si, preferred_modes
+.find_mode_loop:
+    lodsw
+    or ax, ax
+    jz .vbe_failed       ; End of list, no mode found
+    mov cx, ax
+    or cx, 0x4000        ; Set LFB bit
     mov ax, 0x4F01
     mov di, mode_info_block
     int 0x10
     cmp ax, 0x004F
-    je .mode_found
-    mov cx, 0x4118
-    mov ax, 0x4F01
-    int 0x10
-    cmp ax, 0x004F
-    je .mode_found
-    mov cx, 0x4117
-    mov ax, 0x4F01
-    int 0x10
-    cmp ax, 0x004F
-    je .mode_found
-    jmp .vbe_failed
+    jne .find_next
+    
+    ; Check if it's the right resolution (Optional but safer)
+    ; For now, we trust our list and BIOS fallback
+    jmp .mode_found
+
+.find_next:
+    jmp .find_mode_loop
 .mode_found:
     push cx
     xor ax, ax
@@ -174,6 +178,7 @@ msg_vbe_err     db '[ERR] VBE initialization failed!', 0x0D, 0x0A, 0
 msg_kernel      db '[S2] Loading Kernel (LBA)...', 0x0D, 0x0A, 0
 msg_kernel_ok   db '[S2] Kernel loaded successfully!', 0x0D, 0x0A, 0
 msg_kernel_err  db '[ERR] Kernel load failed!', 0x0D, 0x0A, 0
+preferred_modes: dw 0x011B, 0x0143, 0x0118, 0x0115, 0x0112, 0 
 vbe_info_block:  times 512 db 0
 mode_info_block: times 256 db 0
 [BITS 32]

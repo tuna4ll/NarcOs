@@ -8,6 +8,7 @@ static uint8_t mouse_packet[4];
 static int     mouse_x = 512;
 static int     mouse_y = 384;
 static int     left_button = 0;
+static int     right_button = 0;
 void mouse_wait(uint8_t type) {
     uint32_t timeout = 100000;
     if (type == 0) {
@@ -69,6 +70,7 @@ void handle_mouse() {
     if (mouse_cycle == 3) {
         mouse_cycle = 0;
         left_button = (mouse_packet[0] & 0x01);
+        right_button = (mouse_packet[0] & 0x02);
         int x_rel = (int)mouse_packet[1];
         int y_rel = (int)mouse_packet[2];
         if (mouse_packet[0] & 0x10) x_rel |= 0xFFFFFF00;
@@ -90,3 +92,4 @@ void handle_mouse() {
 int get_mouse_x() { return mouse_x; }
 int get_mouse_y() { return mouse_y; }
 int mouse_left_pressed() { return left_button; }
+int mouse_right_pressed() { return right_button; }

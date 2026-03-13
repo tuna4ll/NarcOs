@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <stddef.h>
 extern void    outb(uint16_t port, uint8_t val);
 extern uint8_t inb(uint16_t port);
 extern void    vga_putchar(char c);
@@ -51,6 +52,8 @@ extern volatile int editor_running;
 extern volatile int editor_input_key;
 extern volatile int editor_special_key;
 extern int pad_visible;
+extern char pad_content[1024];
+extern volatile int gui_needs_redraw;
 extern int exp_visible;
 void handle_keyboard()
 {
@@ -76,6 +79,27 @@ void handle_keyboard()
             default: break;
         }
         outb(0x20, 0x20); return;
+    }
+    if (pad_visible) {
+        int is_shift = lshift_pressed || rshift_pressed;
+        char c = is_shift ? scancode_map_shift[scancode] : scancode_map[scancode];
+        if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
+        else if (capslock_active && c >= 'A' && c <= 'Z') c += 32;
+
+        size_t len = 0;
+        while(pad_content[len]) len++;
+
+        if (scancode == 0x0E) { // Backspace
+            if (len > 0) pad_content[len-1] = '\0';
+        } else if (scancode == 0x1C) { // Enter
+            if (len < 1022) { pad_content[len] = '\n'; pad_content[len+1] = '\0'; }
+        } else if (c != 0 && len < 1023) {
+            pad_content[len] = c;
+            pad_content[len+1] = '\0';
+        }
+        gui_needs_redraw = 1;
+        outb(0x20, 0x20);
+        return;
     }
     if (editor_running) {
         int is_shift = lshift_pressed || rshift_pressed;

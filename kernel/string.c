@@ -31,3 +31,11 @@ char* strncpy(char* dest, const char* src, size_t n) {
         dest[i] = '\0';
     return dest;
 }
+
+int endsWith(const char* str, const char* suffix) {
+    if (!str || !suffix) return 0;
+    size_t len_str = strlen(str);
+    size_t len_suffix = strlen(suffix);
+    if (len_suffix > len_str) return 0;
+    return strcmp(str + len_str - len_suffix, suffix) == 0;
+}

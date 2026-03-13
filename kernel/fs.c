@@ -112,14 +112,10 @@ int fs_change_dir(const char* name) {
     }
     return -1;
 }
-int fs_write_file(const char* name, const char* data) {
-    int idx = _fs_find_file(name, 1);
-    if (idx == -1) {
-        if (fs_create_file(name) == -1) return -1;
-        idx = _fs_find_file(name, 1);
-    }
+int fs_write_file_by_idx(int idx, const char* data) {
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != 1) return -1;
     size_t len = strlen(data);
-    if (len > 512) len = 512;
+    if (len > MAX_FILE_SIZE) len = MAX_FILE_SIZE;
     dir_cache[idx].size = (uint32_t)len;
     fs_sync();
     for (int i = 0; i < 512; i++) sector_buffer[i] = 0;
@@ -127,9 +123,16 @@ int fs_write_file(const char* name, const char* data) {
     ata_write_sector(dir_cache[idx].lba, sector_buffer);
     return 0;
 }
-int fs_read_file(const char* name, char* buffer, size_t max_len) {
+int fs_write_file(const char* name, const char* data) {
     int idx = _fs_find_file(name, 1);
-    if (idx == -1) return -1;
+    if (idx == -1) {
+        if (fs_create_file(name) == -1) return -1;
+        idx = _fs_find_file(name, 1);
+    }
+    return fs_write_file_by_idx(idx, data);
+}
+int fs_read_file_by_idx(int idx, char* buffer, size_t max_len) {
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != 1) return -1;
     ata_read_sector(dir_cache[idx].lba, sector_buffer);
     size_t read_len = dir_cache[idx].size;
     if (read_len >= max_len) read_len = max_len - 1;
@@ -138,6 +141,11 @@ int fs_read_file(const char* name, char* buffer, size_t max_len) {
     }
     buffer[read_len] = '\0';
     return 0;
+}
+int fs_read_file(const char* name, char* buffer, size_t max_len) {
+    int idx = _fs_find_file(name, 1);
+    if (idx == -1) return -1;
+    return fs_read_file_by_idx(idx, buffer, max_len);
 }
 int fs_delete_file(const char* name) {
     int idx = _fs_find_file(name, 1);
