@@ -111,6 +111,21 @@ unsigned char vbe_font[256][8] = {
     ['.'] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00},
 };
 
+void vbe_draw_int(int x, int y, int num, uint32_t color) {
+    char buf[16];
+    int pos = 0;
+    if (num == 0) buf[pos++] = '0';
+    else {
+        int n = num;
+        if (n < 0) { vbe_draw_char(x, y, '-', color); x += 8; n = -n; }
+        while (n > 0) { buf[pos++] = (char)((n % 10) + '0'); n /= 10; }
+    }
+    for (int i = pos - 1; i >= 0; i--) {
+        vbe_draw_char(x, y, buf[i], color);
+        x += 8;
+    }
+}
+
 uint16_t mouse_cursor_bitmap[12] = {
     0b110000000000, 0b111000000000, 0b111100000000, 0b111110000000,
     0b111111000000, 0b111111100000, 0b111111110000, 0b111111111000,
@@ -133,6 +148,12 @@ uint16_t pc_icon_bitmap[16] = {
     0b1100001111000011, 0b1100001111000011, 0b1100000000000011, 0b1100000000000011,
     0b1111111111111111, 0b1111111111111111, 0b0000001111000000, 0b0000001111000000,
     0b0001111111111000, 0b0001111111111000, 0b0000000000000000, 0b0000000000000000
+};
+uint16_t snake_icon_bitmap[16] = {
+    0b0111110000000000, 0b1111111000000000, 0b1100011000000000, 0b1100011000000000,
+    0b1111111000001110, 0b0111110000011111, 0b0000000000110011, 0b0000001111110011,
+    0b0000011111100011, 0b0000110000000111, 0b0001110000001110, 0b0001110000011100,
+    0b0000111111111000, 0b0000011111100000, 0b0000000000000000, 0b0000000000000000
 };
 
 void* vbe_get_backbuffer() { return backbuffer; }
@@ -327,7 +348,8 @@ void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
     uint32_t color;
     if (type == 0) { bitmap = folder_icon_bitmap; color = 0xFFAA00; }
     else if (type == 1) { bitmap = file_icon_bitmap; color = 0xAAAAAA; }
-    else { bitmap = pc_icon_bitmap; color = 0x00AAFF; }
+    else if (type == 2) { bitmap = pc_icon_bitmap; color = 0x00AAFF; }
+    else { bitmap = snake_icon_bitmap; color = 0x00FF00; }
     if (selected) vbe_fill_rect(x - 5, y - 5, 40, 50, (60 << 16) | (60 << 8) | 80);
     for (int i = 0; i < 16; i++) {
         for (int j = 0; j < 16; j++) {
@@ -360,6 +382,7 @@ void vbe_draw_desktop_icons() {
     vbe_draw_icon(20, 60, 2, "This PC", 0);
     vbe_draw_icon(20, 140, 1, "Terminal", 0);
     vbe_draw_icon(20, 220, 0, "Users", 0);
+    vbe_draw_icon(20, 300, 3, "Snake", 0);
 }
 
 void vbe_draw_rect(int x, int y, int w, int h, uint32_t color) {
@@ -408,7 +431,27 @@ void vbe_draw_narcpad(int x, int y, const char* title, const char* content) {
     line_buf[char_idx] = '\0';
     if (char_idx > 0) vbe_draw_string(x + 15, line_y, line_buf, 0x000000);
 }
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content) {
+void vbe_draw_snake_game(int x, int y, int* px, int* py, int len, int ax, int ay, int dead, int score, int best) {
+    vbe_fill_rect(x, y, 400, 325, 0x111111);
+    vbe_draw_rect(x, y, 400, 325, 0x444444);
+    vbe_fill_rect(x, y, 400, 25, 0x111111);
+    vbe_draw_string(x + 10, y + 5, "Score:", 0x00FF00);
+    vbe_draw_int(x + 65, y + 5, score, 0xFFFFFF);
+    vbe_draw_string(x + 130, y + 5, "Best:", 0xAAAAAA);
+    vbe_draw_int(x + 180, y + 5, best, 0xFFFFFF);
+    vbe_fill_rect(x + 400 - 20, y + 5, 12, 12, 0xFF5555);
+    if (dead) {
+        vbe_draw_string(x + 150, y + 150, "GAME OVER", 0xFF0000);
+        vbe_draw_string(x + 130, y + 170, "Press R to Reset", 0xAAAAAA);
+    } else {
+        vbe_fill_rect(x + ax * 10, y + 35 + ay * 10, 8, 8, 0xFF0000);
+        for (int i = 0; i < len; i++) {
+            uint32_t col = (i == 0) ? 0x00FF00 : 0x00AA00;
+            vbe_fill_rect(x + px[i] * 10, y + 35 + py[i] * 10, 8, 8, col);
+        }
+    }
+}
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
@@ -429,6 +472,7 @@ void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, 
         vbe_draw_explorer_content(exp_x, exp_y + 15, exp_dir);
     }
     if (pad_vis) vbe_draw_narcpad(pad_x, pad_y, pad_title, pad_content);
+    if (snk_vis) vbe_draw_snake_game(snk_x, snk_y, snk_px, snk_py, snk_len, ax, ay, dead, score, best);
     vbe_draw_taskbar(start_vis);
     if (start_vis) vbe_draw_start_menu();
     vbe_draw_clock();

@@ -17,7 +17,7 @@ void vbe_render_mouse_direct(int x, int y);
 void* vbe_get_backbuffer();
 void* vbe_get_window_buffer();
 void vbe_set_target(uint8_t* buffer, uint32_t width);
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content);
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int apple_x, int apple_y, int dead, int score, int best);
 void vbe_prepare_frame_from_composition();
 void wait_vsync();
 extern volatile int gui_needs_redraw;

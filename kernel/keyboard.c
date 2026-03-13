@@ -44,20 +44,20 @@ void init_keyboard()
     input_pos = 0;
     for (int i = 0; i < INPUT_BUF_SIZE; i++) input_buf[i] = 0;
 }
-extern volatile int snake_running;
-extern volatile int snake_next_dir;
+extern int win_visible;
+extern int snk_visible;
+extern volatile int snk_next_dir;
 extern volatile int editor_running;
 extern volatile int editor_input_key;
 extern volatile int editor_special_key;
-extern int win_visible;
+extern int pad_visible;
+extern int exp_visible;
 void handle_keyboard()
 {
-    if (!win_visible && !snake_running && !editor_running) {
-        uint8_t scancode = inb(0x60);
-        outb(0x20, 0x20);
-        return;
-    }
     uint8_t scancode = inb(0x60);
+    if (!win_visible && !snk_visible && !editor_running && !pad_visible && !exp_visible) {
+        outb(0x20, 0x20); return;
+    }
     if (scancode & 0x80) {
         uint8_t key = scancode & 0x7F;
         if      (key == 0x2A) lshift_pressed = 0;
@@ -65,18 +65,17 @@ void handle_keyboard()
         outb(0x20, 0x20);
         return;
     }
-    if (snake_running) {
+    if (snk_visible) {
         switch (scancode) {
-            case 0x11: case 0x48: snake_next_dir = 0; break;
-            case 0x1F: case 0x50: snake_next_dir = 1; break;
-            case 0x1E: case 0x4B: snake_next_dir = 2; break;
-            case 0x20: case 0x4D: snake_next_dir = 3; break;
-            case 0x13:            snake_next_dir = 5; break;
-            case 0x10: case 0x01: snake_next_dir = 6; break;
+            case 0x11: case 0x48: snk_next_dir = 0; break;
+            case 0x1F: case 0x50: snk_next_dir = 1; break;
+            case 0x1E: case 0x4B: snk_next_dir = 2; break;
+            case 0x20: case 0x4D: snk_next_dir = 3; break;
+            case 0x13: case 0x19: snk_next_dir = 5; break; // R or P? Let's use 0x13 (R)
+            case 0x10: case 0x01: snk_next_dir = 6; break; // Q or ESC
             default: break;
         }
-        outb(0x20, 0x20);
-        return;
+        outb(0x20, 0x20); return;
     }
     if (editor_running) {
         int is_shift = lshift_pressed || rshift_pressed;

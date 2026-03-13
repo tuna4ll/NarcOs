@@ -26,8 +26,7 @@ extern void init_keyboard();
 
 extern void print_memory_info();
 
-extern void snake_main();
-extern int snake_running;
+extern void print_memory_info();
 
 typedef struct {
     uint16_t isr_low;
@@ -46,6 +45,10 @@ idt_entry_t idt[256];
 idtr_t idtr;
 
 volatile uint32_t timer_ticks = 0;
+int snk_visible = 0;
+int exp_visible = 0;
+int pad_visible = 0;
+volatile int snk_next_dir = -1;
 
 extern void isr_default();
 extern void irq0_timer();
@@ -173,10 +176,6 @@ void execute_command(char* cmd) {
         if (get_second() < 10) vga_print("0");
         vga_print_int(get_second());
         vga_println("");
-    } else if (strcmp(arg1, "snake") == 0) {
-        snake_main();
-        clear_screen();
-        vga_print_color("Bad score I guess...\n", 0x0C);
     } else if (strcmp(arg1, "ls") == 0) {
         fs_list_dir();
     } else if (strcmp(arg1, "cat") == 0) {
@@ -302,10 +301,19 @@ void kmain() {
     extern int win_visible;
     extern disk_fs_node_t dir_cache[MAX_FILES];
     int start_menu_visible = 0;
-    int exp_visible = 0, exp_x = 200, exp_y = 150, exp_cur_dir = -1;
-    int pad_visible = 0, pad_x = 250, pad_y = 200;
+    int exp_x = 200, exp_y = 150, exp_cur_dir = -1;
+    int pad_x = 250, pad_y = 200;
     char pad_title[32] = "NarcPad";
     char pad_content[1024] = {0};
+
+    // Snake GUI State
+    int snk_x = 300, snk_y = 150;
+    int snk_pos_x[100], snk_pos_y[100], snk_len = 5, snk_dir = 3; // 3: Right
+    int snk_apple_x = 10, snk_apple_y = 10, snk_dead = 0;
+    int snk_score = 0, snk_best = 0;
+    uint32_t last_snk_tick = 0;
+    int snk_dragging = 0;
+
     uint32_t last_clock_tick = 0;
     uint32_t last_click_tick = 0;
     int mx = get_mouse_x();
@@ -314,7 +322,7 @@ void kmain() {
     int wx = vga_get_window_x();
     int wy = vga_get_window_y();
     vga_refresh_window();
-    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content); 
+    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best); 
     while (1) {
         mx = get_mouse_x();
         my = get_mouse_y();
@@ -327,6 +335,11 @@ void kmain() {
             if (my <= 35) {
                 if (mx >= 5 && mx <= 75) { start_menu_visible = !start_menu_visible; gui_needs_redraw = 1; }
                 else if (mx >= 80 && mx <= 170) { win_visible = !win_visible; start_menu_visible = 0; gui_needs_redraw = 1; }
+            } else if (snk_visible && mx >= snk_x && mx <= snk_x + 400 && my >= snk_y && my <= snk_y + 325) {
+                if (my <= snk_y + 25) {
+                    if (mx >= snk_x + 400 - 25) { snk_visible = 0; snk_dead = 0; gui_needs_redraw = 1; } // Totally stop
+                    else { snk_dragging = 1; drag_off_x = mx - snk_x; drag_off_y = my - snk_y; }
+                }
             } else if (pad_visible && mx >= pad_x && mx <= pad_x + 500 && my >= pad_y && my <= pad_y + 400) {
                 if (my <= pad_y + 25) {
                     if (mx >= pad_x + 500 - 25) { pad_visible = 0; gui_needs_redraw = 1; }
@@ -371,10 +384,21 @@ void kmain() {
                 if (mx >= 20 && mx <= 60) {
                     if (my >= 60 && my <= 110 && double_click) { exp_visible = 1; gui_needs_redraw = 1; }
                     else if (my >= 140 && my <= 190 && double_click) { win_visible = 1; gui_needs_redraw = 1; }
+                    else if (my >= 300 && my <= 350 && double_click) { 
+                        snk_visible = 1; snk_dead = 0; snk_len = 5; snk_dir = 3; snk_score = 0;
+                        for(int i=0; i<5; i++) { snk_pos_x[i] = 20-i; snk_pos_y[i] = 15; }
+                        gui_needs_redraw = 1; 
+                    }
                 }
             }
         } else if (!lp) {
-            dragging = 0; exp_dragging = 0; pad_dragging = 0;
+            dragging = 0; exp_dragging = 0; pad_dragging = 0; snk_dragging = 0;
+        }
+        if (snk_visible && !snk_dead) {
+            // Process input inside the move logic or buffer it
+        } else if (snk_visible && snk_dead) {
+            if (snk_next_dir == 5) { snk_dead = 0; snk_len = 5; snk_dir = 3; snk_score = 0; for(int i=0; i<5; i++) { snk_pos_x[i] = 20-i; snk_pos_y[i] = 15; } gui_needs_redraw = 1; }
+            snk_next_dir = -1;
         }
         if (dragging && win_visible) {
             int new_wx = mx - drag_off_x, new_wy = my - drag_off_y;
@@ -394,11 +418,46 @@ void kmain() {
             if (pad_y < 35) pad_y = 35;
             gui_needs_redraw = 1;
         }
+        if (snk_dragging && snk_visible) {
+            snk_x = mx - drag_off_x; snk_y = my - drag_off_y;
+            if (snk_x < 0) snk_x = 0; 
+            if (snk_y < 35) snk_y = 35;
+            gui_needs_redraw = 1;
+        }
+        // Snake Move Logic (Move every 10 ticks)
+        if (snk_visible && !snk_dead && (timer_ticks - last_snk_tick > 10)) {
+            last_snk_tick = timer_ticks;
+            
+            // Apply input ONLY when moving to prevent 180-turns bug
+            if (snk_next_dir != -1) {
+                if (snk_next_dir == 6) { snk_visible = 0; snk_dead = 0; }
+                else if (!((snk_dir == 0 && snk_next_dir == 1) || (snk_dir == 1 && snk_next_dir == 0) ||
+                      (snk_dir == 2 && snk_next_dir == 3) || (snk_dir == 3 && snk_next_dir == 2))) {
+                    snk_dir = snk_next_dir;
+                }
+                snk_next_dir = -1;
+            }
+
+            for (int i = snk_len - 1; i > 0; i--) { snk_pos_x[i] = snk_pos_x[i-1]; snk_pos_y[i] = snk_pos_y[i-1]; }
+            if (snk_dir == 0) snk_pos_y[0]--; 
+            if (snk_dir == 1) snk_pos_y[0]++;
+            if (snk_dir == 2) snk_pos_x[0]--; 
+            if (snk_dir == 3) snk_pos_x[0]++;
+            if (snk_pos_x[0] < 0 || snk_pos_x[0] >= 39 || snk_pos_y[0] < 0 || snk_pos_y[0] >= 29) snk_dead = 1;
+            for (int i = 1; i < snk_len; i++) if (snk_pos_x[0] == snk_pos_x[i] && snk_pos_y[0] == snk_pos_y[i]) snk_dead = 1;
+            if (snk_pos_x[0] == snk_apple_x && snk_pos_y[0] == snk_apple_y) {
+                if (snk_len < 100) snk_len++;
+                snk_score += 10;
+                if (snk_score > snk_best) snk_best = snk_score;
+                snk_apple_x = (timer_ticks % 37) + 1; snk_apple_y = (timer_ticks % 27) + 1;
+            }
+            gui_needs_redraw = 1;
+        }
         if (timer_ticks - last_clock_tick >= 100) {
             read_rtc(); last_clock_tick = timer_ticks; gui_needs_redraw = 1;
         }
         if (mx != last_mx || my != last_my || lp != last_lp || wx != last_wx || wy != last_wy || gui_needs_redraw || cmd_ready) {
-            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content);
+            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best);
             vbe_prepare_frame_from_composition();
             vbe_render_mouse(mx, my);
             wait_vsync();
