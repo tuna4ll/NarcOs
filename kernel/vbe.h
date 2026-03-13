@@ -1,6 +1,24 @@
 #ifndef VBE_H
 #define VBE_H
 #include <stdint.h>
+
+typedef enum {
+    WIN_TYPE_TERMINAL,
+    WIN_TYPE_EXPLORER,
+    WIN_TYPE_NARCPAD,
+    WIN_TYPE_SNAKE
+} window_type_t;
+
+typedef struct {
+    window_type_t type;
+    int x, y, w, h;
+    char title[32];
+    int visible;
+    int minimized;
+    int id;
+} window_t;
+
+#define MAX_WINDOWS 8
 void init_vbe();
 void vbe_update();
 void vbe_put_pixel(int x, int y, uint32_t color);
@@ -21,7 +39,7 @@ void vbe_render_mouse_direct(int x, int y);
 void* vbe_get_backbuffer();
 void* vbe_get_window_buffer();
 void vbe_set_target(uint8_t* buffer, uint32_t width);
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int apple_x, int apple_y, int dead, int score, int best, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel);
+void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int start_vis, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel);
 void vbe_draw_desktop_icons(int desktop_dir);
 void vbe_draw_context_menu(int x, int y, const char** items, int count, int selected_idx);
 void vbe_draw_rounded_rect(int x, int y, int w, int h, int radius, uint32_t color, int alpha);
@@ -32,7 +50,7 @@ void wait_vsync();
 extern volatile int gui_needs_redraw;
 void vbe_memcpy(void* dest, void* src, uint32_t count);
 void vbe_memcpy_sse(void* dest, void* src, uint32_t count);
-void vbe_blit_window(int x, int y, int w, int h, uint8_t* win_buf);
+void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused);
 void vbe_draw_taskbar(int start_btn_active);
 void vbe_draw_start_menu();
 void vbe_draw_clock();
@@ -41,6 +59,7 @@ void vbe_draw_vector_folder(int x, int y, int selected);
 void vbe_draw_vector_file(int x, int y, int selected);
 void vbe_draw_vector_pc(int x, int y);
 void vbe_draw_vector_snake(int x, int y);
+void vbe_draw_vector_terminal(int x, int y);
 void vbe_draw_explorer_content(int wx, int wy, int current_dir, int width);
 void vbe_draw_breadcrumb(int x, int y, int current_dir, int width);
 void vbe_draw_narcpad(int x, int y, const char* title, const char* content);

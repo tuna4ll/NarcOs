@@ -20,22 +20,20 @@ stage2_main:
     cmp ax, 0x004F
     jne .vbe_failed
 
-    ; Preferred Modes List: 1080p, 1600x1200, 1280x1024, 1024x768
     mov si, preferred_modes
 .find_mode_loop:
     lodsw
     or ax, ax
-    jz .vbe_failed       ; End of list, no mode found
+    jz .vbe_failed        
     mov cx, ax
-    or cx, 0x4000        ; Set LFB bit
+    or cx, 0x4000        
     mov ax, 0x4F01
     mov di, mode_info_block
     int 0x10
     cmp ax, 0x004F
     jne .find_next
     
-    ; Check if it's the right resolution (Optional but safer)
-    ; For now, we trust our list and BIOS fallback
+   
     jmp .mode_found
 
 .find_next:

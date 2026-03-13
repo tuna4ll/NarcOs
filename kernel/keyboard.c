@@ -45,22 +45,21 @@ void init_keyboard()
     input_pos = 0;
     for (int i = 0; i < INPUT_BUF_SIZE; i++) input_buf[i] = 0;
 }
-extern int win_visible;
-extern int snk_visible;
+#include "vbe.h"
+extern window_t windows[MAX_WINDOWS];
+extern int window_count;
+extern int active_window_idx;
+
 extern volatile int snk_next_dir;
 extern volatile int editor_running;
 extern volatile int editor_input_key;
 extern volatile int editor_special_key;
-extern int pad_visible;
 extern char pad_content[1024];
 extern volatile int gui_needs_redraw;
-extern int exp_visible;
+
 void handle_keyboard()
 {
     uint8_t scancode = inb(0x60);
-    if (!win_visible && !snk_visible && !editor_running && !pad_visible && !exp_visible) {
-        outb(0x20, 0x20); return;
-    }
     if (scancode & 0x80) {
         uint8_t key = scancode & 0x7F;
         if      (key == 0x2A) lshift_pressed = 0;
@@ -68,19 +67,19 @@ void handle_keyboard()
         outb(0x20, 0x20);
         return;
     }
-    if (snk_visible) {
+    if (active_window_idx != -1 && windows[active_window_idx].visible && windows[active_window_idx].type == WIN_TYPE_SNAKE) {
         switch (scancode) {
             case 0x11: case 0x48: snk_next_dir = 0; break;
             case 0x1F: case 0x50: snk_next_dir = 1; break;
             case 0x1E: case 0x4B: snk_next_dir = 2; break;
             case 0x20: case 0x4D: snk_next_dir = 3; break;
-            case 0x13: case 0x19: snk_next_dir = 5; break; // R or P? Let's use 0x13 (R)
-            case 0x10: case 0x01: snk_next_dir = 6; break; // Q or ESC
+            case 0x13: case 0x19: snk_next_dir = 5; break;
+            case 0x10: case 0x01: snk_next_dir = 6; break;
             default: break;
         }
         outb(0x20, 0x20); return;
     }
-    if (pad_visible) {
+    if (active_window_idx != -1 && windows[active_window_idx].visible && windows[active_window_idx].type == WIN_TYPE_NARCPAD) {
         int is_shift = lshift_pressed || rshift_pressed;
         char c = is_shift ? scancode_map_shift[scancode] : scancode_map[scancode];
         if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
@@ -89,9 +88,9 @@ void handle_keyboard()
         size_t len = 0;
         while(pad_content[len]) len++;
 
-        if (scancode == 0x0E) { // Backspace
+        if (scancode == 0x0E) {
             if (len > 0) pad_content[len-1] = '\0';
-        } else if (scancode == 0x1C) { // Enter
+        } else if (scancode == 0x1C) {
             if (len < 1022) { pad_content[len] = '\n'; pad_content[len+1] = '\0'; }
         } else if (c != 0 && len < 1023) {
             pad_content[len] = c;

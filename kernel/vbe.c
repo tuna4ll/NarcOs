@@ -308,21 +308,16 @@ void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
         return;
     }
 
-    // Ultra-Smooth Scaling (Sub-pixel Anti-Aliasing)
     for (int row = 0; row < 8 * scale; row++) {
         for (int col = 0; col < 8 * scale; col++) {
-            // Find map to original pixel
             int ox = col / scale;
             int oy = row / scale;
             
-            // If it's a font pixel
             if (vbe_font[(uint8_t)c][oy] & (1 << (7 - ox))) {
-                // Calculate distance to edge for smoothing
                 int fx = col % scale;
                 int fy = row % scale;
                 int edge_dist = 0;
                 
-                // Simple AA: Pixels near the edges of the scaled block get lower alpha
                 if (fx == 0 || fx == scale-1 || fy == 0 || fy == scale-1) edge_dist = 160;
                 else edge_dist = 255;
                 
@@ -360,7 +355,6 @@ void vbe_copy_to_buffer(void* source) {
     vbe_memcpy(backbuffer, source, size);
 }
 
-// Modern Design Colors
 #define COLOR_GLASS_BG     0x1A1A1A
 #define COLOR_GLASS_BORDER 0x444444
 #define COLOR_ACCENT       0x0078D7
@@ -369,24 +363,35 @@ void vbe_copy_to_buffer(void* source) {
 #define COLOR_TEXT         0xFFFFFF
 #define COLOR_TEXT_DIM     0xAAAAAA
 
-void vbe_blit_window(int x, int y, int w, int h, uint8_t* win_buf) {
-    // Draw Shadow
+void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
+    if (!win->visible || win->minimized) return;
+    
+    int x = win->x;
+    int y = win->y;
+    int w = win->w;
+    int h = win->h;
+
     vbe_draw_shadow(x + 5, y + 5, w, h, 12);
     
-    // Draw Window Background (Glassmorphism)
     vbe_draw_rounded_rect(x, y, w, h, 12, COLOR_GLASS_BG, 230);
-    vbe_draw_rounded_rect(x, y, w, h, 12, COLOR_GLASS_BORDER, 255); // Border
+    vbe_draw_rounded_rect(x, y, w, h, 12, is_focused ? COLOR_ACCENT : COLOR_GLASS_BORDER, 255);
     
-    // Titlebar with Gradient
-    vbe_fill_rect_gradient(x, y, w, 28, COLOR_TITLEBAR, 0x111111, 1);
-    vbe_draw_rounded_rect(x, y, w, 28, 12, COLOR_GLASS_BORDER, 100); // Highlight top edge
+    uint32_t title_col = is_focused ? COLOR_TITLEBAR : 0x222222;
+    vbe_fill_rect_gradient(x, y, w, 28, title_col, 0x111111, 1);
+    vbe_draw_rounded_rect(x, y, w, 28, 12, COLOR_GLASS_BORDER, 80);
     
-    // Content Blit (with offset for border/titlebar)
-    uint32_t bpp = mode_info->bpp / 8;
-    for (int i = 28; i < h - 4; i++) {
-        uint8_t* dest = backbuffer + ((y + i) * mode_info->width + (x + 4)) * bpp;
-        uint8_t* src  = win_buf + (i * w + 4) * bpp;
-        vbe_memcpy_sse(dest, src, (w - 8) * bpp);
+    vbe_draw_string(x + 12, y + 8, win->title, COLOR_TEXT);
+    
+    vbe_fill_rect_alpha(x + w - 24, y + 8, 12, 12, 0xFF5555, 255);
+    vbe_fill_rect_alpha(x + w - 44, y + 8, 12, 12, 0xFFFF00, 255);
+
+    if (win_buf) {
+        uint32_t bpp = mode_info->bpp / 8;
+        for (int i = 28; i < h - 4; i++) {
+            uint8_t* dest = backbuffer + ((y + i) * mode_info->width + (x + 4)) * bpp;
+            uint8_t* src  = win_buf + (i * w + 4) * bpp;
+            vbe_memcpy_sse(dest, src, (w - 8) * bpp);
+        }
     }
 }
 
@@ -468,23 +473,37 @@ void vbe_draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color, in
 }
 
 void vbe_draw_shadow(int x, int y, int w, int h, int r) {
-    // Highly optimized shadow: Just 3 passes with larger radii
     vbe_draw_rounded_rect(x + 2, y + 2, w + 4, h + 4, r + 2, 0x000000, 30);
     vbe_draw_rounded_rect(x + 4, y + 4, w + 8, h + 8, r + 4, 0x000000, 15);
 }
+
 void vbe_draw_taskbar(int start_btn_active) {
     uint32_t w = mode_info->width;
     uint32_t tb_h = 35;
-    // Glassy Gradient Taskbar
     vbe_fill_rect_gradient(0, 0, w, tb_h, 0x222222, 0x050505, 1);
-    vbe_fill_rect_alpha(0, 0, w, 1, 0x555555, 100); // Top shine
+    vbe_fill_rect_alpha(0, 0, w, 1, 0x555555, 100);
     
     uint32_t btn_color = start_btn_active ? COLOR_ACCENT : 0x222222;
     vbe_draw_rounded_rect(5, 4, 75, 27, 8, btn_color, 255);
     vbe_draw_string(15, 12, "NARC", COLOR_TEXT);
+
+    // Terminal Quick Launch Button
+    vbe_draw_rounded_rect(85, 4, 40, 27, 8, 0x333333, 200);
+    vbe_draw_vector_terminal(90, 0);
     
-    vbe_draw_rounded_rect(90, 4, 100, 27, 8, 0x333333, 200);
-    vbe_draw_string(100, 12, "DEV", COLOR_TEXT_DIM);
+    int app_x = 135;
+    extern window_t windows[MAX_WINDOWS];
+    extern int window_count;
+    extern int active_window_idx;
+    
+    for (int i = 0; i < window_count; i++) {
+        if (!windows[i].visible) continue;
+        
+        uint32_t app_col = (i == active_window_idx) ? COLOR_ACCENT : 0x333333;
+        vbe_draw_rounded_rect(app_x, 4, 110, 27, 8, app_col, 200);
+        vbe_draw_string(app_x + 8, 12, windows[i].title, COLOR_TEXT);
+        app_x += 115;
+    }
 }
 
 void vbe_draw_start_menu() {
@@ -505,7 +524,7 @@ extern uint8_t get_hour();
 extern uint8_t get_minute();
 extern uint8_t get_second();
 void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
-    (void)vertical; // Suppress unused warning for now
+    (void)vertical;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > (int)current_target_width) w = current_target_width - x;
@@ -534,22 +553,16 @@ void vbe_draw_clock() {
 void vbe_draw_vector_folder(int x, int y, int selected) {
     uint32_t base_col = selected ? COLOR_ACCENT : 0xFFD700;
     
-    // Folder Body
     vbe_draw_rounded_rect(x, y + 6, 36, 26, 4, base_col, 255);
-    // Folder Tab (The little sticking out part)
     vbe_draw_rounded_rect(x, y + 2, 14, 8, 3, base_col, 255);
-    // Detail / Inner shading
     vbe_fill_rect_alpha(x + 2, y + 10, 32, 1, 0xFFFFFF, 80);
 }
 
 void vbe_draw_vector_file(int x, int y, int selected) {
     (void)selected;
     uint32_t base_col = 0xEEEEEE;
-    // Main paper
     vbe_draw_rounded_rect(x + 4, y, 28, 36, 2, base_col, 255);
-    // Folded corner
     vbe_fill_rect(x + 24, y, 8, 8, 0xCCCCCC);
-    // Lines (Content Representation)
     for (int i = 0; i < 4; i++) {
         vbe_fill_rect_alpha(x + 10, y + 14 + i * 5, 16, 1, 0x000000, 40);
     }
@@ -557,23 +570,24 @@ void vbe_draw_vector_file(int x, int y, int selected) {
 
 void vbe_draw_vector_pc(int x, int y) {
     uint32_t silver = 0xB0B0B0;
-    // Monitor
     vbe_draw_rounded_rect(x + 2, y, 32, 24, 3, 0x333333, 255);
-    vbe_draw_rounded_rect(x + 4, y + 2, 28, 20, 1, 0x0078D7, 200); // Screen GLow
-    // Stand
+    vbe_draw_rounded_rect(x + 4, y + 2, 28, 20, 1, 0x0078D7, 200);
     vbe_fill_rect(x + 16, y + 24, 4, 6, silver);
     vbe_draw_rounded_rect(x + 10, y + 28, 16, 4, 2, silver, 255);
 }
 
 void vbe_draw_vector_snake(int x, int y) {
-    // A cute AA snake head
     vbe_draw_rounded_rect(x + 4, y + 4, 28, 28, 8, 0x00FF00, 255);
-    // Eyes
     vbe_draw_rounded_rect(x + 10, y + 12, 4, 4, 2, 0xFFFFFF, 255);
     vbe_draw_rounded_rect(x + 22, y + 12, 4, 4, 2, 0xFFFFFF, 255);
-    // Pupils
     vbe_fill_rect(x + 11, y + 13, 2, 2, 0x000000);
     vbe_fill_rect(x + 23, y + 13, 2, 2, 0x000000);
+}
+
+void vbe_draw_vector_terminal(int x, int y) {
+    vbe_draw_rounded_rect(x, y + 4, 30, 24, 4, 0x1A1A1A, 255);
+    vbe_draw_char(x + 6, y + 12, '>', 0x00FF00);
+    vbe_draw_char(x + 16, y + 12, '_', 0x00FF00);
 }
 
 void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
@@ -605,19 +619,18 @@ void vbe_draw_explorer_content(int wx, int wy, int current_dir, int width) {
     }
 }
 void vbe_draw_desktop_icons(int desktop_dir) {
-    // Fixed System Icons
     vbe_draw_icon(20, 60, 2, "This PC", 0);
     vbe_draw_icon(20, 300, 3, "Snake", 0);
     
     // Dynamic Desktop Icons from FS
-    int x_off = 20, y_off = 140; // Skip PC icon area
+    int x_off = 20, y_off = 140;
     int row = 0;
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == desktop_dir) {
             int type = (dir_cache[i].flags == 2) ? 0 : 1;
             vbe_draw_icon(x_off, y_off + row * 80, type, dir_cache[i].name, 0);
             row++;
-            if (row > 5) { row = 0; x_off += 80; } // Wrap if too many
+            if (row > 5) { row = 0; x_off += 80; }
         }
     }
 }
@@ -669,7 +682,6 @@ void vbe_draw_narcpad(int x, int y, const char* title, const char* content) {
     line_buf[char_idx] = '\0';
     if (char_idx > 0) vbe_draw_string(x + 15, line_y, line_buf, 0x000000);
     
-    // Draw Pulsing Caret
     extern uint32_t timer_ticks;
     if ((timer_ticks / 20) % 2 == 0) {
         int caret_x = x + 15 + char_idx * 9;
@@ -696,56 +708,58 @@ void vbe_draw_snake_game(int x, int y, int* px, int* py, int len, int ax, int ay
         }
     }
 }
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel) {
+void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int start_vis, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
+    
     uint8_t* old_target = current_target;
     uint32_t old_width = current_target_width;
     vbe_set_target(composition_buffer, mode_info->width);
     vbe_draw_desktop_icons(desktop_dir);
+
     uint8_t* old_back = backbuffer;
     backbuffer = composition_buffer;
-    // HD Scaling: Position windows relatively
-    int win_w = (mode_info->width > 1280) ? 800 : 700;
-    int win_h = (mode_info->width > 1280) ? 600 : 475;
-    
-    if (win_vis) vbe_blit_window(wx, wy, win_w, win_h, window_buffer);
-    if (exp_vis) {
-        int exp_w = (mode_info->width > 1280) ? 800 : 600;
-        int exp_h = (mode_info->width > 1280) ? 500 : 400;
-        vbe_draw_shadow(exp_x + 5, exp_y + 5, exp_w, exp_h, 12);
-        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, exp_h, 12, COLOR_GLASS_BG, 230);
-        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, exp_h, 12, COLOR_GLASS_BORDER, 255);
-        vbe_draw_rounded_rect(exp_x, exp_y, exp_w, 28, 12, COLOR_TITLEBAR, 240);
-        vbe_draw_string(exp_x + 12, exp_y + 8, "NarcExplorer", COLOR_TEXT);
-        vbe_fill_rect(exp_x + exp_w - 20, exp_y + 8, 12, 12, 0xFF5555);
-        vbe_draw_breadcrumb(exp_x, exp_y + 28, exp_dir, exp_w);
-        vbe_draw_explorer_content(exp_x, exp_y + 20, exp_dir, exp_w);
+
+    for (int i = 0; i < win_count; i++) {
+        if (!windows[i].visible || windows[i].minimized) continue;
+        
+        int is_focused = (i == active_win_idx);
+        
+        switch(windows[i].type) {
+            case WIN_TYPE_TERMINAL:
+                vbe_blit_window(&windows[i], window_buffer, is_focused);
+                break;
+            case WIN_TYPE_EXPLORER:
+                vbe_blit_window(&windows[i], NULL, is_focused);
+                extern int exp_dir;
+                vbe_draw_breadcrumb(windows[i].x, windows[i].y + 28, exp_dir, windows[i].w);
+                vbe_draw_explorer_content(windows[i].x, windows[i].y + 20, exp_dir, windows[i].w);
+                break;
+            case WIN_TYPE_NARCPAD:
+                vbe_blit_window(&windows[i], NULL, is_focused);
+                extern char pad_content[1024];
+                vbe_draw_narcpad(windows[i].x, windows[i].y, windows[i].title, pad_content);
+                break;
+            case WIN_TYPE_SNAKE:
+                vbe_blit_window(&windows[i], NULL, is_focused);
+                extern int snk_px[100], snk_py[100], snk_len, apple_x, apple_y, snk_dead, snk_score, snk_best;
+                vbe_draw_snake_game(windows[i].x, windows[i].y, snk_px, snk_py, snk_len, apple_x, apple_y, snk_dead, snk_score, snk_best);
+                break;
+        }
     }
-    if (pad_vis) vbe_draw_narcpad(pad_x, pad_y, pad_title, pad_content);
-    if (snk_vis) {
-        vbe_draw_shadow(snk_x + 5, snk_y + 5, 400, 325, 12);
-        vbe_draw_rounded_rect(snk_x, snk_y, 400, 325, 12, 0x000000, 240);
-        vbe_draw_rounded_rect(snk_x, snk_y, 400, 325, 12, COLOR_GLASS_BORDER, 255);
-        vbe_draw_rounded_rect(snk_x, snk_y, 400, 28, 12, 0x111111, 255);
-        vbe_draw_string(snk_x + 12, snk_y + 8, "NarcSnake", COLOR_TEXT);
-        vbe_draw_snake_game(snk_x, snk_y, snk_px, snk_py, snk_len, ax, ay, dead, score, best);
-    }
     
-    // Draw Dragging Ghost Icon
     if (drag_file_idx != -1) {
-        int type = (dir_cache[drag_file_idx].flags == 2) ? 0 : 1;
-        vbe_draw_icon(mx - 16, my - 16, type, dir_cache[drag_file_idx].name, 1);
+        vbe_draw_icon(mx - 16, my - 16, 1, "Moving...", 1);
     }
 
     vbe_draw_taskbar(start_vis);
     if (start_vis) vbe_draw_start_menu();
     if (ctx_vis) vbe_draw_context_menu(ctx_x, ctx_y, ctx_items, ctx_count, ctx_sel);
     vbe_draw_clock();
+    
     backbuffer = old_back;
     vbe_set_target(old_target, old_width);
-    gui_needs_redraw = 0;
 }
 
 void vbe_prepare_frame_from_composition() {

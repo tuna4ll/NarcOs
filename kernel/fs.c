@@ -35,7 +35,6 @@ void init_fs() {
             dir_cache[i].parent_index = -1;
             dir_cache[i].name[0] = '\0';
         }
-        // Standard Linux-like Structure
         fs_create_dir("bin");
         fs_create_dir("system");
         fs_create_dir("home");
@@ -49,7 +48,7 @@ void init_fs() {
         fs_create_file("readme.txt");
         fs_write_file("readme.txt", "Welcome to NarcOs Professional Desktop!\nFiles here appear on your desktop icons.\n");
         
-        fs_change_dir("/"); // Back to root
+        fs_change_dir("/");
         fs_sync();
     }
 }
@@ -149,7 +148,7 @@ int fs_read_file(const char* name, char* buffer, size_t max_len) {
 }
 int fs_delete_file(const char* name) {
     int idx = _fs_find_file(name, 1);
-    if (idx == -1) idx = _fs_find_file(name, 2); // Also delete dirs
+    if (idx == -1) idx = _fs_find_file(name, 2);
     if (idx == -1) return -1;
     dir_cache[idx].flags = 0;
     fs_sync();
