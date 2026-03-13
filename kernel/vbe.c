@@ -378,11 +378,22 @@ void vbe_draw_explorer_content(int wx, int wy, int current_dir) {
         }
     }
 }
-void vbe_draw_desktop_icons() {
+void vbe_draw_desktop_icons(int desktop_dir) {
+    // Fixed System Icons
     vbe_draw_icon(20, 60, 2, "This PC", 0);
-    vbe_draw_icon(20, 140, 1, "Terminal", 0);
-    vbe_draw_icon(20, 220, 0, "Users", 0);
     vbe_draw_icon(20, 300, 3, "Snake", 0);
+    
+    // Dynamic Desktop Icons from FS
+    int x_off = 20, y_off = 140; // Skip PC icon area
+    int row = 0;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == desktop_dir) {
+            int type = (dir_cache[i].flags == 2) ? 0 : 1;
+            vbe_draw_icon(x_off, y_off + row * 80, type, dir_cache[i].name, 0);
+            row++;
+            if (row > 5) { row = 0; x_off += 80; } // Wrap if too many
+        }
+    }
 }
 
 void vbe_draw_rect(int x, int y, int w, int h, uint32_t color) {
@@ -451,14 +462,14 @@ void vbe_draw_snake_game(int x, int y, int* px, int* py, int len, int ax, int ay
         }
     }
 }
-void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best) {
+void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, int exp_x, int exp_y, int exp_dir, int pad_vis, int pad_x, int pad_y, const char* pad_title, const char* pad_content, int snk_vis, int snk_x, int snk_y, int* snk_px, int* snk_py, int snk_len, int ax, int ay, int dead, int score, int best, int desktop_dir, int drag_file_idx, int mx, int my) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
     vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
     uint8_t* old_target = current_target;
     uint32_t old_width = current_target_width;
     vbe_set_target(composition_buffer, mode_info->width);
-    vbe_draw_desktop_icons();
+    vbe_draw_desktop_icons(desktop_dir);
     uint8_t* old_back = backbuffer;
     backbuffer = composition_buffer;
     if (win_vis) vbe_blit_window(wx, wy, 700, 475, window_buffer);
@@ -471,8 +482,14 @@ void vbe_compose_scene(int wx, int wy, int win_vis, int start_vis, int exp_vis, 
         vbe_draw_breadcrumb(exp_x, exp_y + 25, exp_dir);
         vbe_draw_explorer_content(exp_x, exp_y + 15, exp_dir);
     }
-    if (pad_vis) vbe_draw_narcpad(pad_x, pad_y, pad_title, pad_content);
     if (snk_vis) vbe_draw_snake_game(snk_x, snk_y, snk_px, snk_py, snk_len, ax, ay, dead, score, best);
+    
+    // Draw Dragging Ghost Icon
+    if (drag_file_idx != -1) {
+        int type = (dir_cache[drag_file_idx].flags == 2) ? 0 : 1;
+        vbe_draw_icon(mx - 16, my - 16, type, dir_cache[drag_file_idx].name, 1);
+    }
+
     vbe_draw_taskbar(start_vis);
     if (start_vis) vbe_draw_start_menu();
     vbe_draw_clock();

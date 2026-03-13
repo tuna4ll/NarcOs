@@ -9,13 +9,15 @@ extern void vga_print_int(int num);
 disk_fs_node_t dir_cache[MAX_FILES];
 uint8_t sector_buffer[512];
 int current_dir_index = -1;
-static void save_dir_cache() {
-    ata_write_sector(DIR_SECTOR, (uint8_t*)dir_cache);
-    ata_write_sector(DIR_SECTOR + 1, (uint8_t*)dir_cache + 512);
+void fs_sync() {
+    for (int i = 0; i < 8; i++) {
+        ata_write_sector(DIR_SECTOR + i, (uint8_t*)dir_cache + (i * 512));
+    }
 }
 static void load_dir_cache() {
-    ata_read_sector(DIR_SECTOR, (uint8_t*)dir_cache);
-    ata_read_sector(DIR_SECTOR + 1, (uint8_t*)dir_cache + 512);
+    for (int i = 0; i < 8; i++) {
+        ata_read_sector(DIR_SECTOR + i, (uint8_t*)dir_cache + (i * 512));
+    }
 }
 void init_fs() {
     load_dir_cache();
@@ -33,8 +35,22 @@ void init_fs() {
             dir_cache[i].parent_index = -1;
             dir_cache[i].name[0] = '\0';
         }
+        // Standard Linux-like Structure
+        fs_create_dir("bin");
+        fs_create_dir("system");
+        fs_create_dir("home");
+        
+        fs_change_dir("home");
+        fs_create_dir("user");
+        fs_change_dir("user");
+        fs_create_dir("Desktop");
+        fs_change_dir("Desktop");
+        
         fs_create_file("readme.txt");
-        fs_write_file("readme.txt", "NarcFS Driver Active!\nThis file is persistent.\nTry writing to me.\n");
+        fs_write_file("readme.txt", "Welcome to NarcOs Professional Desktop!\nFiles here appear on your desktop icons.\n");
+        
+        fs_change_dir("/"); // Back to root
+        fs_sync();
     }
 }
 static int _fs_find_file(const char* name, uint32_t type) {
@@ -55,7 +71,7 @@ int fs_create_file(const char* name) {
             dir_cache[i].flags = 1;
             dir_cache[i].parent_index = current_dir_index;
             dir_cache[i].lba = 100 + i;
-            save_dir_cache();
+            fs_sync();
             return 0;
         }
     }
@@ -71,7 +87,7 @@ int fs_create_dir(const char* name) {
             dir_cache[i].flags = 2;
             dir_cache[i].parent_index = current_dir_index;
             dir_cache[i].lba = 0;
-            save_dir_cache();
+            fs_sync();
             return 0;
         }
     }
@@ -105,7 +121,7 @@ int fs_write_file(const char* name, const char* data) {
     size_t len = strlen(data);
     if (len > 512) len = 512;
     dir_cache[idx].size = (uint32_t)len;
-    save_dir_cache();
+    fs_sync();
     for (int i = 0; i < 512; i++) sector_buffer[i] = 0;
     strncpy((char*)sector_buffer, data, len);
     ata_write_sector(dir_cache[idx].lba, sector_buffer);
@@ -125,9 +141,28 @@ int fs_read_file(const char* name, char* buffer, size_t max_len) {
 }
 int fs_delete_file(const char* name) {
     int idx = _fs_find_file(name, 1);
+    if (idx == -1) idx = _fs_find_file(name, 2); // Also delete dirs
     if (idx == -1) return -1;
     dir_cache[idx].flags = 0;
-    save_dir_cache();
+    fs_sync();
+    return 0;
+}
+int fs_move_file(const char* name, const char* target_dir) {
+    int file_idx = _fs_find_file(name, 1);
+    if (file_idx == -1) file_idx = _fs_find_file(name, 2);
+    if (file_idx == -1) return -1;
+
+    int target_idx = -1;
+    
+    if (strcmp(target_dir, "/") == 0) target_idx = -1;
+    else {
+        target_idx = _fs_find_file(target_dir, 2);
+    }
+    
+    if (target_idx == -1 && strcmp(target_dir, "/") != 0) return -1;
+    
+    dir_cache[file_idx].parent_index = target_idx;
+    fs_sync();
     return 0;
 }
 void fs_list_dir() {

@@ -299,12 +299,21 @@ void kmain() {
     int dragging = 0, exp_dragging = 0, pad_dragging = 0;
     int drag_off_x = 0, drag_off_y = 0;
     extern int win_visible;
+    extern int current_dir_index;
     extern disk_fs_node_t dir_cache[MAX_FILES];
     int start_menu_visible = 0;
     int exp_x = 200, exp_y = 150, exp_cur_dir = -1;
     int pad_x = 250, pad_y = 200;
     char pad_title[32] = "NarcPad";
     char pad_content[1024] = {0};
+    int desk_dir_idx = -1;
+
+    // Resolve Desktop Path: /home/user/Desktop
+    fs_change_dir("/");
+    fs_change_dir("home");
+    fs_change_dir("user");
+    fs_change_dir("Desktop");
+    desk_dir_idx = current_dir_index;
 
     // Snake GUI State
     int snk_x = 300, snk_y = 150;
@@ -313,6 +322,7 @@ void kmain() {
     int snk_score = 0, snk_best = 0;
     uint32_t last_snk_tick = 0;
     int snk_dragging = 0;
+    int drag_file_idx = -1; // For Drag & Drop
 
     uint32_t last_clock_tick = 0;
     uint32_t last_click_tick = 0;
@@ -322,7 +332,7 @@ void kmain() {
     int wx = vga_get_window_x();
     int wy = vga_get_window_y();
     vga_refresh_window();
-    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best); 
+    vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best, desk_dir_idx, drag_file_idx, mx, my); 
     while (1) {
         mx = get_mouse_x();
         my = get_mouse_y();
@@ -351,7 +361,7 @@ void kmain() {
                     else { exp_dragging = 1; drag_off_x = mx - exp_x; drag_off_y = my - exp_y; }
                 } else if (my <= exp_y + 45) {
                     if (mx >= exp_x + 5 && mx <= exp_x + 70) { exp_cur_dir = -1; gui_needs_redraw = 1; }
-                } else if (double_click) {
+                } else {
                     int ix = (mx - (exp_x + 20)) / 80;
                     int iy = (my - (exp_y + 55)) / 70;
                     if (ix >= 0 && ix < 8 && iy >= 0) {
@@ -364,11 +374,15 @@ void kmain() {
                             }
                         }
                         if (hit_idx != -1) {
-                            if (dir_cache[hit_idx].flags == 2) { exp_cur_dir = hit_idx; gui_needs_redraw = 1; }
-                            else {
-                                strncpy(pad_title, dir_cache[hit_idx].name, 31);
-                                fs_read_file(dir_cache[hit_idx].name, pad_content, 1023);
-                                pad_visible = 1; gui_needs_redraw = 1;
+                            if (double_click) {
+                                if (dir_cache[hit_idx].flags == 2) { exp_cur_dir = hit_idx; gui_needs_redraw = 1; }
+                                else {
+                                    strncpy(pad_title, dir_cache[hit_idx].name, 31);
+                                    fs_read_file(dir_cache[hit_idx].name, pad_content, 1023);
+                                    pad_visible = 1; gui_needs_redraw = 1;
+                                }
+                            } else {
+                                drag_file_idx = hit_idx; // Start dragging from Explorer
                             }
                         }
                     }
@@ -390,8 +404,33 @@ void kmain() {
                         gui_needs_redraw = 1; 
                     }
                 }
+                // Check Dynamic Desktop Icons for Dragging
+                int d_row = 0, d_x = 20, d_y = 140;
+                for (int i = 0; i < MAX_FILES; i++) {
+                    if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == desk_dir_idx) {
+                        if (mx >= d_x && mx <= d_x + 32 && my >= d_y + d_row * 80 && my <= d_y + d_row * 80 + 32) {
+                            drag_file_idx = i; // Start dragging file
+                            gui_needs_redraw = 1;
+                        }
+                        d_row++; if (d_row > 5) { d_row = 0; d_x += 80; }
+                    }
+                }
             }
         } else if (!lp) {
+            // Drag & Drop Finish Logic
+            if (drag_file_idx != -1) {
+                // If dropped over NarcExplorer
+                if (exp_visible && mx >= exp_x && mx <= exp_x + 600 && my >= exp_y && my <= exp_y + 400) {
+                    dir_cache[drag_file_idx].parent_index = exp_cur_dir;
+                    fs_sync();
+                } else {
+                    // If dropped over Desktop (empty area)
+                    dir_cache[drag_file_idx].parent_index = desk_dir_idx;
+                    fs_sync();
+                }
+                drag_file_idx = -1;
+                gui_needs_redraw = 1;
+            }
             dragging = 0; exp_dragging = 0; pad_dragging = 0; snk_dragging = 0;
         }
         if (snk_visible && !snk_dead) {
@@ -457,7 +496,7 @@ void kmain() {
             read_rtc(); last_clock_tick = timer_ticks; gui_needs_redraw = 1;
         }
         if (mx != last_mx || my != last_my || lp != last_lp || wx != last_wx || wy != last_wy || gui_needs_redraw || cmd_ready) {
-            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best);
+            vbe_compose_scene(wx, wy, win_visible, start_menu_visible, exp_visible, exp_x, exp_y, exp_cur_dir, pad_visible, pad_x, pad_y, pad_title, pad_content, snk_visible, snk_x, snk_y, snk_pos_x, snk_pos_y, snk_len, snk_apple_x, snk_apple_y, snk_dead, snk_score, snk_best, desk_dir_idx, drag_file_idx, mx, my);
             vbe_prepare_frame_from_composition();
             vbe_render_mouse(mx, my);
             wait_vsync();
