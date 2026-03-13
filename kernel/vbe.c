@@ -418,7 +418,7 @@ void vbe_fill_rect(int x, int y, int w, int h, uint32_t color) {
     for (int i = 0; i < h; i++) {
         uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
         if (bpp == 4) {
-            for (int j = 0; j < w; j++) ((uint32_t*)p)[j] = color;
+            vbe_memset_sse(p, color, w * 4);
         } else {
             for (int j = 0; j < w; j++) {
                 p[j * 3]     = color & 0xFF;
@@ -442,15 +442,15 @@ void vbe_fill_rect_alpha(int x, int y, int w, int h, uint32_t color, int alpha) 
     uint32_t bpp = mode_info->bpp / 8;
     for (int i = 0; i < h; i++) {
         uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
-        for (int j = 0; j < w; j++) {
-            uint32_t old;
-            if (bpp == 4) old = *(uint32_t*)p;
-            else old = (p[2] << 16) | (p[1] << 8) | p[0];
-            
-            uint32_t mixed = vbe_mix_color(color, old, alpha);
-            
-            if (bpp == 4) { *(uint32_t*)p = mixed; p += 4; }
-            else { p[0] = mixed & 0xFF; p[1] = (mixed >> 8) & 0xFF; p[2] = (mixed >> 16) & 0xFF; p += 3; }
+        if (bpp == 4) {
+            vbe_alpha_blend_sse(p, color, alpha, w);
+        } else {
+            for (int j = 0; j < w; j++) {
+                uint32_t old = (p[2] << 16) | (p[1] << 8) | p[0];
+                uint32_t mixed = vbe_mix_color(color, old, alpha);
+                p[0] = mixed & 0xFF; p[1] = (mixed >> 8) & 0xFF; p[2] = (mixed >> 16) & 0xFF; 
+                p += 3;
+            }
         }
     }
 }
