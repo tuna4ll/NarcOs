@@ -387,10 +387,31 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
 
     if (win_buf) {
         uint32_t bpp = mode_info->bpp / 8;
+        int screen_w = mode_info->width;
+        int screen_h = mode_info->height;
+
         for (int i = 28; i < h - 4; i++) {
-            uint8_t* dest = backbuffer + ((y + i) * mode_info->width + (x + 4)) * bpp;
-            uint8_t* src  = win_buf + (i * w + 4) * bpp;
-            vbe_memcpy_sse(dest, src, (w - 8) * bpp);
+            int draw_y = y + i;
+            if (draw_y < 0 || draw_y >= screen_h) continue;
+
+            int draw_x = x + 4;
+            int copy_w = w - 8;
+            int src_off_x = 4;
+
+            if (draw_x < 0) {
+                copy_w += draw_x;
+                src_off_x -= draw_x;
+                draw_x = 0;
+            }
+            if (draw_x + copy_w > screen_w) {
+                copy_w = screen_w - draw_x;
+            }
+
+            if (copy_w > 0) {
+                uint8_t* dest = backbuffer + (draw_y * screen_w + draw_x) * bpp;
+                uint8_t* src  = win_buf + (i * w + src_off_x) * bpp;
+                vbe_memcpy_sse(dest, src, copy_w * bpp);
+            }
         }
     }
 }

@@ -59,6 +59,15 @@ extern volatile int gui_needs_redraw;
 
 void handle_keyboard()
 {
+    uint8_t status = inb(0x64);
+    if (!(status & 0x01) || (status & 0x20)) {
+        if (status & 0x01) {
+            // Mouse data is in buffer, but this is the keyboard ISR.
+            // Let the mouse ISR handle it.
+        }
+        outb(0x20, 0x20);
+        return;
+    }
     uint8_t scancode = inb(0x60);
     if (scancode & 0x80) {
         uint8_t key = scancode & 0x7F;

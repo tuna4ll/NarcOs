@@ -548,9 +548,19 @@ void kmain() {
         }
 
         if (dragging_idx != -1) {
+            uint32_t sw = vbe_get_width();
+            uint32_t sh = vbe_get_height();
+            int win_w = windows[dragging_idx].w;
+            int win_h = windows[dragging_idx].h;
+
             windows[dragging_idx].x = mx - drag_off_x;
             windows[dragging_idx].y = my - drag_off_y;
+
             if (windows[dragging_idx].y < 35) windows[dragging_idx].y = 35;
+            if (windows[dragging_idx].y > (int)sh - 20) windows[dragging_idx].y = (int)sh - 20;
+            if (windows[dragging_idx].x < -(win_w - 40)) windows[dragging_idx].x = -(win_w - 40);
+            if (windows[dragging_idx].x > (int)sw - 40) windows[dragging_idx].x = (int)sw - 40;
+
             gui_needs_redraw = 1;
         }
         
