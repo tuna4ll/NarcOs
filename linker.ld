@@ -6,9 +6,10 @@ SECTIONS
 {
     . = 0x10000;
 
-    .text : ALIGN(4)
+    .text : ALIGN(4096)
     {
         *(.text.prologue)
+        . = ALIGN(4096);
         *(.text)
         *(.text.*)
     }
@@ -25,12 +26,24 @@ SECTIONS
         *(.data.*)
     }
 
+    .user_code : ALIGN(16)
+    {
+        *(.user_code)
+    }
+
     .bss : ALIGN(4)
     {
-        __bss_start = .;
         *(COMMON)
         *(.bss)
-        *(.bss.*)
-        __bss_end = .;
+        *(.bss*)
+    }
+
+    /DISCARD/ :
+    {
+        *(.note*)
+        *(.indent)
+        *(.comment)
+        *(.eh_frame)
+        *(.rel.plt)
     }
 }

@@ -10,6 +10,15 @@ global vbe_memcpy
 global vbe_memcpy_sse
 global vbe_memset_sse
 global vbe_alpha_blend_sse
+global gdt_flush
+global tss_flush
+global isr_syscall
+global jump_to_usermode
+global jump_to_usermode_v9
+global isr_gpf
+global isr_double_fault
+extern usermode_jump_eip
+extern usermode_jump_esp
 SECTION .text.prologue
 _start:
     mov esp, 0x2800000
@@ -26,6 +35,7 @@ _start:
 .halt:
     hlt
     jmp .halt
+
 SECTION .text
 inb:
     push ebp
@@ -45,32 +55,207 @@ outb:
 extern isr_handler_default
 isr_default:
     pusha
+    
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+
     cld
     call isr_handler_default
+
+    pop eax
+    mov ds, ax
+    mov es, ax
+
     popa
     iret
 extern handle_timer
 irq0_timer:
     pusha
+    
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     cld
     call handle_timer
+
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     popa
     iret
 extern handle_keyboard
 irq1_keyboard:
     pusha
+    
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     cld
     call handle_keyboard
+
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     popa
     iret
 global irq12_mouse
 extern handle_mouse
 irq12_mouse:
     pusha
+    
+    mov ax, ds
+    push eax
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     cld
     call handle_mouse
+
+    pop eax
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
     popa
     iret
+
+gdt_flush:
+    mov eax, [esp + 4]
+    lgdt [eax]
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    jmp 0x08:.flush
+.flush:
+    ret
+
+tss_flush:
+    mov ax, 0x28 ; Index 5 * 8 = 40 (0x28). TSS is Ring 0.
+    ltr ax
+    ret
+
+extern syscall_handler
+
+SECTION .text
+
+jump_to_usermode_v9:
+    ; Parameters on stack: [esp+4]=EIP, [esp+8]=ESP, [esp+12]=LFB
+    mov eax, [esp + 4]
+    mov ebx, [esp + 8]
+    mov esi, [esp + 12] ; Pass LFB address in ESI to usermode
+    
+    cli
+    
+    ; Setup IRET frame
+    push dword 0x23    ; SS (User Data)
+    push ebx           ; ESP (User Stack)
+    push dword 0x202   ; EFLAGS (IF=1) - FULL SYSTEM TEST
+    push dword 0x1B    ; CS (User Code)
+    push eax           ; EIP (Entry Point)
+    
+    ; Load segments
+    mov cx, 0x23 
+    mov ds, cx
+    mov es, cx
+    mov fs, cx
+    mov gs, cx
+
+    iret
+
+
+isr_syscall:
+    push dword 0 ; Dummy error code
+    pusha
+    
+    ; Save old segments
+    push ds
+    push es
+    push fs
+    push gs
+    
+    ; Load kernel segments
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    ; Pass pointer to stack frame [trap_frame_t]
+    push esp
+    call syscall_handler
+    add esp, 4
+
+    ; Restore segments
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    popa
+    add esp, 4 ; remove dummy error code
+    iret
+
+extern gpf_handler
+isr_gpf:
+    ; Hardware pushed error code already
+    pusha
+    
+    ; Save old segments
+    push ds
+    push es
+    push fs
+    push gs
+    
+    ; Load kernel segments
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp ; Pointer to trap_frame_t
+    call gpf_handler
+    add esp, 4
+    
+    pop gs
+    pop fs
+    pop es
+    pop ds
+    
+    popa
+    add esp, 4 ; Error code
+    iret
+
+isr_double_fault:
+    cli
+    hlt
+    jmp isr_double_fault
 vbe_memcpy:
     push ebp
     mov ebp, esp

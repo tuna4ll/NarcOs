@@ -6,6 +6,8 @@
 #include "memory_alloc.h"
 #include "vbe.h"
 #include "mouse.h"
+#include "gdt.h"
+#include "syscall.h"
 
 extern void outb(uint16_t port, uint8_t val);
 extern void clear_screen();
@@ -18,20 +20,11 @@ extern disk_fs_node_t dir_cache[MAX_FILES];
 
 extern void print_memory_info();
 
-extern void print_memory_info();
+void vga_print_int_hex(uint32_t n, char* buf);
 
-typedef struct {
-    uint16_t isr_low;
-    uint16_t kernel_cs;
-    uint8_t  reserved;
-    uint8_t  attributes;
-    uint16_t isr_high;
-} __attribute__((packed)) idt_entry_t;
-
-typedef struct {
-    uint16_t limit;
-    uint32_t base;
-} __attribute__((packed)) idtr_t;
+// Global variables for usermode jump
+volatile uint32_t usermode_jump_eip;
+volatile uint32_t usermode_jump_esp;
 
 idt_entry_t idt[256];
 idtr_t idtr;
@@ -118,11 +111,11 @@ extern void irq0_timer();
 extern void irq1_keyboard();
 extern void irq12_mouse();
 
-void set_idt_gate(int n, uint32_t handler) {
+void set_idt_gate(int n, uint32_t handler, uint8_t attributes) {
     idt[n].isr_low = (uint16_t)(handler & 0xFFFF);
     idt[n].kernel_cs = 0x08;
     idt[n].reserved = 0;
-    idt[n].attributes = 0x8E;
+    idt[n].attributes = attributes;
     idt[n].isr_high = (uint16_t)((handler >> 16) & 0xFFFF);
 }
 
@@ -147,27 +140,112 @@ void init_pit() {
     outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
 }
 
+extern void isr_gpf();
+extern void isr_double_fault();
+
 void load_idt() {
     idtr.base = (uint32_t)&idt;
     idtr.limit = 256 * sizeof(idt_entry_t) - 1;
     for (int i = 0; i < 256; i++) {
-        set_idt_gate(i, (uint32_t)isr_default);
+        set_idt_gate(i, (uint32_t)isr_default, 0x8E);
     }
-    set_idt_gate(32, (uint32_t)irq0_timer);
-    set_idt_gate(33, (uint32_t)irq1_keyboard);
-    set_idt_gate(44, (uint32_t)irq12_mouse);
+    set_idt_gate(8, (uint32_t)isr_double_fault, 0x8E);
+    set_idt_gate(13, (uint32_t)isr_gpf, 0x8E);
+    set_idt_gate(32, (uint32_t)irq0_timer, 0x8E);
+    set_idt_gate(33, (uint32_t)irq1_keyboard, 0x8E);
+    set_idt_gate(44, (uint32_t)irq12_mouse, 0x8E);
     asm volatile("lidt %0" : : "m"(idtr));
     asm volatile("sti");
 }
 
 void handle_timer() {
     timer_ticks++;
+    
+    // Kernel level heartbeat: SAFE VGA WRITE at (79, 0)
+    volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
+    vga[79] = (timer_ticks % 20 < 10) ? 0x1F2A : 0x1F20; // Star blinking in blue
+
     outb(0x20, 0x20);
 }
 
 void isr_handler_default() {
     outb(0x20, 0x20);
     outb(0xA0, 0x20);
+}
+
+void vga_print_int_hex(uint32_t n, char* buf) {
+    const char* hex = "0123456789ABCDEF";
+    buf[0] = '0'; buf[1] = 'x';
+    for(int i=0; i<8; i++) {
+        buf[9-i] = hex[(n >> (i*4)) & 0x0F];
+    }
+    buf[10] = '\0';
+}
+
+void gpf_handler(trap_frame_t* frame) {
+    vbe_clear(0x880000); // Red
+    vbe_draw_string(20, 20, "!!! NARC-OS GPF (RING 3 CRASH) !!!", 0xFFFFFF);
+    
+    char buf[64];
+    // GS, FS, ES, DS, EDI, ESI, EBP, ESP?, EBX, EDX, ECX, EAX
+    const char* reg_names[] = {"GS", "FS", "ES", "DS", "EDI", "ESI", "EBP", "ESP_U", "EBX", "EDX", "ECX", "EAX"};
+    uint32_t* raw = (uint32_t*)frame;
+    
+    for(int i=0; i<12; i++) {
+        vbe_draw_string(20, 50 + (i*15), reg_names[i], 0xFFFFFF);
+        vga_print_int_hex(raw[i], buf);
+        vbe_draw_string(80, 50 + (i*15), buf, 0xCCCCCC);
+    }
+    
+    vbe_draw_string(250, 50, "HW-ERR:", 0xFFFFFF);
+    vga_print_int_hex(frame->error_code, buf);
+    vbe_draw_string(350, 50, buf, 0xFFFF00);
+
+    vbe_draw_string(250, 65, "HW-EIP:", 0xFFFFFF);
+    vga_print_int_hex(frame->eip, buf);
+    vbe_draw_string(350, 65, buf, 0xFFFF00);
+
+    vbe_draw_string(250, 80, "HW-CS:", 0xFFFFFF);
+    vga_print_int_hex(frame->cs, buf);
+    vbe_draw_string(350, 80, buf, 0xFFFF00);
+
+    vbe_draw_string(250, 95, "HW-ESP:", 0xFFFFFF);
+    vga_print_int_hex(frame->user_esp, buf);
+    vbe_draw_string(350, 95, buf, 0xFFFF00);
+
+    vbe_draw_string(250, 110, "HW-SS:", 0xFFFFFF);
+    vga_print_int_hex(frame->user_ss, buf);
+    vbe_draw_string(350, 110, buf, 0xFFFF00);
+
+    vbe_update();
+    while(1) asm volatile("hlt");
+}
+
+void user_code_test_logic() {
+    // Super simple loop. No strings, no complex stack.
+    while(1) {
+        asm volatile (
+            "mov $4, %%eax\n" // SYS_GUI_UPDATE
+            "int $0x80"
+            : : : "eax"
+        );
+        for(int i=0; i<50000; i++) asm volatile("nop");
+    }
+}
+
+void vbe_compose_scene_basic() {
+    // This is a simplified version of the composer for testing
+    // It's called from SYSCALL_GUI_UPDATE to bypass the blocked kmain loop
+    extern window_t windows[MAX_WINDOWS];
+    extern int window_count, active_window_idx;
+    extern int current_dir_index;
+    int mx = get_mouse_x();
+    int my = get_mouse_y();
+    
+    // Use the global state to redraw the screen
+    vbe_compose_scene(windows, window_count, active_window_idx, 0, current_dir_index, -1, mx, my, 0, 0, 0, 0, 0, -1);
+    vbe_prepare_frame_from_composition();
+    vbe_render_mouse(mx, my);
 }
 
 void execute_command(char* cmd) {
@@ -204,6 +282,35 @@ void execute_command(char* cmd) {
         vga_println("  cd     - Change directory (cd <name> or cd ..)");
         vga_println("  rm     - Delete file (rm <file>)");
         vga_println("  malloc_test - Test dynamic heap memory");
+        vga_println("  usermode_test - Test Ring 3 transition and syscall");
+    } else if (strcmp(arg1, "usermode_test") == 0) {
+        vga_println("Launching Secure User Mode Test V12 (Final Victory)...");
+        extern void jump_to_usermode_v9(uint32_t eip, uint32_t esp, uint32_t lfb);
+        extern void usermode_entry_gate();
+        
+        uint32_t user_esp = 0x90000; 
+        uint32_t lfb_addr = *(uint32_t*)(0x6100 + 40);
+
+        char buf[64];
+        uint32_t target_eip = (uint32_t)usermode_entry_gate;
+        uint32_t* magic_ptr = (uint32_t*)(target_eip - 4);
+        
+        vga_print("Target EIP Sym: ");
+        vga_print_int_hex(target_eip, buf);
+        vga_println(buf);
+
+        if (*magic_ptr != 0xDEADC0DE) {
+            vga_println("CRITICAL: MAGIC NUMBER MISMATCH!");
+            return;
+        }
+
+        vga_println("Magic Recognized. Transitioning to Ring 3...");
+        vga_println("Verification: If the heartbeat pixel is rotating and the");
+        vga_println("mouse is responsive, the transition was successful!");
+
+        set_tss_stack(0x2800000); 
+        
+        jump_to_usermode_v9(target_eip, user_esp, lfb_addr);
     } else if (strcmp(arg1, "clear") == 0) {
         clear_screen();
     } else if (strcmp(arg1, "mem") == 0) {
@@ -267,7 +374,7 @@ void execute_command(char* cmd) {
         while (arg2[k] == ' ') k++;
         char* file_content = &arg2[k];
         if (file_content[0] == '\0') {
-            vga_print_color("hata: Metin bos olamaz.\n", 0x0C);
+            vga_print_color("error: Text cannot be empty.\n", 0x0C);
             return;
         }
         if (fs_write_file(file_name, file_content) == 0) {
@@ -338,7 +445,9 @@ void print_prompt() {
 void kmain() {
     init_pic();
     init_pit();
+    init_gdt();
     load_idt();
+    init_syscalls();
     init_keyboard();
     init_fs();
     init_heap();
@@ -551,7 +660,6 @@ void kmain() {
             uint32_t sw = vbe_get_width();
             uint32_t sh = vbe_get_height();
             int win_w = windows[dragging_idx].w;
-            int win_h = windows[dragging_idx].h;
 
             windows[dragging_idx].x = mx - drag_off_x;
             windows[dragging_idx].y = my - drag_off_y;

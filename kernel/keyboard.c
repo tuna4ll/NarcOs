@@ -228,7 +228,6 @@ void handle_keyboard()
         }
     }
     else {
-        int  is_shift = lshift_pressed || rshift_pressed;
         char c = is_shift ? scancode_map_shift[scancode] : scancode_map[scancode];
         if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
         else if (capslock_active && c >= 'A' && c <= 'Z') c += 32;

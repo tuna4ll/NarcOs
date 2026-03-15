@@ -2,7 +2,7 @@
 [ORG 0x7E00]
 KERNEL_OFFSET   equ 0x10000
 KERNEL_LBA      equ 18
-KERNEL_SECTORS  equ 256
+KERNEL_SECTORS  equ 512
 stage2_main:
     mov [boot_drive], dl
     mov si, msg_s2

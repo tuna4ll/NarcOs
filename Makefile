@@ -17,7 +17,7 @@ kernel_bin_target = kernel.bin
 
 C_SOURCES = $(wildcard $(KERN_DIR)/*.c)
 C_OBJECTS = $(patsubst $(KERN_DIR)/%.c, $(OBJ_DIR)/%.o, $(C_SOURCES))
-ASM_OBJECTS = $(OBJ_DIR)/entry.o
+ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o
 
 OBJ_FILES = $(ASM_OBJECTS) $(C_OBJECTS)
 
@@ -37,6 +37,9 @@ $(BOOT_DIR)/stage2.bin: $(BOOT_DIR)/stage2.asm
 	$(AS) -f bin $< -o $@
 
 $(OBJ_DIR)/entry.o: $(KERN_DIR)/entry.asm
+	$(AS) -f elf32 $< -o $@
+
+$(OBJ_DIR)/user_test.o: $(KERN_DIR)/user_test.asm
 	$(AS) -f elf32 $< -o $@
 
 $(OBJ_DIR)/%.o: $(KERN_DIR)/%.c

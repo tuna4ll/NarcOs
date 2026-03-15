@@ -182,8 +182,6 @@ void wait_vsync() {
     while (!(inb(0x3DA) & 8));
 }
 
-void init_vbe() {
-    current_target_width = mode_info->width;
     current_target = backbuffer;
     vbe_draw_wallpaper();
     vbe_update();
@@ -233,7 +231,6 @@ uint32_t vbe_get_pixel(int x, int y) {
 uint32_t vbe_mix_color(uint32_t c1, uint32_t c2, int alpha) {
     if (alpha >= 255) return c1;
     if (alpha <= 0) return c2;
-    // Fast bitwise alpha blending (approximate: / 256 instead of / 255)
     uint32_t rb1 = c1 & 0xFF00FF;
     uint32_t g1  = c1 & 0x00FF00;
     uint32_t rb2 = c2 & 0xFF00FF;
