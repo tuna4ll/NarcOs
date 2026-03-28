@@ -65,3 +65,6 @@ minios.img: $(BOOT_BINS) $(kernel_bin_target)
 
 clean:
 	rm -rf $(OBJ_DIR)/*.o $(BOOT_DIR)/*.bin *.img $(kernel_bin_target) kernel.tmp
+
+run-net: all
+	qemu-system-i386 -m 128M -drive format=raw,file=minios.img -netdev user,id=n0 -device rtl8139,netdev=n0

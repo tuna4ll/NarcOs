@@ -2,7 +2,11 @@
 global _start
 extern kmain
 global inb
+global inw
+global inl
 global outb
+global outw
+global outl
 global isr_default
 global irq0_timer
 global irq1_keyboard
@@ -54,12 +58,42 @@ inb:
     in al, dx
     pop ebp
     ret
+inw:
+    push ebp
+    mov ebp, esp
+    mov dx, [ebp+8]
+    in ax, dx
+    pop ebp
+    ret
+inl:
+    push ebp
+    mov ebp, esp
+    mov dx, [ebp+8]
+    in eax, dx
+    pop ebp
+    ret
 outb:
     push ebp
     mov ebp, esp
     mov dx, [ebp+8]
     mov al, [ebp+12]
     out dx, al
+    pop ebp
+    ret
+outw:
+    push ebp
+    mov ebp, esp
+    mov dx, [ebp+8]
+    mov ax, [ebp+12]
+    out dx, ax
+    pop ebp
+    ret
+outl:
+    push ebp
+    mov ebp, esp
+    mov dx, [ebp+8]
+    mov eax, [ebp+12]
+    out dx, eax
     pop ebp
     ret
 extern isr_handler_default

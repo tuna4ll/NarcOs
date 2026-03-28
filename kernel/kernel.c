@@ -9,6 +9,7 @@
 #include "gdt.h"
 #include "syscall.h"
 #include "usermode.h"
+#include "net.h"
 
 extern void outb(uint16_t port, uint8_t val);
 extern void clear_screen();
@@ -502,6 +503,10 @@ void execute_command(char* cmd) {
         vga_println("  rm     - Delete file (rm <file>)");
         vga_println("  mv     - Move item (mv <src> <target-dir>)");
         vga_println("  ren    - Rename item (ren <path> <new-name>)");
+        vga_println("  net    - Show network status");
+        vga_println("  dhcp   - Request IPv4 configuration");
+        vga_println("  dns    - Resolve hostname to IPv4");
+        vga_println("  ping   - Ping an IPv4 host");
         vga_println("  malloc_test - Test dynamic heap memory");
         vga_println("  usermode_test - Test Ring 3 transition and syscall");
     } else if (strcmp(arg1, "usermode_test") == 0) {
@@ -693,6 +698,14 @@ void execute_command(char* cmd) {
         } else {
             vga_print_color("error: Rename failed.\n", 0x0C);
         }
+    } else if (strcmp(arg1, "net") == 0) {
+        net_print_status();
+    } else if (strcmp(arg1, "dhcp") == 0) {
+        (void)net_run_dhcp(1);
+    } else if (strcmp(arg1, "dns") == 0) {
+        (void)net_dns_command(arg2);
+    } else if (strcmp(arg1, "ping") == 0) {
+        (void)net_ping_command(arg2);
     } else {
         vga_print_color("Error: Unknown command '", 0x0C);
         vga_print_color(arg1, 0x0C);
@@ -1135,6 +1148,7 @@ static void desktop_process_main(void) {
         if (cmd_ready) {
             execute_command(cmd_to_execute); cmd_ready = 0; print_prompt();
         }
+        net_poll();
         run_user_tasks();
         asm volatile("hlt");
     }
@@ -1152,6 +1166,7 @@ void kmain() {
     init_heap();
     init_vbe();
     init_mouse();
+    net_init();
     clear_screen();
     vga_print_color("\n  NarcOs GUI Initialized.\n", 0x0B);
     vga_print_color("  ========================\n", 0x0B);

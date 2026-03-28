@@ -70,7 +70,8 @@ extern void explorer_modal_append_char(char c);
 static const char* shell_commands[] = {
     "help", "clear", "mem", "snake", "ver", "uptime", "date", "time",
     "ls", "pwd", "touch", "cat", "write", "edit", "mkdir", "cd",
-    "rm", "mv", "ren", "malloc_test", "usermode_test"
+    "rm", "mv", "ren", "net", "dhcp", "dns", "ping",
+    "malloc_test", "usermode_test"
 };
 
 static void set_input_line(const char* text) {
