@@ -605,6 +605,9 @@ void vbe_copy_to_buffer(void* source) {
 #define COLOR_TITLEBAR     UI_SURFACE_2
 #define COLOR_TEXT         UI_TEXT
 #define COLOR_TEXT_DIM     UI_TEXT_MUTED
+#define WINDOW_CLIENT_INSET_X 1
+#define WINDOW_CLIENT_TOP 40
+#define WINDOW_CLIENT_BOTTOM 8
 
 static void ui_draw_panel(int x, int y, int w, int h, int radius, uint32_t fill, int fill_alpha, uint32_t border, int border_alpha) {
     vbe_draw_shadow(x + 4, y + 6, w, h, radius);
@@ -663,10 +666,10 @@ static void ui_draw_modal(void) {
 
 static void ui_get_window_client_rect(window_t* win, int* out_x, int* out_y, int* out_w, int* out_h) {
     if (!win) return;
-    if (out_x) *out_x = win->x + 8;
-    if (out_y) *out_y = win->y + 40;
-    if (out_w) *out_w = win->w - 16;
-    if (out_h) *out_h = win->h - 48;
+    if (out_x) *out_x = win->x + WINDOW_CLIENT_INSET_X;
+    if (out_y) *out_y = win->y + WINDOW_CLIENT_TOP;
+    if (out_w) *out_w = win->w - WINDOW_CLIENT_INSET_X * 2;
+    if (out_h) *out_h = win->h - WINDOW_CLIENT_TOP - WINDOW_CLIENT_BOTTOM;
 }
 
 static void ui_copy_truncated(char* dst, const char* src, int max_chars) {
@@ -691,13 +694,16 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
     int w = win->w;
     int h = win->h;
 
-    ui_draw_panel(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 228, is_focused ? UI_ACCENT : COLOR_GLASS_BORDER, 255);
+    vbe_draw_shadow(x + 4, y + 6, w, h, UI_RADIUS_LG);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 228);
 
     uint32_t title_top = is_focused ? UI_SURFACE_3 : UI_SURFACE_2;
     uint32_t title_bottom = is_focused ? UI_SURFACE_2 : UI_SURFACE_1;
     vbe_fill_rect_gradient(x + 1, y + 1, w - 2, 34, title_top, title_bottom, 1);
     vbe_fill_rect_alpha(x + 1, y + 34, w - 2, 1, is_focused ? UI_ACCENT : UI_BORDER_SOFT, 180);
-    vbe_fill_rect_alpha(x + 8, y + 40, w - 16, h - 48, UI_SURFACE_0, 210);
+    vbe_fill_rect_alpha(x + WINDOW_CLIENT_INSET_X, y + WINDOW_CLIENT_TOP,
+                        w - WINDOW_CLIENT_INSET_X * 2, h - WINDOW_CLIENT_TOP - WINDOW_CLIENT_BOTTOM,
+                        UI_SURFACE_0, 210);
 
     {
         char title_buf[20];
@@ -710,22 +716,19 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
 
     vbe_fill_rect_alpha(x + w - 44, y + 10, 10, 10, UI_WARNING, 255);
     vbe_fill_rect_alpha(x + w - 24, y + 10, 10, 10, UI_DANGER, 255);
-    if (is_focused) {
-        vbe_fill_rect_alpha(x + 1, y + 1, 3, h - 2, UI_ACCENT, 210);
-    }
 
     if (win_buf) {
         uint32_t bpp = mode_info->bpp / 8;
         int screen_w = mode_info->width;
         int screen_h = mode_info->height;
 
-        for (int i = 40; i < h - 8; i++) {
+        for (int i = WINDOW_CLIENT_TOP; i < h - WINDOW_CLIENT_BOTTOM; i++) {
             int draw_y = y + i;
             if (draw_y < 0 || draw_y >= screen_h) continue;
 
-            int draw_x = x + 8;
-            int copy_w = w - 16;
-            int src_off_x = 8;
+            int draw_x = x + WINDOW_CLIENT_INSET_X;
+            int copy_w = w - WINDOW_CLIENT_INSET_X * 2;
+            int src_off_x = WINDOW_CLIENT_INSET_X;
 
             if (draw_x < 0) {
                 copy_w += draw_x;
