@@ -4,8 +4,6 @@ CC = gcc
 LD = ld
 AS = nasm
 
-CFLAGS = -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -fno-strict-aliasing -mpreferred-stack-boundary=2 -mno-red-zone -Wall -Wextra -O3 -fomit-frame-pointer -falign-functions=16 -falign-jumps=16 -falign-loops=16
-
 LDFLAGS = -m elf_i386 -T linker.ld -nostdlib -s --strip-all
 
 OBJ_DIR   = obj
@@ -14,10 +12,13 @@ KERN_DIR  = kernel
 
 BOOT_BINS = $(BOOT_DIR)/boot.bin $(BOOT_DIR)/stage2.bin
 kernel_bin_target = kernel.bin
+KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
+CFLAGS = -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -fno-strict-aliasing -mpreferred-stack-boundary=2 -mno-red-zone -Wall -Wextra -O3 -fomit-frame-pointer -falign-functions=16 -falign-jumps=16 -falign-loops=16 $(addprefix -I,$(KERNEL_DIRS))
 
-C_SOURCES = $(wildcard $(KERN_DIR)/*.c)
+C_SOURCES = $(shell find $(KERN_DIR) -name '*.c' | sort)
+ASM_SOURCES = $(shell find $(KERN_DIR) -name '*.asm' | sort)
 C_OBJECTS = $(patsubst $(KERN_DIR)/%.c, $(OBJ_DIR)/%.o, $(C_SOURCES))
-ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o $(OBJ_DIR)/user_snake.o $(OBJ_DIR)/user_netdemo.o $(OBJ_DIR)/user_fetch.o
+ASM_OBJECTS = $(patsubst $(KERN_DIR)/%.asm, $(OBJ_DIR)/%.o, $(ASM_SOURCES))
 
 OBJ_FILES = $(ASM_OBJECTS) $(C_OBJECTS)
 
@@ -38,23 +39,13 @@ $(BOOT_DIR)/stage2.bin: $(BOOT_DIR)/stage2.asm $(kernel_bin_target)
 	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(kernel_bin_target)) + 511) / 512 ))))
 	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -f bin $< -o $@
 
-$(OBJ_DIR)/entry.o: $(KERN_DIR)/entry.asm
-	$(AS) -f elf32 $< -o $@
-
-$(OBJ_DIR)/user_test.o: $(KERN_DIR)/user_test.asm
-	$(AS) -f elf32 $< -o $@
-
-$(OBJ_DIR)/user_snake.o: $(KERN_DIR)/user_snake.asm
-	$(AS) -f elf32 $< -o $@
-
-$(OBJ_DIR)/user_netdemo.o: $(KERN_DIR)/user_netdemo.asm
-	$(AS) -f elf32 $< -o $@
-
-$(OBJ_DIR)/user_fetch.o: $(KERN_DIR)/user_fetch.asm
-	$(AS) -f elf32 $< -o $@
-
 $(OBJ_DIR)/%.o: $(KERN_DIR)/%.c
+	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJ_DIR)/%.o: $(KERN_DIR)/%.asm
+	@mkdir -p $(dir $@)
+	$(AS) -f elf32 $< -o $@
 
 $(kernel_bin_target): $(OBJ_FILES)
 	$(LD) $(LDFLAGS) -o $@ $(OBJ_FILES)
@@ -70,7 +61,7 @@ minios.img: $(BOOT_BINS) $(kernel_bin_target)
 	@echo "[OK] minios.img hazir."
 
 clean:
-	rm -rf $(OBJ_DIR)/*.o $(BOOT_DIR)/*.bin *.img $(kernel_bin_target) kernel.tmp
+	rm -rf $(OBJ_DIR) $(BOOT_DIR)/*.bin *.img $(kernel_bin_target) kernel.tmp
 
 run-net: all
 	qemu-system-i386 -m 128M -drive format=raw,file=minios.img -netdev user,id=n0 -device rtl8139,netdev=n0
