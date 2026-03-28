@@ -40,7 +40,7 @@ typedef struct {
     char response[4096];
 } user_fetch_state_t;
 
-void init_usermode();
+int init_usermode();
 void launch_user_snake();
 void run_user_tasks();
 int run_user_netdemo(const char* target);
@@ -51,9 +51,12 @@ void queue_user_snake_input(int input);
 int consume_user_snake_input();
 void user_yield_handler(trap_frame_t* frame);
 
-extern user_snake_state_t user_snake_state;
-extern user_netdemo_state_t user_netdemo_state;
-extern user_fetch_state_t user_fetch_state;
+extern user_snake_state_t* user_snake_state_ptr;
+extern user_netdemo_state_t* user_netdemo_state_ptr;
+extern user_fetch_state_t* user_fetch_state_ptr;
+#define user_snake_state    (*user_snake_state_ptr)
+#define user_netdemo_state  (*user_netdemo_state_ptr)
+#define user_fetch_state    (*user_fetch_state_ptr)
 extern uint32_t user_kernel_resume_esp;
 extern uint32_t user_kernel_ebx;
 extern uint32_t user_kernel_esi;

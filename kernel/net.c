@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include "net.h"
 #include "io.h"
+#include "pci.h"
 #include "string.h"
 
 extern void vga_print(const char* str);
@@ -12,9 +13,6 @@ extern void vga_putchar(char c);
 extern volatile uint32_t timer_ticks;
 extern void vbe_compose_scene_basic();
 extern void vbe_update();
-
-#define PCI_CONFIG_ADDRESS 0xCF8
-#define PCI_CONFIG_DATA    0xCFC
 
 #define RTL8139_VENDOR_ID 0x10EC
 #define RTL8139_DEVICE_ID 0x8139
@@ -164,6 +162,9 @@ typedef struct {
     uint8_t pci_bus;
     uint8_t pci_slot;
     uint8_t pci_func;
+    uint8_t irq_line;
+    uint8_t irq_pin;
+    uint8_t irq_enabled;
     uint32_t io_base;
     uint8_t mac[6];
     uint8_t tx_index;
@@ -491,49 +492,6 @@ static int net_parse_ipv4_text(const char* text, uint32_t* out_ip) {
     return 0;
 }
 
-static uint32_t pci_config_read32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
-    uint32_t address = 0x80000000U |
-                       ((uint32_t)bus << 16) |
-                       ((uint32_t)slot << 11) |
-                       ((uint32_t)func << 8) |
-                       (uint32_t)(offset & 0xFCU);
-    outl(PCI_CONFIG_ADDRESS, address);
-    return inl(PCI_CONFIG_DATA);
-}
-
-static void pci_config_write32(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset, uint32_t value) {
-    uint32_t address = 0x80000000U |
-                       ((uint32_t)bus << 16) |
-                       ((uint32_t)slot << 11) |
-                       ((uint32_t)func << 8) |
-                       (uint32_t)(offset & 0xFCU);
-    outl(PCI_CONFIG_ADDRESS, address);
-    outl(PCI_CONFIG_DATA, value);
-}
-
-static int pci_find_rtl8139(uint8_t* out_bus, uint8_t* out_slot, uint8_t* out_func) {
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            for (uint8_t func = 0; func < 8; func++) {
-                uint32_t vendor_device = pci_config_read32((uint8_t)bus, slot, func, 0x00);
-                uint16_t vendor = (uint16_t)(vendor_device & 0xFFFFU);
-                uint16_t device = (uint16_t)((vendor_device >> 16) & 0xFFFFU);
-                if (vendor == 0xFFFFU) {
-                    if (func == 0) break;
-                    continue;
-                }
-                if (vendor == RTL8139_VENDOR_ID && device == RTL8139_DEVICE_ID) {
-                    *out_bus = (uint8_t)bus;
-                    *out_slot = slot;
-                    *out_func = func;
-                    return 0;
-                }
-            }
-        }
-    }
-    return -1;
-}
-
 static int rtl8139_wait_reset() {
     uint32_t deadline = timer_ticks + NET_TIMEOUT_SHORT;
     while (timer_ticks <= deadline) {
@@ -543,28 +501,37 @@ static int rtl8139_wait_reset() {
 }
 
 static int rtl8139_init_device() {
-    uint8_t bus = 0, slot = 0, func = 0;
-    uint32_t bar0;
-    uint32_t command;
+    pci_bar_info_t io_bar;
+    pci_irq_route_t irq_route;
+    pci_device_info_t nic;
+    uint16_t command;
 
     memset(&net_state, 0, sizeof(net_state));
     memset(arp_cache, 0, sizeof(arp_cache));
     memset(net_sockets, 0, sizeof(net_sockets));
+    net_state.irq_line = 0xFFU;
 
-    if (pci_find_rtl8139(&bus, &slot, &func) != 0) return -1;
+    if (pci_find_device(RTL8139_VENDOR_ID, RTL8139_DEVICE_ID, &nic) != 0) return -1;
+    if (pci_decode_bar(&nic, 0, &io_bar) != 0 || !io_bar.is_io) return -1;
 
-    bar0 = pci_config_read32(bus, slot, func, 0x10);
-    if ((bar0 & 0x1U) == 0) return -1;
-
-    command = pci_config_read32(bus, slot, func, 0x04);
-    command |= 0x00000005U;
-    pci_config_write32(bus, slot, func, 0x04, command);
+    command = pci_read16(nic.bus, nic.slot, nic.func, 0x04);
+    command |= 0x0005U;
+    command &= (uint16_t)~0x0400U;
+    pci_write16(nic.bus, nic.slot, nic.func, 0x04, command);
 
     net_state.present = 1;
-    net_state.pci_bus = bus;
-    net_state.pci_slot = slot;
-    net_state.pci_func = func;
-    net_state.io_base = bar0 & ~0x3U;
+    net_state.pci_bus = nic.bus;
+    net_state.pci_slot = nic.slot;
+    net_state.pci_func = nic.func;
+    net_state.io_base = (uint32_t)io_bar.base;
+    if (pci_enable_irq(&nic, &irq_route) == 0) {
+        net_state.irq_line = irq_route.irq_line;
+        net_state.irq_pin = irq_route.irq_pin;
+        net_state.irq_enabled = 1;
+    } else if (pci_decode_irq(&nic, &irq_route) == 0) {
+        net_state.irq_line = irq_route.routed ? irq_route.irq_line : 0xFFU;
+        net_state.irq_pin = irq_route.irq_pin;
+    }
     net_state.next_ip_id = 1;
     net_state.next_ping_seq = 1;
 
@@ -1985,6 +1952,17 @@ void net_print_status() {
     net_print_hex_byte((uint8_t)((net_state.io_base >> 8) & 0xFF));
     net_print_hex_byte((uint8_t)(net_state.io_base & 0xFF));
     vga_println("");
+    if (net_state.irq_pin != 0U) {
+        vga_print("IRQ            : ");
+        vga_print(pci_irq_pin_name(net_state.irq_pin));
+        if (net_state.irq_line != 0xFFU) {
+            vga_print(" -> ");
+            vga_print_int(net_state.irq_line);
+            vga_println(net_state.irq_enabled ? " (legacy PIC enabled)" : " (legacy PIC masked)");
+        } else {
+            vga_println(" -> unrouted");
+        }
+    }
     vga_print("MAC            : ");
     net_print_mac(net_state.mac);
     vga_println("");

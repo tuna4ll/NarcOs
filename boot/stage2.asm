@@ -85,13 +85,14 @@ detect_memory:
 .e820_loop:
     mov eax, 0xE820
     mov edx, 0x534D4150
-    mov ecx, 20
+    mov ecx, 24
+    mov dword [es:di + 20], 1
     int 0x15
     jc .done
     cmp eax, 0x534D4150
     jne .done
     inc si
-    add di, 20
+    add di, 24
     test ebx, ebx
     jnz .e820_loop
 .done:
@@ -134,6 +135,7 @@ load_kernel:
     mov si, msg_kernel_err
     call print16
     jmp $
+
 dap:
     db 0x10, 0x00
 dap_count:

@@ -5,8 +5,22 @@
 #include "user_abi.h"
 
 #define USER_CODE __attribute__((section(".user_code")))
+#define USER_RODATA __attribute__((section(".user_rodata")))
 #define USER_HTTP_IDLE_TIMEOUT 300U
 #define USER_HTTP_TOTAL_TIMEOUT 1200U
+
+static const char user_http_get_prefix[] USER_RODATA = "GET ";
+static const char user_http_host_prefix[] USER_RODATA = " HTTP/1.0\r\nHost: ";
+static const char user_http_headers[] USER_RODATA =
+    "\r\nUser-Agent: NarcOs-Ring3/0.1\r\nConnection: close\r\n\r\n";
+static const char user_netdemo_msg_start[] USER_RODATA = "Ring3 netdemo: HTTP request starting";
+static const char user_netdemo_msg_ok[] USER_RODATA = "Ring3 netdemo: response";
+static const char user_netdemo_msg_empty[] USER_RODATA = "(empty response)";
+static const char user_netdemo_msg_err[] USER_RODATA = "Ring3 netdemo: HTTP request failed";
+static const char user_netdemo_msg_truncated[] USER_RODATA = "Ring3 netdemo: response truncated";
+static const char user_netdemo_msg_partial[] USER_RODATA = "Ring3 netdemo: connection timed out before clean close";
+static const char user_fetch_msg_start[] USER_RODATA = "Ring3 fetch: downloading";
+static const char user_fetch_msg_write_err[] USER_RODATA = "Ring3 fetch: failed to write file";
 
 static USER_CODE int user_append_text(char* dst, uint16_t dst_len, uint16_t* io_offset, const char* src) {
     uint16_t off = *io_offset;
@@ -44,11 +58,11 @@ static USER_CODE int user_http_fetch_text(const char* host, const char* path,
     out_result->resolved_ip = server_ip;
 
     request[0] = '\0';
-    if (user_append_text(request, sizeof(request), &request_off, "GET ") != NET_OK ||
+    if (user_append_text(request, sizeof(request), &request_off, user_http_get_prefix) != NET_OK ||
         user_append_text(request, sizeof(request), &request_off, path) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, " HTTP/1.0\r\nHost: ") != NET_OK ||
+        user_append_text(request, sizeof(request), &request_off, user_http_host_prefix) != NET_OK ||
         user_append_text(request, sizeof(request), &request_off, host) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, "\r\nUser-Agent: NarcOs-Ring3/0.1\r\nConnection: close\r\n\r\n") != NET_OK) {
+        user_append_text(request, sizeof(request), &request_off, user_http_headers) != NET_OK) {
         return NET_ERR_OVERFLOW;
     }
     request_len = (uint16_t)strlen(request);
@@ -147,41 +161,33 @@ static USER_CODE uint32_t user_http_find_body(const char* response, uint32_t len
 }
 
 void USER_CODE user_netdemo_entry_c(user_netdemo_state_t* state) {
-    static const char msg_start[] = "Ring3 netdemo: HTTP request starting";
-    static const char msg_ok[] = "Ring3 netdemo: response";
-    static const char msg_empty[] = "(empty response)";
-    static const char msg_err[] = "Ring3 netdemo: HTTP request failed";
-    static const char msg_truncated[] = "Ring3 netdemo: response truncated";
-    static const char msg_partial[] = "Ring3 netdemo: connection timed out before clean close";
     int status;
 
     if (!state) return;
 
-    user_print(msg_start);
+    user_print(user_netdemo_msg_start);
     status = user_http_fetch_text(state->host, state->path,
                                   state->response, sizeof(state->response),
                                   &state->result);
     state->status = status;
     if (status < 0) {
-        user_print(msg_err);
+        user_print(user_netdemo_msg_err);
         return;
     }
 
-    user_print(msg_ok);
+    user_print(user_netdemo_msg_ok);
     if (state->response[0] != '\0') user_print(state->response);
-    else user_print(msg_empty);
-    if (state->result.truncated != 0U) user_print(msg_truncated);
-    if (state->result.complete == 0U) user_print(msg_partial);
+    else user_print(user_netdemo_msg_empty);
+    if (state->result.truncated != 0U) user_print(user_netdemo_msg_truncated);
+    if (state->result.complete == 0U) user_print(user_netdemo_msg_partial);
 }
 
 void USER_CODE user_fetch_entry_c(user_fetch_state_t* state) {
-    static const char msg_start[] = "Ring3 fetch: downloading";
-    static const char msg_write_err[] = "Ring3 fetch: failed to write file";
     int status;
 
     if (!state) return;
 
-    user_print(msg_start);
+    user_print(user_fetch_msg_start);
     status = user_http_fetch_text(state->host, state->path,
                                   state->response, sizeof(state->response),
                                   &state->result);
@@ -194,7 +200,7 @@ void USER_CODE user_fetch_entry_c(user_fetch_state_t* state) {
     state->saved_len = (uint32_t)strlen(state->response + state->body_offset);
     if (user_fs_write(state->output_path, state->response + state->body_offset) != 0) {
         state->status = NET_ERR_IO;
-        user_print(msg_write_err);
+        user_print(user_fetch_msg_write_err);
         return;
     }
     state->status = USER_APP_STATUS_OK;

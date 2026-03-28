@@ -1,6 +1,6 @@
 #include "fs.h"
 #include "string.h"
-#include "ata.h"
+#include "storage.h"
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
@@ -176,18 +176,20 @@ static int fs_alloc_data_run(uint32_t sectors, int ignore_idx) {
 static void fs_zero_sectors(uint32_t lba, uint32_t count) {
     memset(sector_buffer, 0, sizeof(sector_buffer));
     for (uint32_t i = 0; i < count; i++) {
-        ata_write_sector(lba + i, sector_buffer);
+        (void)storage_write_sector(lba + i, sector_buffer);
     }
 }
 
 void fs_sync() {
     for (int i = 0; i < DIR_SECTOR_COUNT; i++) {
-        ata_write_sector(DIR_SECTOR + i, (uint8_t*)dir_cache + (i * 512));
+        (void)storage_write_sector(DIR_SECTOR + (uint32_t)i, (uint8_t*)dir_cache + (i * 512));
     }
 }
 static void load_dir_cache() {
     for (int i = 0; i < DIR_SECTOR_COUNT; i++) {
-        ata_read_sector(DIR_SECTOR + i, (uint8_t*)dir_cache + (i * 512));
+        if (storage_read_sector(DIR_SECTOR + (uint32_t)i, (uint8_t*)dir_cache + (i * 512)) != 0) {
+            memset((uint8_t*)dir_cache + (i * 512), 0, 512);
+        }
     }
 }
 void init_fs() {
@@ -274,7 +276,7 @@ int fs_write_file_by_idx(int idx, const char* data) {
         if (chunk > 512U) chunk = 512U;
         memset(sector_buffer, 0, sizeof(sector_buffer));
         memcpy(sector_buffer, data + offset, chunk);
-        ata_write_sector(dir_cache[idx].lba + sector, sector_buffer);
+        if (storage_write_sector(dir_cache[idx].lba + sector, sector_buffer) != 0) return -1;
     }
     if (current_sectors > needed_sectors && dir_cache[idx].lba != 0) {
         fs_zero_sectors(dir_cache[idx].lba + needed_sectors, current_sectors - needed_sectors);
@@ -299,7 +301,7 @@ int fs_read_file_by_idx(int idx, char* buffer, size_t max_len) {
     uint32_t sectors = node_sector_count(&dir_cache[idx]);
     size_t copied = 0;
     for (uint32_t sector = 0; sector < sectors && copied < read_len; sector++) {
-        ata_read_sector(dir_cache[idx].lba + sector, sector_buffer);
+        if (storage_read_sector(dir_cache[idx].lba + sector, sector_buffer) != 0) return -1;
         size_t chunk = read_len - copied;
         if (chunk > 512U) chunk = 512U;
         memcpy(buffer + copied, sector_buffer, chunk);

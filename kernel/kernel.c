@@ -4,15 +4,25 @@
 #include "rtc.h"
 #include "editor.h"
 #include "memory_alloc.h"
+#include "paging.h"
+#include "process.h"
+#include "cpu.h"
+#include "pci.h"
+#include "storage.h"
 #include "vbe.h"
 #include "mouse.h"
 #include "gdt.h"
+#include "serial.h"
 #include "syscall.h"
 #include "usermode.h"
 #include "net.h"
 
 extern void outb(uint16_t port, uint8_t val);
+extern void outw(uint16_t port, uint16_t val);
+extern uint8_t inb(uint16_t port);
 extern void clear_screen();
+extern void screen_set_graphics_enabled(int enabled);
+extern int screen_is_graphics_enabled(void);
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
@@ -32,6 +42,7 @@ idt_entry_t idt[256];
 idtr_t idtr;
 
 volatile uint32_t timer_ticks = 0;
+static volatile int kernel_graphics_ready = 0;
 
 window_t windows[MAX_WINDOWS];
 int window_count = 0;
@@ -328,6 +339,9 @@ extern void isr_default();
 extern void irq0_timer();
 extern void irq1_keyboard();
 extern void irq12_mouse();
+extern void isr_invalid_opcode();
+extern void isr_stack_fault();
+extern void isr_page_fault();
 
 void set_idt_gate(int n, uint32_t handler, uint8_t attributes) {
     idt[n].isr_low = (uint16_t)(handler & 0xFFFF);
@@ -367,8 +381,11 @@ void load_idt() {
     for (int i = 0; i < 256; i++) {
         set_idt_gate(i, (uint32_t)isr_default, 0x8E);
     }
+    set_idt_gate(6, (uint32_t)isr_invalid_opcode, 0x8E);
     set_idt_gate(8, (uint32_t)isr_double_fault, 0x8E);
+    set_idt_gate(12, (uint32_t)isr_stack_fault, 0x8E);
     set_idt_gate(13, (uint32_t)isr_gpf, 0x8E);
+    set_idt_gate(14, (uint32_t)isr_page_fault, 0x8E);
     set_idt_gate(32, (uint32_t)irq0_timer, 0x8E);
     set_idt_gate(33, (uint32_t)irq1_keyboard, 0x8E);
     set_idt_gate(44, (uint32_t)irq12_mouse, 0x8E);
@@ -378,6 +395,7 @@ void load_idt() {
 
 void handle_timer() {
     timer_ticks++;
+    process_on_timer_tick();
     
     // Kernel level heartbeat: SAFE VGA WRITE at (79, 0)
     volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
@@ -400,7 +418,439 @@ void vga_print_int_hex(uint32_t n, char* buf) {
     buf[10] = '\0';
 }
 
+static uint32_t read_cr2() {
+    uint32_t value;
+    asm volatile("mov %%cr2, %0" : "=r"(value));
+    return value;
+}
+
+static void panic_serial_hex(const char* label, uint32_t value) {
+    serial_write("[panic] ");
+    serial_write(label);
+    serial_write("=");
+    serial_write_hex32(value);
+    serial_write_char('\n');
+}
+
+static void panic_halt() {
+    for (;;) {
+        asm volatile("cli");
+        asm volatile("hlt");
+    }
+}
+
+static void boot_text_clear(uint8_t color) {
+    volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
+    uint16_t cell = ((uint16_t)color << 8) | ' ';
+    for (int i = 0; i < 80 * 25; i++) {
+        vga[i] = cell;
+    }
+}
+
+static void boot_text_write_line(int row, const char* text, uint8_t color) {
+    volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
+    int col = 0;
+
+    if (!text || row < 0 || row >= 25) return;
+    while (text[col] != '\0' && col < 80) {
+        vga[row * 80 + col] = ((uint16_t)color << 8) | (uint8_t)text[col];
+        col++;
+    }
+}
+
+static void boot_text_write_hex_line(int row, const char* label, uint32_t value, uint8_t color) {
+    char hex_buf[16];
+    char line[80];
+    int off = 0;
+
+    line[0] = '\0';
+    if (label) {
+        while (label[off] != '\0' && off < (int)sizeof(line) - 1) {
+            line[off] = label[off];
+            off++;
+        }
+        line[off] = '\0';
+    }
+    vga_print_int_hex(value, hex_buf);
+    for (int i = 0; hex_buf[i] != '\0' && off < (int)sizeof(line) - 1; i++) {
+        line[off++] = hex_buf[i];
+    }
+    line[off] = '\0';
+    boot_text_write_line(row, line, color);
+}
+
+static void panic_text_exception(const char* title, const char* aux_label, uint32_t aux_value, trap_frame_t* frame) {
+    boot_text_clear(0x1F);
+    if (title) boot_text_write_line(0, title, 0x4F);
+    if (aux_label) boot_text_write_hex_line(2, aux_label, aux_value, 0x1F);
+    if (frame) {
+        boot_text_write_hex_line(4, "Error: ", frame->error_code, 0x1F);
+        boot_text_write_hex_line(5, "EIP:   ", frame->eip, 0x1F);
+        boot_text_write_hex_line(6, "CS:    ", frame->cs, 0x1F);
+        boot_text_write_hex_line(7, "ESP:   ", frame->user_esp, 0x1F);
+        boot_text_write_hex_line(8, "SS:    ", frame->user_ss, 0x1F);
+    }
+    boot_text_write_line(10, "See serial log for more details.", 0x1E);
+}
+
+static int boot_framebuffer_available() {
+    return *(uint32_t*)(0x6100 + 40) != 0 &&
+           vbe_get_width() != 0 &&
+           vbe_get_height() != 0 &&
+           vbe_get_bpp() != 0;
+}
+
+static void boot_fatal(const char* headline, const char* detail) {
+    serial_write_line("");
+    serial_write_line("[boot] fatal");
+    if (headline) serial_write_line(headline);
+    if (detail) serial_write_line(detail);
+
+    if (boot_framebuffer_available()) {
+        init_vbe();
+        kernel_graphics_ready = 1;
+        vbe_clear(0x180000);
+        vbe_draw_string(20, 20, "NarcOs boot failed", 0xFFFFFF);
+        if (headline) vbe_draw_string(20, 54, headline, 0xFFB3B3);
+        if (detail) vbe_draw_string(20, 78, detail, 0xFFE4A3);
+        vbe_draw_string(20, 112, "See serial log for more details.", 0xFFFFFF);
+        vbe_update();
+    } else {
+        boot_text_clear(0x1F);
+        boot_text_write_line(0, "NarcOs boot failed", 0x1F);
+        if (headline) boot_text_write_line(2, headline, 0x4F);
+        if (detail) boot_text_write_line(4, detail, 0x1F);
+        boot_text_write_line(6, "See serial log for more details.", 0x1E);
+    }
+
+    panic_halt();
+}
+
+static void paging_probe_kernel_vm() {
+    volatile uint32_t* direct;
+    uint32_t* mapped;
+    void* phys_page = alloc_physical_page();
+
+    if (!phys_page) {
+        boot_fatal("Kernel VM probe failed.",
+                   "Could not allocate a physical page for paging API validation.");
+    }
+
+    mapped = (uint32_t*)paging_map_physical((uint32_t)phys_page, 4096U, PAGING_FLAG_WRITE);
+    if (!mapped) {
+        free_physical_page(phys_page);
+        boot_fatal("Kernel VM probe failed.",
+                   "Dynamic virtual mapping window could not map a probe page.");
+    }
+
+    direct = (volatile uint32_t*)phys_page;
+    mapped[0] = 0x4E415243U;
+    mapped[1] = 0x4F532121U;
+    if (direct[0] != 0x4E415243U || direct[1] != 0x4F532121U) {
+        paging_unmap_virtual(mapped, 4096U);
+        free_physical_page(phys_page);
+        boot_fatal("Kernel VM probe failed.",
+                   "Mapped writes were not visible through the identity mapping.");
+    }
+
+    paging_unmap_virtual(mapped, 4096U);
+    free_physical_page(phys_page);
+    serial_write("[boot] kernel_vm base=");
+    serial_write_hex32(paging_kernel_vm_base());
+    serial_write(" size=");
+    serial_write_hex32(paging_kernel_vm_size());
+    serial_write_char('\n');
+}
+
+static void panic_simple_exception(const char* tag, const char* title, uint32_t bg_color,
+                                   const char* aux_label, uint32_t aux_value, trap_frame_t* frame) {
+    char buf[64];
+
+    serial_write_line("");
+    serial_write("[panic] ");
+    serial_write_line(tag);
+    if (aux_label) panic_serial_hex(aux_label, aux_value);
+    panic_serial_hex("error", frame->error_code);
+    panic_serial_hex("eip", frame->eip);
+    panic_serial_hex("cs", frame->cs);
+    panic_serial_hex("user_esp", frame->user_esp);
+    panic_serial_hex("user_ss", frame->user_ss);
+
+    if (!kernel_graphics_ready) {
+        panic_text_exception(title, aux_label, aux_value, frame);
+    } else {
+        vbe_clear(bg_color);
+        vbe_draw_string(20, 20, title, 0xFFFFFF);
+        if (aux_label) {
+            vbe_draw_string(20, 50, aux_label, 0xFFFFFF);
+            vga_print_int_hex(aux_value, buf);
+            vbe_draw_string(130, 50, buf, 0xFFD27F);
+        }
+        vbe_draw_string(20, 68, "Error:", 0xFFFFFF);
+        vga_print_int_hex(frame->error_code, buf);
+        vbe_draw_string(130, 68, buf, 0xFFD27F);
+        vbe_draw_string(20, 86, "EIP:", 0xFFFFFF);
+        vga_print_int_hex(frame->eip, buf);
+        vbe_draw_string(130, 86, buf, 0xFFD27F);
+        vbe_draw_string(20, 104, "CS:", 0xFFFFFF);
+        vga_print_int_hex(frame->cs, buf);
+        vbe_draw_string(130, 104, buf, 0xFFD27F);
+        vbe_draw_string(20, 122, "USER ESP:", 0xFFFFFF);
+        vga_print_int_hex(frame->user_esp, buf);
+        vbe_draw_string(130, 122, buf, 0xFFD27F);
+        vbe_update();
+    }
+
+    panic_halt();
+}
+
+static void wait_8042_input_clear() {
+    for (uint32_t i = 0; i < 0x10000U; i++) {
+        if ((inb(0x64) & 0x02U) == 0U) return;
+    }
+}
+
+static void reboot_system() {
+    serial_write_line("[sys] reboot requested");
+    vga_println("Rebooting...");
+    asm volatile("cli");
+
+    wait_8042_input_clear();
+    outb(0x64, 0xFE);
+
+    outb(0xCF9, 0x02);
+    outb(0xCF9, 0x06);
+
+    {
+        struct {
+            uint16_t limit;
+            uint32_t base;
+        } __attribute__((packed)) null_idtr = {0, 0};
+        asm volatile("lidt %0" : : "m"(null_idtr));
+        asm volatile("int3");
+    }
+
+    panic_halt();
+}
+
+static void poweroff_system() {
+    serial_write_line("[sys] poweroff requested");
+    vga_println("Powering off...");
+    asm volatile("cli");
+
+    outw(0x604, 0x2000);
+    outw(0xB004, 0x2000);
+    outw(0x4004, 0x3400);
+
+    panic_halt();
+}
+
+static void print_kernel_log() {
+    static char log_buf[4096];
+    int len = serial_copy_ring_buffer(log_buf, sizeof(log_buf));
+
+    if (len <= 0) {
+        vga_println("Kernel log is empty.");
+        return;
+    }
+
+    vga_print(log_buf);
+    if (len > 0 && log_buf[len - 1] != '\n') vga_println("");
+}
+
+static void print_pci_id_line(const char* label, const pci_device_info_t* dev) {
+    char buf[11];
+
+    vga_print(label);
+    if (!dev) {
+        vga_println("none");
+        return;
+    }
+
+    vga_print_int_hex((uint32_t)dev->vendor_id, buf);
+    vga_print(buf + 6);
+    vga_print(":");
+    vga_print_int_hex((uint32_t)dev->device_id, buf);
+    vga_print(buf + 6);
+    vga_print(" @ ");
+    vga_print_int_hex((uint32_t)dev->bus, buf);
+    vga_print(buf + 8);
+    vga_print(":");
+    vga_print_int_hex((uint32_t)dev->slot, buf);
+    vga_print(buf + 8);
+    vga_print(".");
+    vga_print_int_hex((uint32_t)dev->func, buf);
+    vga_print(buf + 8);
+    vga_println("");
+}
+
+static void print_pci_irq_line(const char* label, const pci_device_info_t* dev) {
+    pci_irq_route_t route;
+
+    vga_print(label);
+    if (!dev || pci_decode_irq(dev, &route) != 0) {
+        vga_println("none");
+        return;
+    }
+
+    vga_print(pci_irq_pin_name(route.irq_pin));
+    if (route.routed) {
+        vga_print(" -> IRQ ");
+        vga_print_int(route.irq_line);
+        vga_println(route.masked ? " (masked)" : " (enabled)");
+    } else {
+        vga_println(" -> unrouted");
+    }
+}
+
+static void print_hardware_info() {
+    const cpu_info_t* cpu = cpu_get_info();
+    pci_device_info_t devices[64];
+    const pci_device_info_t* storage_dev = 0;
+    const pci_device_info_t* network_dev = 0;
+    const pci_device_info_t* display_dev = 0;
+    const pci_device_info_t* usb_dev = 0;
+    int pci_total;
+    int storage_count = 0;
+    int network_count = 0;
+    int display_count = 0;
+    int usb_count = 0;
+    int bridge_count = 0;
+    int other_count = 0;
+    net_ipv4_config_t netcfg;
+    char buf[64];
+
+    pci_total = pci_enumerate(devices, 64);
+    if (pci_total > 64) pci_total = 64;
+    for (int i = 0; i < pci_total; i++) {
+        const pci_device_info_t* dev = &devices[i];
+        if (dev->class_code == 0x01) {
+            storage_count++;
+            if (!storage_dev) storage_dev = dev;
+        } else if (dev->class_code == 0x02) {
+            network_count++;
+            if (!network_dev) network_dev = dev;
+        } else if (dev->class_code == 0x03) {
+            display_count++;
+            if (!display_dev) display_dev = dev;
+        } else if (dev->class_code == 0x0C && dev->subclass == 0x03) {
+            usb_count++;
+            if (!usb_dev) usb_dev = dev;
+        } else if (dev->class_code == 0x06) {
+            bridge_count++;
+        } else {
+            other_count++;
+        }
+    }
+
+    vga_println("Hardware Info");
+    vga_print("  CPU Vendor : ");
+    vga_println(cpu->vendor);
+    vga_print("  CPUID      : ");
+    vga_println(cpu->cpuid_supported ? "yes" : "no");
+    vga_print("  SSE        : ");
+    vga_println(cpu->sse_enabled ? "enabled" : (cpu->sse_supported ? "supported, disabled" : "not supported"));
+    vga_print("  PSE        : ");
+    vga_println(cpu->pse_supported ? "yes" : "no");
+    vga_print("  APIC       : ");
+    vga_println(cpu->apic_supported ? "yes" : "no");
+    vga_print("  TSC        : ");
+    vga_println(cpu->tsc_supported ? "yes" : "no");
+    vga_print("  Video      : ");
+    if (screen_is_graphics_enabled()) {
+        vga_print_int(vbe_get_width());
+        vga_print("x");
+        vga_print_int(vbe_get_height());
+        vga_print(" @ ");
+        vga_print_int(vbe_get_bpp());
+        vga_println("bpp");
+    } else {
+        vga_println("text-mode fallback");
+    }
+    vga_print("  Managed RAM: ");
+    vga_print_int((int)(paging_total_frames() / 256U));
+    vga_println(" MB");
+    vga_print("  PCI Count  : ");
+    vga_print_int(pci_device_count());
+    vga_println("");
+    vga_println("  PCI Classes:");
+    vga_print("    Storage : ");
+    vga_print_int(storage_count);
+    vga_println("");
+    vga_print("    Network : ");
+    vga_print_int(network_count);
+    vga_println("");
+    vga_print("    Display : ");
+    vga_print_int(display_count);
+    vga_println("");
+    vga_print("    USB     : ");
+    vga_print_int(usb_count);
+    vga_println("");
+    vga_print("    Bridge  : ");
+    vga_print_int(bridge_count);
+    vga_println("");
+    vga_print("    Other   : ");
+    vga_print_int(other_count);
+    vga_println("");
+    print_pci_id_line("  First Storage : ", storage_dev);
+    if (storage_dev) {
+        vga_print("  Storage Ifc   : ");
+        vga_println(pci_storage_controller_name(storage_dev));
+        print_pci_irq_line("  Storage IRQ   : ", storage_dev);
+    }
+    vga_print("  Storage Path  : ");
+    vga_println(storage_backend_name());
+    vga_print("  Storage Base  : ");
+    vga_print_int((int)storage_volume_base_lba());
+    vga_print(" (");
+    if (storage_volume_scheme() == STORAGE_PARTITION_SCHEME_GPT) vga_print("GPT");
+    else if (storage_volume_scheme() == STORAGE_PARTITION_SCHEME_MBR) vga_print("MBR");
+    else vga_print("RAW");
+    vga_print(")");
+    vga_println("");
+    print_pci_id_line("  First Network : ", network_dev);
+    if (network_dev) {
+        print_pci_irq_line("  Network IRQ   : ", network_dev);
+    }
+    print_pci_id_line("  First Display : ", display_dev);
+    print_pci_id_line("  First USB     : ", usb_dev);
+    if (net_get_ipv4_config(&netcfg) == 0 && netcfg.available) {
+        vga_print("  Network    : ");
+        vga_println(netcfg.configured ? "available + configured" : "available + unconfigured");
+        vga_print("  IP         : ");
+        vga_print_int((int)((netcfg.ip_addr >> 24) & 0xFF));
+        vga_print(".");
+        vga_print_int((int)((netcfg.ip_addr >> 16) & 0xFF));
+        vga_print(".");
+        vga_print_int((int)((netcfg.ip_addr >> 8) & 0xFF));
+        vga_print(".");
+        vga_print_int((int)(netcfg.ip_addr & 0xFF));
+        vga_println("");
+    } else {
+        vga_println("  Network    : unavailable");
+    }
+    vga_print("  Uptime     : ");
+    vga_print_int((int)(timer_ticks / 100));
+    vga_println("s");
+    vga_print("  CPUID max  : ");
+    vga_print_int_hex(cpu->max_basic_leaf, buf);
+    vga_println(buf);
+}
+
 void gpf_handler(trap_frame_t* frame) {
+    serial_write_line("");
+    serial_write_line("[panic] general protection fault");
+    panic_serial_hex("error", frame->error_code);
+    panic_serial_hex("eip", frame->eip);
+    panic_serial_hex("cs", frame->cs);
+    panic_serial_hex("user_esp", frame->user_esp);
+    panic_serial_hex("user_ss", frame->user_ss);
+
+    if (!kernel_graphics_ready) {
+        panic_text_exception("!!! NARC-OS GPF (RING 3 CRASH) !!!", 0, 0, frame);
+        panic_halt();
+    }
+
     vbe_clear(0x880000); // Red
     vbe_draw_string(20, 20, "!!! NARC-OS GPF (RING 3 CRASH) !!!", 0xFFFFFF);
     
@@ -436,7 +886,22 @@ void gpf_handler(trap_frame_t* frame) {
     vbe_draw_string(350, 110, buf, 0xFFFF00);
 
     vbe_update();
-    while(1) asm volatile("hlt");
+    panic_halt();
+}
+
+void page_fault_handler(trap_frame_t* frame) {
+    panic_simple_exception("page fault", "!!! NARC-OS PAGE FAULT !!!", 0x1A0000,
+                           "Fault Addr:", read_cr2(), frame);
+}
+
+void invalid_opcode_handler(trap_frame_t* frame) {
+    panic_simple_exception("invalid opcode", "!!! NARC-OS INVALID OPCODE !!!", 0x341400,
+                           0, 0, frame);
+}
+
+void stack_fault_handler(trap_frame_t* frame) {
+    panic_simple_exception("stack fault", "!!! NARC-OS STACK FAULT !!!", 0x301400,
+                           0, 0, frame);
 }
 
 void user_code_test_logic() {
@@ -467,6 +932,8 @@ void vbe_compose_scene_basic() {
 }
 
 void execute_command(char* cmd) {
+    int graphics_mode = screen_is_graphics_enabled();
+
     if (cmd[0] == '\0') return;
     char arg1[32] = {0};
     char arg2[128] = {0};
@@ -487,7 +954,8 @@ void execute_command(char* cmd) {
         vga_println("  help   - Show this menu");
         vga_println("  clear  - Clear the screen");
         vga_println("  mem    - Memory map");
-        vga_println("  snake  - Snake game");
+        if (graphics_mode) vga_println("  snake  - Snake game");
+        else vga_println("  snake  - Snake game (requires graphics mode)");
         vga_println("  ver    - Show version");
         vga_println("  uptime - Show system uptime in seconds");
         vga_println("  date   - Show current date (RTC)");
@@ -511,9 +979,19 @@ void execute_command(char* cmd) {
         vga_println("  http   - Fetch HTTP/1.0 response (http <host> [path])");
         vga_println("  netdemo - Run Ring 3 HTTP demo (netdemo <host> [path])");
         vga_println("  fetch  - Download HTTP body to a file (fetch <host> [path] <file>)");
+        vga_println("  hwinfo - Show hardware summary");
+        vga_println("  pci    - List PCI devices");
+        vga_println("  storage - List storage controllers, partitions and active backend");
+        vga_println("  log    - Show kernel ring log");
+        vga_println("  reboot - Reboot system");
+        vga_println("  poweroff - Power off system");
         vga_println("  malloc_test - Test dynamic heap memory");
         vga_println("  usermode_test - Test Ring 3 transition and syscall");
     } else if (strcmp(arg1, "usermode_test") == 0) {
+        if (!graphics_mode) {
+            vga_print_color("error: usermode_test requires graphics mode.\n", 0x0C);
+            return;
+        }
         vga_println("Launching Secure User Mode Test V12 (Final Victory)...");
         extern void jump_to_usermode_v9(uint32_t eip, uint32_t esp, uint32_t lfb);
         extern void usermode_entry_gate();
@@ -538,10 +1016,14 @@ void execute_command(char* cmd) {
         vga_println("Verification: If the heartbeat pixel is rotating and the");
         vga_println("mouse is responsive, the transition was successful!");
 
-        set_tss_stack(0x2800000); 
+        set_tss_stack(KERNEL_BOOT_STACK_TOP); 
         
         jump_to_usermode_v9(target_eip, user_esp, lfb_addr);
     } else if (strcmp(arg1, "snake") == 0) {
+        if (!graphics_mode) {
+            vga_print_color("error: snake requires graphics mode.\n", 0x0C);
+            return;
+        }
         open_snake_window();
         vga_println("Snake launched in Ring 3.");
     } else if (strcmp(arg1, "clear") == 0) {
@@ -718,6 +1200,19 @@ void execute_command(char* cmd) {
         (void)run_user_netdemo(arg2);
     } else if (strcmp(arg1, "fetch") == 0) {
         (void)run_user_fetch(arg2);
+    } else if (strcmp(arg1, "hwinfo") == 0) {
+        print_hardware_info();
+    } else if (strcmp(arg1, "pci") == 0) {
+        pci_print_devices();
+    } else if (strcmp(arg1, "storage") == 0) {
+        pci_print_storage_devices();
+        storage_print_status();
+    } else if (strcmp(arg1, "log") == 0) {
+        print_kernel_log();
+    } else if (strcmp(arg1, "reboot") == 0) {
+        reboot_system();
+    } else if (strcmp(arg1, "poweroff") == 0) {
+        poweroff_system();
     } else {
         vga_print_color("Error: Unknown command '", 0x0C);
         vga_print_color(arg1, 0x0C);
@@ -736,6 +1231,32 @@ void print_prompt() {
     fs_get_current_path(path, sizeof(path));
     vga_print_color(path, 0x0B);
     vga_print_color("$ ", 0x0A);
+}
+
+static void print_text_fallback_banner() {
+    vga_print_color("\n  NarcOs Text Fallback Mode\n", 0x0E);
+    vga_print_color("  ========================\n", 0x0E);
+    vga_println("  Graphics init unavailable; continuing on VGA text console.");
+    vga_println("  GUI apps are disabled in this mode.");
+    print_prompt();
+}
+
+static void console_process_main(void) {
+    for (;;) {
+        if (cmd_ready) {
+            execute_command(cmd_to_execute);
+            cmd_ready = 0;
+            print_prompt();
+        }
+        process_poll();
+        asm volatile("hlt");
+        process_poll();
+    }
+}
+
+static void console_process_entry(void* arg) {
+    (void)arg;
+    console_process_main();
 }
 
 static void desktop_process_main(void) {
@@ -1160,37 +1681,123 @@ static void desktop_process_main(void) {
         if (cmd_ready) {
             execute_command(cmd_to_execute); cmd_ready = 0; print_prompt();
         }
+        process_poll();
+        asm volatile("hlt");
+        process_poll();
+    }
+}
+
+static void desktop_process_entry(void* arg) {
+    (void)arg;
+    desktop_process_main();
+}
+
+static void service_process_main(void* arg) {
+    (void)arg;
+    for (;;) {
         net_poll();
         run_user_tasks();
+        process_poll();
         asm volatile("hlt");
+        process_poll();
     }
 }
 
 void kmain() {
+    const cpu_info_t* cpu;
+    int console_pid;
+    int desktop_pid;
+    int service_pid;
+
+    serial_init();
+    serial_write_line("[boot] kmain");
+    cpu_init();
+    cpu = cpu_get_info();
+    if (!cpu->cpuid_supported || !cpu->pse_supported) {
+        boot_fatal("Unsupported CPU detected.",
+                   "Current kernel requires CPUID and 4 MB page support (PSE).");
+    }
+    serial_write_line("[boot] init_pic");
     init_pic();
+    serial_write_line("[boot] init_pit");
     init_pit();
+    serial_write_line("[boot] init_gdt");
     init_gdt();
+    serial_write_line("[boot] load_idt");
     load_idt();
+    serial_write_line("[boot] init_syscalls");
     init_syscalls();
-    init_usermode();
+    serial_write_line("[boot] init_paging");
+    init_paging();
+    serial_write("[boot] paging total_frames=");
+    serial_write_hex32(paging_total_frames());
+    serial_write(" used_frames=");
+    serial_write_hex32(paging_used_frames());
+    serial_write_char('\n');
+    serial_write("[boot] kernel_stack base=");
+    serial_write_hex32(paging_kernel_stack_base());
+    serial_write(" size=");
+    serial_write_hex32(paging_kernel_stack_size());
+    serial_write_char('\n');
+    paging_probe_kernel_vm();
+    if (init_usermode() != 0) {
+        boot_fatal("User memory initialization failed.",
+                   "Ring 3 code/data alias mappings could not be established.");
+    }
     init_keyboard();
+    storage_init();
     init_fs();
     init_heap();
-    init_vbe();
-    init_mouse();
+    screen_set_graphics_enabled(0);
+    if (boot_framebuffer_available()) {
+        serial_write_line("[boot] init_vbe");
+        init_vbe();
+        kernel_graphics_ready = 1;
+        screen_set_graphics_enabled(1);
+        init_mouse();
+    } else {
+        serial_write_line("[boot] framebuffer unavailable, using text fallback");
+        kernel_graphics_ready = 0;
+    }
     net_init();
+    serial_write_line("[boot] process_init");
+    process_init();
+    console_pid = -1;
+    desktop_pid = -1;
+    if (screen_is_graphics_enabled()) {
+        desktop_pid = process_create_kernel("desktop", desktop_process_entry, 0);
+    } else {
+        console_pid = process_create_kernel("console", console_process_entry, 0);
+    }
+    service_pid = process_create_kernel("service", service_process_main, 0);
+    if ((screen_is_graphics_enabled() && desktop_pid < 0) ||
+        (!screen_is_graphics_enabled() && console_pid < 0) ||
+        service_pid < 0) {
+        boot_fatal("Scheduler bootstrap failed.",
+                   "Kernel tasks could not be created with the current memory map.");
+    }
+    if (screen_is_graphics_enabled()) {
+        serial_write_line("[boot] desktop ready");
+    } else {
+        serial_write_line("[boot] text fallback ready");
+    }
     clear_screen();
-    vga_print_color("\n  NarcOs GUI Initialized.\n", 0x0B);
-    vga_print_color("  ========================\n", 0x0B);
-    vga_println("  Welcome to NarcOs Desktop!");
-    nwm_init_windows();
-    print_prompt();
-    vga_print("  Video Mode: ");
-    vga_print_int(vbe_get_width());
-    vga_print("x");
-    vga_print_int(vbe_get_height());
-    vga_print(" @ ");
-    vga_print_int(vbe_get_bpp());
-    vga_println("bpp");
-    desktop_process_main();
+    if (screen_is_graphics_enabled()) {
+        vga_print_color("\n  NarcOs GUI Initialized.\n", 0x0B);
+        vga_print_color("  ========================\n", 0x0B);
+        vga_println("  Welcome to NarcOs Desktop!");
+        nwm_init_windows();
+        print_prompt();
+        vga_print("  Video Mode: ");
+        vga_print_int(vbe_get_width());
+        vga_print("x");
+        vga_print_int(vbe_get_height());
+        vga_print(" @ ");
+        vga_print_int(vbe_get_bpp());
+        vga_println("bpp");
+    } else {
+        print_text_fallback_banner();
+    }
+    serial_write_line("[boot] scheduler start");
+    scheduler_start();
 }

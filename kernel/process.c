@@ -1,5 +1,7 @@
 #include "process.h"
+#include "gdt.h"
 #include "paging.h"
+#include "serial.h"
 #include "string.h"
 
 #define MAX_PROCESSES 8
@@ -34,6 +36,7 @@ static void context_switch_to(int next_idx) {
     next->state = PROC_RUNNING;
     current_process_idx = next_idx;
     scheduler_pending = 0;
+    set_tss_stack(next->kernel_stack_top);
 
     process_switch(old_esp_ptr, next->esp);
 }
@@ -56,10 +59,19 @@ int process_create_kernel(const char* name, process_entry_t entry, void* arg) {
             break;
         }
     }
-    if (slot == -1) return -1;
+    if (slot == -1) {
+        serial_write_line("[sched] process table full");
+        return -1;
+    }
 
-    void* stack_base = alloc_physical_pages(PROCESS_STACK_PAGES);
-    if (!stack_base) return -1;
+    uint32_t stack_top_addr = 0;
+    void* stack_base = paging_alloc_kernel_stack(PROCESS_STACK_PAGES, &stack_top_addr);
+    if (!stack_base) {
+        serial_write("[sched] stack alloc failed for ");
+        serial_write(name ? name : "task");
+        serial_write_char('\n');
+        return -1;
+    }
 
     process_t* proc = &process_table[slot];
     memset(proc, 0, sizeof(*proc));
@@ -68,18 +80,28 @@ int process_create_kernel(const char* name, process_entry_t entry, void* arg) {
     proc->cr3 = 0;
     proc->stack_base = stack_base;
     proc->stack_pages = PROCESS_STACK_PAGES;
+    proc->kernel_stack_top = stack_top_addr;
     proc->entry = entry;
     proc->arg = arg;
     strncpy(proc->name, name ? name : "task", sizeof(proc->name) - 1);
     proc->name[sizeof(proc->name) - 1] = '\0';
 
-    uint32_t* stack_top = (uint32_t*)((uint32_t)stack_base + PROCESS_STACK_PAGES * 4096U);
+    uint32_t* stack_top = (uint32_t*)stack_top_addr;
     *--stack_top = (uint32_t)process_bootstrap;
     *--stack_top = 0;
     *--stack_top = 0;
     *--stack_top = 0;
     *--stack_top = 0;
     proc->esp = (uint32_t)stack_top;
+    serial_write("[sched] created ");
+    serial_write(proc->name);
+    serial_write(" pid=");
+    serial_write_hex32((uint32_t)proc->pid);
+    serial_write(" stack_base=");
+    serial_write_hex32((uint32_t)proc->stack_base);
+    serial_write(" stack_top=");
+    serial_write_hex32(proc->kernel_stack_top);
+    serial_write_char('\n');
     return proc->pid;
 }
 

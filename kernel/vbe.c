@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "vbe.h"
+#include "cpu.h"
 #include "string.h"
 #include "fs.h"
 #include "usermode.h"
@@ -44,6 +45,57 @@ volatile int gui_needs_redraw = 1;
 
 static uint8_t* current_target = (uint8_t*)0x800000;
 static uint32_t current_target_width = 0;
+
+static void vbe_memcpy_fast(void* dest, const void* src, uint32_t count) {
+    if (cpu_sse_enabled()) vbe_memcpy_sse(dest, (void*)src, count);
+    else vbe_memcpy(dest, (void*)src, count);
+}
+
+static void vbe_memset_fast(void* dest, uint32_t color, uint32_t count_bytes) {
+    if (cpu_sse_enabled()) {
+        vbe_memset_sse(dest, color, count_bytes);
+    } else {
+        uint32_t* pixels = (uint32_t*)dest;
+        uint32_t count = count_bytes / 4U;
+        for (uint32_t i = 0; i < count; i++) {
+            pixels[i] = color;
+        }
+    }
+}
+
+static void vbe_alpha_blend_fast(void* dest, uint32_t color, uint32_t alpha, uint32_t count_pixels) {
+    if (cpu_sse_enabled()) {
+        vbe_alpha_blend_sse(dest, color, alpha, count_pixels);
+    } else {
+        uint32_t* pixels = (uint32_t*)dest;
+        for (uint32_t i = 0; i < count_pixels; i++) {
+            pixels[i] = vbe_mix_color(color, pixels[i], (int)alpha);
+        }
+    }
+}
+
+static void vbe_draw_glyph_solid_32(int x, int y, const unsigned char* glyph, uint32_t color) {
+    int start_col = 0;
+    int end_col = 8;
+    int start_row = 0;
+    int end_row = 8;
+
+    if (x < 0) start_col = -x;
+    if (y < 0) start_row = -y;
+    if (x + end_col > (int)current_target_width) end_col = (int)current_target_width - x;
+    if (y + end_row > (int)mode_info->height) end_row = (int)mode_info->height - y;
+    if (start_col >= end_col || start_row >= end_row) return;
+
+    for (int row = start_row; row < end_row; row++) {
+        uint32_t* dest = (uint32_t*)(current_target + ((y + row) * current_target_width + x + start_col) * 4U);
+        unsigned char bits = glyph[row];
+        for (int col = start_col; col < end_col; col++) {
+            if ((bits & (1U << (7 - col))) != 0U) {
+                dest[col - start_col] = color;
+            }
+        }
+    }
+}
 
 unsigned char vbe_font[256][8] = {
     [0] = {0},
@@ -288,10 +340,10 @@ void vbe_update() {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t row_size = mode_info->width * bpp_bytes;
     if (mode_info->pitch == row_size) {
-        vbe_memcpy_sse((void*)mode_info->framebuffer, backbuffer, mode_info->width * mode_info->height * bpp_bytes);
+        vbe_memcpy_fast((void*)mode_info->framebuffer, backbuffer, mode_info->width * mode_info->height * bpp_bytes);
     } else {
         for(uint32_t y = 0; y < mode_info->height; y++) {
-            vbe_memcpy_sse((void*)(mode_info->framebuffer + y * mode_info->pitch), backbuffer + y * row_size, row_size);
+            vbe_memcpy_fast((void*)(mode_info->framebuffer + y * mode_info->pitch), backbuffer + y * row_size, row_size);
         }
     }
 }
@@ -415,10 +467,34 @@ void vbe_draw_wallpaper() {
         vbe_set_target(old_target, old_width);
         wallpaper_init = 1;
     }
-    vbe_memcpy_sse(backbuffer, wallpaper_buffer, screen_size);
+    vbe_memcpy_fast(backbuffer, wallpaper_buffer, screen_size);
 }
 
 void vbe_draw_cursor(int x, int y) {
+    if (mode_info->bpp == 32) {
+        int start_x = x < 0 ? 0 : x;
+        int start_y = y < 0 ? 0 : y;
+        int end_x = x + 12;
+        int end_y = y + 12;
+
+        if (end_x > (int)current_target_width) end_x = (int)current_target_width;
+        if (end_y > (int)mode_info->height) end_y = (int)mode_info->height;
+        if (start_x >= end_x || start_y >= end_y) return;
+
+        for (int row = start_y; row < end_y; row++) {
+            int cursor_row = row - y;
+            uint16_t bits = mouse_cursor_bitmap[cursor_row];
+            uint32_t* dest = (uint32_t*)(current_target + (row * current_target_width + start_x) * 4U);
+            for (int col = start_x; col < end_x; col++) {
+                int cursor_col = col - x;
+                if ((bits & (1U << (11 - cursor_col))) != 0U) {
+                    dest[col - start_x] = 0xFFFFFF;
+                }
+            }
+        }
+        return;
+    }
+
     for (int i = 0; i < 12; i++) {
         for (int j = 0; j < 12; j++) {
             if (mouse_cursor_bitmap[i] & (1 << (11 - j))) vbe_put_pixel(x + j, y + i, 0xFFFFFF);
@@ -433,6 +509,10 @@ void vbe_clear(uint32_t color) {
 void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
     unsigned char* glyph = vbe_get_glyph_bitmap((uint8_t)c);
     if (scale <= 1) {
+        if (mode_info->bpp == 32) {
+            vbe_draw_glyph_solid_32(x, y, glyph, color);
+            return;
+        }
         for (int row = 0; row < 8; row++) {
             for (int col = 0; col < 8; col++) {
                 if (glyph[row] & (1 << (7 - col))) vbe_put_pixel_alpha(x + col, y + row, color, 255);
@@ -463,6 +543,10 @@ void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
 static void vbe_draw_glyph_hd(int x, int y, uint16_t glyph_id, uint32_t color, int scale) {
     unsigned char* glyph = vbe_get_glyph_bitmap(glyph_id);
     if (scale <= 1) {
+        if (mode_info->bpp == 32) {
+            vbe_draw_glyph_solid_32(x, y, glyph, color);
+            return;
+        }
         for (int row = 0; row < 8; row++) {
             for (int col = 0; col < 8; col++) {
                 if (glyph[row] & (1 << (7 - col))) vbe_put_pixel_alpha(x + col, y + row, color, 255);
@@ -511,7 +595,7 @@ void vbe_render_mouse_direct(int x, int y) {
 }
 void vbe_copy_to_buffer(void* source) {
     uint32_t size = mode_info->width * mode_info->height * (mode_info->bpp / 8);
-    vbe_memcpy(backbuffer, source, size);
+    vbe_memcpy_fast(backbuffer, source, size);
 }
 
 #define COLOR_GLASS_BG     UI_SURFACE_1
@@ -655,7 +739,7 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
             if (copy_w > 0) {
                 uint8_t* dest = backbuffer + (draw_y * screen_w + draw_x) * bpp;
                 uint8_t* src  = win_buf + (i * w + src_off_x) * bpp;
-                vbe_memcpy_sse(dest, src, copy_w * bpp);
+                vbe_memcpy_fast(dest, src, copy_w * bpp);
             }
         }
     }
@@ -669,7 +753,7 @@ void vbe_blit_rect(int x, int y, int w, int h, uint8_t* src_buf, uint32_t src_st
         uint32_t draw_w = (x + w > (int)mode_info->width) ? (mode_info->width - x) : w;
         uint8_t* dest = (uint8_t*)mode_info->framebuffer + ((y + i) * mode_info->pitch + x * bpp);
         uint8_t* src  = src_buf + ((y + i) * src_stride + x) * bpp;
-        vbe_memcpy_sse(dest, src, draw_w * bpp);
+        vbe_memcpy_fast(dest, src, draw_w * bpp);
     }
 }
 
@@ -684,7 +768,7 @@ void vbe_fill_rect(int x, int y, int w, int h, uint32_t color) {
     for (int i = 0; i < h; i++) {
         uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
         if (bpp == 4) {
-            vbe_memset_sse(p, color, w * 4);
+            vbe_memset_fast(p, color, (uint32_t)(w * 4));
         } else {
             for (int j = 0; j < w; j++) {
                 p[j * 3]     = color & 0xFF;
@@ -709,7 +793,7 @@ void vbe_fill_rect_alpha(int x, int y, int w, int h, uint32_t color, int alpha) 
     for (int i = 0; i < h; i++) {
         uint8_t* p = current_target + ((y + i) * current_target_width + x) * bpp;
         if (bpp == 4) {
-            vbe_alpha_blend_sse(p, color, alpha, w);
+            vbe_alpha_blend_fast(p, color, (uint32_t)alpha, (uint32_t)w);
         } else {
             for (int j = 0; j < w; j++) {
                 uint32_t old = (p[2] << 16) | (p[1] << 8) | p[0];
@@ -804,6 +888,16 @@ void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2
     if (x + w > (int)current_target_width) w = current_target_width - x;
     if (y + h > (int)mode_info->height) h = mode_info->height - y;
     if (w <= 0 || h <= 0) return;
+
+    if (mode_info->bpp == 32) {
+        for (int i = 0; i < h; i++) {
+            int ratio = (i * 255) / h;
+            uint32_t color = vbe_mix_color(c2, c1, ratio);
+            uint32_t* row = (uint32_t*)(current_target + ((y + i) * current_target_width + x) * 4U);
+            vbe_memset_fast(row, color, (uint32_t)(w * 4));
+        }
+        return;
+    }
 
     for (int i = 0; i < h; i++) {
         int ratio = (i * 255) / h;
@@ -1015,13 +1109,12 @@ void vbe_draw_desktop_icons(int desktop_dir) {
 }
 
 void vbe_draw_rect(int x, int y, int w, int h, uint32_t color) {
-    for (int j = 0; j < w; j++) {
-        vbe_put_pixel(x + j, y, color);
-        vbe_put_pixel(x + j, y + h - 1, color);
-    }
-    for (int i = 0; i < h; i++) {
-        vbe_put_pixel(x, y + i, color);
-        vbe_put_pixel(x + w - 1, y + i, color);
+    if (w <= 0 || h <= 0) return;
+    vbe_fill_rect(x, y, w, 1, color);
+    if (h > 1) vbe_fill_rect(x, y + h - 1, w, 1, color);
+    if (h > 2) {
+        vbe_fill_rect(x, y + 1, 1, h - 2, color);
+        if (w > 1) vbe_fill_rect(x + w - 1, y + 1, 1, h - 2, color);
     }
 }
 
@@ -1105,7 +1198,7 @@ void vbe_draw_snake_game(int x, int y, int w, int h, int* px, int* py, int len, 
 void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int start_vis, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel) {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
-    vbe_memcpy_sse(composition_buffer, wallpaper_buffer, size);
+    vbe_memcpy_fast(composition_buffer, wallpaper_buffer, size);
     
     uint8_t* old_target = current_target;
     uint32_t old_width = current_target_width;
@@ -1180,7 +1273,7 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
 void vbe_prepare_frame_from_composition() {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t size = mode_info->width * mode_info->height * bpp_bytes;
-    vbe_memcpy_sse(backbuffer, composition_buffer, size);
+    vbe_memcpy_fast(backbuffer, composition_buffer, size);
 }
 
 void vbe_present_cursor_fast(int old_x, int old_y, int new_x, int new_y) {
@@ -1210,7 +1303,7 @@ void vbe_present_cursor_fast(int old_x, int old_y, int new_x, int new_y) {
         for (int row = 0; row < rect_h; row++) {
             uint8_t* dest = backbuffer + ((rect_y + row) * mode_info->width + rect_x) * bpp;
             uint8_t* src = composition_buffer + ((rect_y + row) * mode_info->width + rect_x) * bpp;
-            vbe_memcpy_sse(dest, src, rect_w * bpp);
+            vbe_memcpy_fast(dest, src, rect_w * bpp);
         }
     }
 

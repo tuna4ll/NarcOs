@@ -71,7 +71,7 @@ static const char* shell_commands[] = {
     "help", "clear", "mem", "snake", "ver", "uptime", "date", "time",
     "ls", "pwd", "touch", "cat", "write", "edit", "mkdir", "cd",
     "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "netdemo", "fetch",
-    "malloc_test", "usermode_test"
+    "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"
 };
 
 static void set_input_line(const char* text) {

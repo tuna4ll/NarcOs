@@ -4,7 +4,7 @@ CC = gcc
 LD = ld
 AS = nasm
 
-CFLAGS = -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -mpreferred-stack-boundary=2 -mno-red-zone -Wall -Wextra -O2
+CFLAGS = -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -fno-strict-aliasing -mpreferred-stack-boundary=2 -mno-red-zone -Wall -Wextra -O3 -fomit-frame-pointer -falign-functions=16 -falign-jumps=16 -falign-loops=16
 
 LDFLAGS = -m elf_i386 -T linker.ld -nostdlib -s --strip-all
 

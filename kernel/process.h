@@ -19,6 +19,7 @@ typedef struct process {
     uint32_t cr3;
     void* stack_base;
     uint32_t stack_pages;
+    uint32_t kernel_stack_top;
     process_entry_t entry;
     void* arg;
     char name[32];

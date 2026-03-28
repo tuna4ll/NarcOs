@@ -21,6 +21,9 @@ global isr_user_yield
 global jump_to_usermode
 global jump_to_usermode_v9
 global isr_gpf
+global isr_invalid_opcode
+global isr_stack_fault
+global isr_page_fault
 global isr_double_fault
 global load_page_directory
 global enable_paging
@@ -35,15 +38,8 @@ extern user_kernel_edi
 extern user_kernel_ebp
 SECTION .text.prologue
 _start:
-    mov esp, 0x2800000
+    mov esp, 0x02C00000
     mov ebp, esp
-    mov eax, cr0
-    and ax, 0xFFFB
-    or ax, 0x2
-    mov cr0, eax
-    mov eax, cr4
-    or ax, 3 << 9
-    mov cr4, eax
     call kmain
     cli
 .halt:
@@ -388,6 +384,91 @@ isr_gpf:
     
     popa
     add esp, 4 ; Error code
+    iret
+
+extern invalid_opcode_handler
+isr_invalid_opcode:
+    push dword 0
+    pusha
+
+    push ds
+    push es
+    push fs
+    push gs
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp
+    call invalid_opcode_handler
+    add esp, 4
+
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    popa
+    add esp, 4
+    iret
+
+extern stack_fault_handler
+isr_stack_fault:
+    pusha
+
+    push ds
+    push es
+    push fs
+    push gs
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp
+    call stack_fault_handler
+    add esp, 4
+
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    popa
+    add esp, 4
+    iret
+
+extern page_fault_handler
+isr_page_fault:
+    pusha
+
+    push ds
+    push es
+    push fs
+    push gs
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp
+    call page_fault_handler
+    add esp, 4
+
+    pop gs
+    pop fs
+    pop es
+    pop ds
+
+    popa
+    add esp, 4
     iret
 
 isr_double_fault:

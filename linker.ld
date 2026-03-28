@@ -26,9 +26,15 @@ SECTIONS
         *(.data.*)
     }
 
-    .user_code : ALIGN(16)
+    .user_region : ALIGN(4096)
     {
+        __user_region_start = .;
         *(.user_code)
+        *(.user_code.*)
+        *(.user_rodata)
+        *(.user_rodata.*)
+        . = ALIGN(4096);
+        __user_region_end = .;
     }
 
     .bss : ALIGN(4)

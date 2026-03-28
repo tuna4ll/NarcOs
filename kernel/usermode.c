@@ -1,4 +1,6 @@
 #include "usermode.h"
+#include "paging.h"
+#include "process.h"
 #include "string.h"
 #include "vbe.h"
 
@@ -22,11 +24,8 @@ typedef enum {
 } user_task_kind_t;
 
 static trap_frame_t snake_context;
-static uint8_t snake_stack[4096] __attribute__((aligned(16)));
 static trap_frame_t netdemo_context;
-static uint8_t netdemo_stack[4096] __attribute__((aligned(16)));
 static trap_frame_t fetch_context;
-static uint8_t fetch_stack[4096] __attribute__((aligned(16)));
 static user_task_kind_t active_user_task = USER_TASK_NONE;
 static int snake_best_persist = 0;
 static volatile int snake_input_pending = -1;
@@ -40,9 +39,31 @@ static int snake_last_dead = -1;
 static int snake_last_score = -1;
 static int snake_last_best = -1;
 
-user_snake_state_t user_snake_state;
-user_netdemo_state_t user_netdemo_state;
-user_fetch_state_t user_fetch_state;
+#define USER_PAGE_SIZE              4096U
+#define USER_SNAKE_STATE_PAGES      1U
+#define USER_SNAKE_STACK_PAGES      1U
+#define USER_NETDEMO_STATE_PAGES    1U
+#define USER_NETDEMO_STACK_PAGES    1U
+#define USER_FETCH_STATE_PAGES      2U
+#define USER_FETCH_STACK_PAGES      1U
+#define USER_SNAKE_STATE_VA         (USER_DATA_WINDOW_BASE + 0x0000U)
+#define USER_SNAKE_STACK_VA         (USER_DATA_WINDOW_BASE + 0x1000U)
+#define USER_NETDEMO_STATE_VA       (USER_DATA_WINDOW_BASE + 0x2000U)
+#define USER_NETDEMO_STACK_VA       (USER_DATA_WINDOW_BASE + 0x3000U)
+#define USER_FETCH_STATE_VA         (USER_DATA_WINDOW_BASE + 0x4000U)
+#define USER_FETCH_STACK_VA         (USER_DATA_WINDOW_BASE + 0x6000U)
+
+static uint8_t snake_state_region[USER_SNAKE_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t snake_stack_region[USER_SNAKE_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t netdemo_state_region[USER_NETDEMO_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t netdemo_stack_region[USER_NETDEMO_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t fetch_state_region[USER_FETCH_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t fetch_stack_region[USER_FETCH_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static int user_memory_ready = 0;
+
+user_snake_state_t* user_snake_state_ptr = (user_snake_state_t*)snake_state_region;
+user_netdemo_state_t* user_netdemo_state_ptr = (user_netdemo_state_t*)netdemo_state_region;
+user_fetch_state_t* user_fetch_state_ptr = (user_fetch_state_t*)fetch_state_region;
 uint32_t user_kernel_resume_esp = 0;
 uint32_t user_kernel_ebx = 0;
 uint32_t user_kernel_esi = 0;
@@ -87,17 +108,36 @@ static void remember_snake_frame() {
     snake_last_best = user_snake_state.best;
 }
 
-static void init_user_context(trap_frame_t* context, uint8_t* stack, uint32_t entry_point, void* state_ptr) {
+static int init_user_memory_layout() {
+    if (user_memory_ready) return 0;
+    if (paging_map_user_region(USER_SNAKE_STATE_VA, (uint32_t)snake_state_region,
+                               sizeof(snake_state_region), PAGING_FLAG_WRITE) != 0) return -1;
+    if (paging_map_user_region(USER_SNAKE_STACK_VA, (uint32_t)snake_stack_region,
+                               sizeof(snake_stack_region), PAGING_FLAG_WRITE) != 0) return -1;
+    if (paging_map_user_region(USER_NETDEMO_STATE_VA, (uint32_t)netdemo_state_region,
+                               sizeof(netdemo_state_region), PAGING_FLAG_WRITE) != 0) return -1;
+    if (paging_map_user_region(USER_NETDEMO_STACK_VA, (uint32_t)netdemo_stack_region,
+                               sizeof(netdemo_stack_region), PAGING_FLAG_WRITE) != 0) return -1;
+    if (paging_map_user_region(USER_FETCH_STATE_VA, (uint32_t)fetch_state_region,
+                               sizeof(fetch_state_region), PAGING_FLAG_WRITE) != 0) return -1;
+    if (paging_map_user_region(USER_FETCH_STACK_VA, (uint32_t)fetch_stack_region,
+                               sizeof(fetch_stack_region), PAGING_FLAG_WRITE) != 0) return -1;
+    user_memory_ready = 1;
+    return 0;
+}
+
+static void init_user_context(trap_frame_t* context, uint32_t user_stack_base, uint32_t user_stack_pages,
+                              uint32_t entry_point, uint32_t user_state_ptr) {
     memset(context, 0, sizeof(*context));
     context->gs = USER_DATA_SEG;
     context->fs = USER_DATA_SEG;
     context->es = USER_DATA_SEG;
     context->ds = USER_DATA_SEG;
-    context->edi = (uint32_t)state_ptr;
+    context->edi = user_state_ptr;
     context->eip = entry_point;
     context->cs = USER_CODE_SEG;
     context->eflags = 0x202;
-    context->user_esp = (uint32_t)(stack + 4096U - 16U);
+    context->user_esp = user_stack_base + user_stack_pages * USER_PAGE_SIZE - 16U;
     context->user_ss = USER_DATA_SEG;
 }
 
@@ -210,16 +250,28 @@ static int parse_fetch_args(const char* args, char* host, int host_len,
     return -1;
 }
 
-static int run_sync_user_app(user_task_kind_t kind, trap_frame_t* context, int* status_ptr) {
+static void dispatch_user_task(user_task_kind_t kind, trap_frame_t* context) {
+    process_t* current = process_current();
+    uint32_t resume_stack_top = current ? current->kernel_stack_top : KERNEL_BOOT_STACK_TOP;
+
     active_user_task = kind;
-    while (*status_ptr == USER_APP_STATUS_RUNNING) {
-        run_user_task(context);
-    }
+    /* User traps must land on a clean kernel stack; otherwise INT frames overwrite
+       the suspended process stack frame that run_user_task will later resume. */
+    set_tss_stack(KERNEL_BOOT_STACK_TOP);
+    run_user_task(context);
+    set_tss_stack(resume_stack_top);
     active_user_task = USER_TASK_NONE;
+}
+
+static int run_sync_user_app(user_task_kind_t kind, trap_frame_t* context, int* status_ptr) {
+    while (*status_ptr == USER_APP_STATUS_RUNNING) {
+        dispatch_user_task(kind, context);
+    }
     return *status_ptr;
 }
 
-void init_usermode() {
+int init_usermode() {
+    user_memory_ready = 0;
     memset(&snake_context, 0, sizeof(snake_context));
     memset(&netdemo_context, 0, sizeof(netdemo_context));
     memset(&fetch_context, 0, sizeof(fetch_context));
@@ -230,6 +282,8 @@ void init_usermode() {
     snake_input_pending = -1;
     snake_running = 0;
     active_user_task = USER_TASK_NONE;
+    if (init_user_memory_layout() != 0) return -1;
+    return 0;
 }
 
 void launch_user_snake() {
@@ -242,7 +296,8 @@ void launch_user_snake() {
 
     reset_user_snake_state();
     invalidate_snake_frame_cache();
-    init_user_context(&snake_context, snake_stack, (uint32_t)user_snake_entry_gate, &user_snake_state);
+    init_user_context(&snake_context, USER_SNAKE_STACK_VA, USER_SNAKE_STACK_PAGES,
+                      (uint32_t)user_snake_entry_gate, USER_SNAKE_STATE_VA);
 
     snake_input_pending = -1;
     snake_running = 1;
@@ -251,9 +306,7 @@ void launch_user_snake() {
 
 void run_user_tasks() {
     if (snake_running) {
-        active_user_task = USER_TASK_SNAKE;
-        run_user_task(&snake_context);
-        active_user_task = USER_TASK_NONE;
+        dispatch_user_task(USER_TASK_SNAKE, &snake_context);
     }
 }
 
@@ -270,7 +323,8 @@ int run_user_netdemo(const char* target) {
     }
 
     user_netdemo_state.status = USER_APP_STATUS_RUNNING;
-    init_user_context(&netdemo_context, netdemo_stack, (uint32_t)user_netdemo_entry_gate, &user_netdemo_state);
+    init_user_context(&netdemo_context, USER_NETDEMO_STACK_VA, USER_NETDEMO_STACK_PAGES,
+                      (uint32_t)user_netdemo_entry_gate, USER_NETDEMO_STATE_VA);
     status = run_sync_user_app(USER_TASK_NETDEMO, &netdemo_context, &user_netdemo_state.status);
     if (status < 0) {
         vga_print_color("netdemo: ", 0x0C);
@@ -292,7 +346,8 @@ int run_user_fetch(const char* args) {
     }
 
     user_fetch_state.status = USER_APP_STATUS_RUNNING;
-    init_user_context(&fetch_context, fetch_stack, (uint32_t)user_fetch_entry_gate, &user_fetch_state);
+    init_user_context(&fetch_context, USER_FETCH_STACK_VA, USER_FETCH_STACK_PAGES,
+                      (uint32_t)user_fetch_entry_gate, USER_FETCH_STATE_VA);
     status = run_sync_user_app(USER_TASK_FETCH, &fetch_context, &user_fetch_state.status);
     if (status < 0) {
         vga_print_color("fetch: ", 0x0C);

@@ -1,4 +1,5 @@
 #include "gdt.h"
+#include "paging.h"
 #include "string.h"
 
 gdt_entry_t gdt[6];
@@ -42,7 +43,7 @@ void init_gdt() {
     gdt_set_gate(2, 0, 0xFFFFFFFF, 0x92, 0xCF); // K-Data
     gdt_set_gate(3, 0, 0xFFFFFFFF, 0xFA, 0xCF); // U-Code
     gdt_set_gate(4, 0, 0xFFFFFFFF, 0xF2, 0xCF); // U-Data
-    write_tss(5, 0x10, 0x2800000);              // TSS with kernel stack
+    write_tss(5, 0x10, KERNEL_BOOT_STACK_TOP);  // TSS with guarded boot stack
 
     gdt_flush((uint32_t)&gdt_ptr);
     tss_flush();
