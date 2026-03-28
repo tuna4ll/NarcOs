@@ -2,4 +2,4 @@ insomnia
 
 cool toy kernel :)
 
-<img width="1024" height="768" alt="image" src="https://cdn.discordapp.com/attachments/1117414721570750476/1487462985168322740/vmplayer_ft3PLqpT0e.png?ex=69c93b5b&is=69c7e9db&hm=061959cd1f65d40b8122e9fab891a0d9875e1bc2afaecc23572702d925e9650f&" />
+<img width="1024" height="768" alt="image" src="https://cdn.discordapp.com/attachments/1038164986217893920/1487600519177310470/image.png?ex=69c9bb72&is=69c869f2&hm=fe4ab70f7f492ddf4d9f296d434b9104b60a1adfefec4e356149bcbd6bac8615&" />
