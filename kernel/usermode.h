@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 #include "gdt.h"
+#include "net.h"
+
+#define USER_APP_STATUS_OK 0
+#define USER_APP_STATUS_RUNNING 1
 
 typedef struct {
     int px[100];
@@ -17,9 +21,30 @@ typedef struct {
     int last_tick;
 } user_snake_state_t;
 
+typedef struct {
+    int status;
+    net_http_result_t result;
+    char host[96];
+    char path[160];
+    char response[2048];
+} user_netdemo_state_t;
+
+typedef struct {
+    int status;
+    uint32_t body_offset;
+    uint32_t saved_len;
+    net_http_result_t result;
+    char host[96];
+    char path[160];
+    char output_path[128];
+    char response[4096];
+} user_fetch_state_t;
+
 void init_usermode();
 void launch_user_snake();
 void run_user_tasks();
+int run_user_netdemo(const char* target);
+int run_user_fetch(const char* args);
 void stop_user_snake();
 int user_snake_running();
 void queue_user_snake_input(int input);
@@ -27,6 +52,8 @@ int consume_user_snake_input();
 void user_yield_handler(trap_frame_t* frame);
 
 extern user_snake_state_t user_snake_state;
+extern user_netdemo_state_t user_netdemo_state;
+extern user_fetch_state_t user_fetch_state;
 extern uint32_t user_kernel_resume_esp;
 extern uint32_t user_kernel_ebx;
 extern uint32_t user_kernel_esi;

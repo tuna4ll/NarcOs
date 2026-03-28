@@ -507,6 +507,10 @@ void execute_command(char* cmd) {
         vga_println("  dhcp   - Request IPv4 configuration");
         vga_println("  dns    - Resolve hostname to IPv4");
         vga_println("  ping   - Ping an IPv4 host");
+        vga_println("  ntp    - Query UTC time from an NTP server");
+        vga_println("  http   - Fetch HTTP/1.0 response (http <host> [path])");
+        vga_println("  netdemo - Run Ring 3 HTTP demo (netdemo <host> [path])");
+        vga_println("  fetch  - Download HTTP body to a file (fetch <host> [path] <file>)");
         vga_println("  malloc_test - Test dynamic heap memory");
         vga_println("  usermode_test - Test Ring 3 transition and syscall");
     } else if (strcmp(arg1, "usermode_test") == 0) {
@@ -706,6 +710,14 @@ void execute_command(char* cmd) {
         (void)net_dns_command(arg2);
     } else if (strcmp(arg1, "ping") == 0) {
         (void)net_ping_command(arg2);
+    } else if (strcmp(arg1, "ntp") == 0) {
+        (void)net_ntp_command(arg2);
+    } else if (strcmp(arg1, "http") == 0) {
+        (void)net_http_command(arg2);
+    } else if (strcmp(arg1, "netdemo") == 0) {
+        (void)run_user_netdemo(arg2);
+    } else if (strcmp(arg1, "fetch") == 0) {
+        (void)run_user_fetch(arg2);
     } else {
         vga_print_color("Error: Unknown command '", 0x0C);
         vga_print_color(arg1, 0x0C);

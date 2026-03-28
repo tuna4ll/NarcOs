@@ -17,7 +17,7 @@ kernel_bin_target = kernel.bin
 
 C_SOURCES = $(wildcard $(KERN_DIR)/*.c)
 C_OBJECTS = $(patsubst $(KERN_DIR)/%.c, $(OBJ_DIR)/%.o, $(C_SOURCES))
-ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o $(OBJ_DIR)/user_snake.o
+ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o $(OBJ_DIR)/user_snake.o $(OBJ_DIR)/user_netdemo.o $(OBJ_DIR)/user_fetch.o
 
 OBJ_FILES = $(ASM_OBJECTS) $(C_OBJECTS)
 
@@ -45,6 +45,12 @@ $(OBJ_DIR)/user_test.o: $(KERN_DIR)/user_test.asm
 	$(AS) -f elf32 $< -o $@
 
 $(OBJ_DIR)/user_snake.o: $(KERN_DIR)/user_snake.asm
+	$(AS) -f elf32 $< -o $@
+
+$(OBJ_DIR)/user_netdemo.o: $(KERN_DIR)/user_netdemo.asm
+	$(AS) -f elf32 $< -o $@
+
+$(OBJ_DIR)/user_fetch.o: $(KERN_DIR)/user_fetch.asm
 	$(AS) -f elf32 $< -o $@
 
 $(OBJ_DIR)/%.o: $(KERN_DIR)/%.c

@@ -3,6 +3,7 @@
 #include "vbe.h"
 #include "memory_alloc.h"
 #include "fs.h"
+#include "net.h"
 #include "usermode.h"
 
 extern void vga_println(const char* str);
@@ -29,6 +30,7 @@ void syscall_handler(trap_frame_t* frame) {
     uint32_t ebx = frame->ebx;
     uint32_t ecx = frame->ecx;
     uint32_t edx = frame->edx;
+    uint32_t esi = frame->esi;
 
     if (eax == SYS_PRINT) {
         vga_println((const char*)ebx);
@@ -65,6 +67,24 @@ void syscall_handler(trap_frame_t* frame) {
         frame->eax = 0;
     } else if (eax == SYS_RANDOM) {
         frame->eax = kernel_next_random();
+    } else if (eax == SYS_NET_GET_CONFIG) {
+        frame->eax = (uint32_t)net_get_ipv4_config((net_ipv4_config_t*)ebx);
+    } else if (eax == SYS_NET_RESOLVE) {
+        frame->eax = (uint32_t)net_resolve_ipv4((const char*)ebx, (uint32_t*)ecx);
+    } else if (eax == SYS_NET_NTP_QUERY) {
+        frame->eax = (uint32_t)net_ntp_query((const char*)ebx, (uint32_t*)ecx);
+    } else if (eax == SYS_NET_SOCKET_OPEN) {
+        frame->eax = (uint32_t)net_socket_open((int)ebx);
+    } else if (eax == SYS_NET_SOCKET_CONNECT) {
+        frame->eax = (uint32_t)net_socket_connect((int)ebx, ecx, (uint16_t)edx, esi);
+    } else if (eax == SYS_NET_SOCKET_SEND) {
+        frame->eax = (uint32_t)net_socket_send((int)ebx, (const void*)ecx, (uint16_t)edx);
+    } else if (eax == SYS_NET_SOCKET_RECV) {
+        frame->eax = (uint32_t)net_socket_recv((int)ebx, (void*)ecx, (uint16_t)edx);
+    } else if (eax == SYS_NET_SOCKET_AVAILABLE) {
+        frame->eax = (uint32_t)net_socket_available((int)ebx);
+    } else if (eax == SYS_NET_SOCKET_CLOSE) {
+        frame->eax = (uint32_t)net_socket_close((int)ebx);
     } else if (eax == SYS_EXIT) {
         stop_user_snake();
         frame->eax = 0;

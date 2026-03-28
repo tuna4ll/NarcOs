@@ -56,6 +56,7 @@ extern void vbe_update();
 #define ETH_TYPE_IPV4 0x0800
 #define ETH_TYPE_ARP  0x0806
 
+#define IPV4_PROTOCOL_TCP  6
 #define IPV4_PROTOCOL_ICMP 1
 #define IPV4_PROTOCOL_UDP  17
 
@@ -69,6 +70,20 @@ extern void vbe_update();
 #define NET_TIMEOUT_SHORT 100U
 #define NET_TIMEOUT_MEDIUM 200U
 #define NET_TIMEOUT_LONG 300U
+#define NET_TIMEOUT_TCP_RETRY 50U
+#define NET_TIMEOUT_HTTP_IDLE 300U
+#define NET_TIMEOUT_HTTP_TOTAL 1200U
+
+#define TCP_FLAG_FIN 0x01
+#define TCP_FLAG_SYN 0x02
+#define TCP_FLAG_RST 0x04
+#define TCP_FLAG_PSH 0x08
+#define TCP_FLAG_ACK 0x10
+#define TCP_WINDOW_SIZE 4096U
+#define NET_SOCKET_COUNT 4
+#define NET_SOCKET_RX_BUFFER 4096U
+#define NET_SOCKET_TX_BUFFER 1024U
+#define NET_SOCKET_MAX_RETRIES 4U
 
 typedef struct {
     uint8_t dst[6];
@@ -107,6 +122,18 @@ typedef struct {
     uint16_t length;
     uint16_t checksum;
 } __attribute__((packed)) udp_header_t;
+
+typedef struct {
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t sequence;
+    uint32_t acknowledgment;
+    uint8_t data_offset_reserved;
+    uint8_t flags;
+    uint16_t window;
+    uint16_t checksum;
+    uint16_t urgent_pointer;
+} __attribute__((packed)) tcp_header_t;
 
 typedef struct {
     uint8_t type;
@@ -161,6 +188,30 @@ typedef struct {
     int valid;
 } dhcp_offer_t;
 
+typedef struct {
+    int used;
+    int type;
+    net_socket_state_t state;
+    int last_error;
+    int peer_closed;
+    int overflowed;
+    uint32_t remote_ip;
+    uint16_t local_port;
+    uint16_t remote_port;
+    uint32_t send_next;
+    uint32_t recv_next;
+    uint8_t rx_buf[NET_SOCKET_RX_BUFFER];
+    uint16_t rx_len;
+    uint8_t tx_buf[NET_SOCKET_TX_BUFFER];
+    uint16_t tx_payload_len;
+    uint32_t tx_sequence;
+    uint8_t tx_flags;
+    uint8_t tx_active;
+    uint8_t tx_attempts;
+    uint32_t tx_last_tick;
+    uint32_t last_event_tick;
+} net_socket_t;
+
 static net_state_t net_state;
 static arp_entry_t arp_cache[ARP_CACHE_SIZE];
 static uint8_t rtl_rx_buffer[RTL_RX_ALLOC_SIZE] __attribute__((aligned(256)));
@@ -180,6 +231,16 @@ static uint32_t pending_ping_ip = 0;
 static uint32_t pending_ping_started = 0;
 static int pending_ping_status = -1;
 static uint32_t pending_ping_rtt_ms = 0;
+static uint16_t pending_udp_local_port = 0;
+static uint16_t pending_udp_remote_port = 0;
+static uint32_t pending_udp_remote_ip = 0;
+static int pending_udp_status = -1;
+static uint8_t* pending_udp_response_buf = 0;
+static uint16_t pending_udp_response_buf_len = 0;
+static uint16_t pending_udp_response_len = 0;
+static uint32_t pending_udp_response_ip = 0;
+static uint16_t pending_udp_response_port = 0;
+static net_socket_t net_sockets[NET_SOCKET_COUNT];
 static uint32_t net_last_ui_tick = 0;
 
 static uint16_t net_swap16(uint16_t v) {
@@ -237,9 +298,8 @@ static uint32_t net_read32_be(const uint8_t* src) {
            (uint32_t)src[3];
 }
 
-static uint16_t net_checksum16(const void* data, uint32_t length) {
+static uint32_t net_checksum_partial(uint32_t sum, const void* data, uint32_t length) {
     const uint8_t* bytes = (const uint8_t*)data;
-    uint32_t sum = 0;
 
     while (length > 1) {
         sum += ((uint32_t)bytes[0] << 8) | (uint32_t)bytes[1];
@@ -247,11 +307,32 @@ static uint16_t net_checksum16(const void* data, uint32_t length) {
         length -= 2;
     }
     if (length != 0) sum += (uint32_t)bytes[0] << 8;
+    return sum;
+}
 
+static uint16_t net_checksum_finish(uint32_t sum) {
     while ((sum >> 16) != 0) {
         sum = (sum & 0xFFFFU) + (sum >> 16);
     }
     return (uint16_t)(~sum & 0xFFFFU);
+}
+
+static uint16_t net_checksum16(const void* data, uint32_t length) {
+    return net_checksum_finish(net_checksum_partial(0, data, length));
+}
+
+static uint16_t net_transport_checksum(uint32_t src_ip, uint32_t dst_ip, uint8_t protocol,
+                                       const void* segment, uint16_t segment_len) {
+    uint32_t sum = 0;
+
+    sum += (src_ip >> 16) & 0xFFFFU;
+    sum += src_ip & 0xFFFFU;
+    sum += (dst_ip >> 16) & 0xFFFFU;
+    sum += dst_ip & 0xFFFFU;
+    sum += (uint16_t)protocol;
+    sum += segment_len;
+    sum = net_checksum_partial(sum, segment, segment_len);
+    return net_checksum_finish(sum);
 }
 
 static void net_print_hex_byte(uint8_t value) {
@@ -271,6 +352,111 @@ static void net_print_ip(uint32_t ip) {
     vga_print_int((int)((ip >> 8) & 0xFF));
     vga_putchar('.');
     vga_print_int((int)(ip & 0xFF));
+}
+
+static void net_print_two_digits(uint32_t value) {
+    if (value < 10U) vga_putchar('0');
+    vga_print_int((int)value);
+}
+
+static int net_is_leap_year(uint32_t year) {
+    if ((year % 4U) != 0U) return 0;
+    if ((year % 100U) != 0U) return 1;
+    return (year % 400U) == 0U;
+}
+
+static uint32_t net_days_in_month(uint32_t year, uint32_t month) {
+    static const uint8_t days_per_month[12] = {
+        31, 28, 31, 30, 31, 30,
+        31, 31, 30, 31, 30, 31
+    };
+
+    if (month == 2U && net_is_leap_year(year)) return 29U;
+    if (month >= 1U && month <= 12U) return (uint32_t)days_per_month[month - 1U];
+    return 30U;
+}
+
+static void net_print_unix_utc(uint32_t unix_seconds) {
+    uint32_t days = unix_seconds / 86400U;
+    uint32_t seconds_of_day = unix_seconds % 86400U;
+    uint32_t year = 1970U;
+    uint32_t month = 1U;
+    uint32_t day;
+    uint32_t hour = seconds_of_day / 3600U;
+    uint32_t minute = (seconds_of_day % 3600U) / 60U;
+    uint32_t second = seconds_of_day % 60U;
+
+    while (days >= (uint32_t)(net_is_leap_year(year) ? 366U : 365U)) {
+        days -= (uint32_t)(net_is_leap_year(year) ? 366U : 365U);
+        year++;
+    }
+
+    while (days >= net_days_in_month(year, month)) {
+        days -= net_days_in_month(year, month);
+        month++;
+    }
+    day = days + 1U;
+
+    vga_print_int((int)year);
+    vga_putchar('-');
+    net_print_two_digits(month);
+    vga_putchar('-');
+    net_print_two_digits(day);
+    vga_print(" ");
+    net_print_two_digits(hour);
+    vga_putchar(':');
+    net_print_two_digits(minute);
+    vga_putchar(':');
+    net_print_two_digits(second);
+    vga_print(" UTC");
+}
+
+static int net_append_text(char* dst, uint16_t dst_len, uint16_t* io_offset, const char* src) {
+    uint16_t off = *io_offset;
+
+    if (!dst || !io_offset || !src || dst_len == 0U) return -1;
+    while (*src) {
+        if (off + 1U >= dst_len) return -1;
+        dst[off++] = *src++;
+    }
+    dst[off] = '\0';
+    *io_offset = off;
+    return 0;
+}
+
+static int net_seq_lt(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) < 0;
+}
+
+static int net_seq_gt(uint32_t a, uint32_t b) {
+    return (int32_t)(a - b) > 0;
+}
+
+static uint32_t net_tcp_sequence_advance(uint8_t flags, uint16_t payload_len) {
+    uint32_t advance = payload_len;
+
+    if ((flags & TCP_FLAG_SYN) != 0) advance++;
+    if ((flags & TCP_FLAG_FIN) != 0) advance++;
+    return advance;
+}
+
+const char* net_strerror(int code) {
+    switch (code) {
+        case NET_OK: return "ok";
+        case NET_ERR_INVALID: return "invalid argument";
+        case NET_ERR_UNSUPPORTED: return "unsupported";
+        case NET_ERR_NOT_READY: return "network not ready";
+        case NET_ERR_NO_SOCKETS: return "no free sockets";
+        case NET_ERR_RESOLVE: return "name resolution failed";
+        case NET_ERR_TIMEOUT: return "timed out";
+        case NET_ERR_STATE: return "invalid socket state";
+        case NET_ERR_RESET: return "connection reset";
+        case NET_ERR_CLOSED: return "connection closed";
+        case NET_ERR_WOULD_BLOCK: return "would block";
+        case NET_ERR_IO: return "i/o failure";
+        case NET_ERR_OVERFLOW: return "buffer overflow";
+        default: return "network error";
+    }
 }
 
 static void net_print_mac(const uint8_t* mac) {
@@ -363,6 +549,7 @@ static int rtl8139_init_device() {
 
     memset(&net_state, 0, sizeof(net_state));
     memset(arp_cache, 0, sizeof(arp_cache));
+    memset(net_sockets, 0, sizeof(net_sockets));
 
     if (pci_find_rtl8139(&bus, &slot, &func) != 0) return -1;
 
@@ -521,6 +708,22 @@ static int net_send_arp_packet(uint16_t opcode, const uint8_t* target_mac, uint3
 }
 
 static void net_handle_frame(const uint8_t* frame, uint16_t frame_len);
+int net_udp_exchange(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
+                     const void* payload, uint16_t payload_len,
+                     void* response_buf, uint16_t response_buf_len,
+                     net_udp_response_info_t* out_info, uint32_t timeout_ticks);
+
+static void net_clear_pending_udp() {
+    pending_udp_local_port = 0;
+    pending_udp_remote_port = 0;
+    pending_udp_remote_ip = 0;
+    pending_udp_status = -1;
+    pending_udp_response_buf = 0;
+    pending_udp_response_buf_len = 0;
+    pending_udp_response_len = 0;
+    pending_udp_response_ip = 0;
+    pending_udp_response_port = 0;
+}
 
 static void rtl8139_poll_receive() {
     while (net_state.present && ((inb((uint16_t)(net_state.io_base + RTL_REG_CR)) & RTL_CR_BUFE) == 0)) {
@@ -555,6 +758,14 @@ static int net_wait_until(int* status_ptr, uint32_t timeout_ticks) {
         asm volatile("hlt");
     }
     return -1;
+}
+
+static int net_ensure_configured() {
+    if (!net_state.present) return -1;
+    if (!net_state.configured) {
+        (void)net_run_dhcp(0);
+    }
+    return net_state.configured ? 0 : -1;
 }
 
 static int net_resolve_mac(uint32_t target_ip, uint8_t* out_mac) {
@@ -649,6 +860,345 @@ static int net_send_icmp_echo(uint32_t dst_ip, uint16_t identifier, uint16_t seq
     icmp->checksum = net_htons(net_checksum16(packet, packet_len));
 
     return net_send_ipv4_packet(net_state.ip_addr, dst_ip, IPV4_PROTOCOL_ICMP, packet, packet_len, 0);
+}
+
+static int net_send_tcp_segment(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
+                                uint32_t sequence, uint32_t acknowledgment,
+                                uint8_t flags, uint16_t window,
+                                const void* payload, uint16_t payload_len) {
+    uint8_t packet[1480];
+    tcp_header_t* tcp = (tcp_header_t*)packet;
+    uint16_t total_len = (uint16_t)(sizeof(tcp_header_t) + payload_len);
+
+    if ((payload_len != 0U && !payload) || total_len > sizeof(packet)) return -1;
+
+    memset(packet, 0, sizeof(packet));
+    tcp->src_port = net_htons(src_port);
+    tcp->dst_port = net_htons(dst_port);
+    tcp->sequence = net_htonl(sequence);
+    tcp->acknowledgment = net_htonl(acknowledgment);
+    tcp->data_offset_reserved = 0x50;
+    tcp->flags = flags;
+    tcp->window = net_htons(window);
+    tcp->urgent_pointer = 0;
+    if (payload_len != 0U) {
+        memcpy(packet + sizeof(tcp_header_t), payload, payload_len);
+    }
+    tcp->checksum = 0;
+    tcp->checksum = net_htons(net_transport_checksum(net_state.ip_addr, dst_ip, IPV4_PROTOCOL_TCP,
+                                                     packet, total_len));
+
+    return net_send_ipv4_packet(net_state.ip_addr, dst_ip, IPV4_PROTOCOL_TCP, packet, total_len, 0);
+}
+
+static void net_socket_reset(net_socket_t* socket) {
+    if (!socket) return;
+    memset(socket, 0, sizeof(*socket));
+    socket->state = NET_SOCKET_STATE_IDLE;
+}
+
+static net_socket_t* net_socket_from_handle(int handle) {
+    if (handle < 1 || handle > NET_SOCKET_COUNT) return 0;
+    if (!net_sockets[handle - 1].used) return 0;
+    return &net_sockets[handle - 1];
+}
+
+static net_socket_t* net_socket_find_tcp(uint32_t src_ip, uint16_t src_port, uint16_t dst_port) {
+    for (int i = 0; i < NET_SOCKET_COUNT; i++) {
+        net_socket_t* socket = &net_sockets[i];
+        if (!socket->used || socket->type != NET_SOCK_STREAM) continue;
+        if (socket->remote_ip == src_ip &&
+            socket->remote_port == src_port &&
+            socket->local_port == dst_port) {
+            return socket;
+        }
+    }
+    return 0;
+}
+
+static int net_socket_local_port_in_use(uint16_t port) {
+    for (int i = 0; i < NET_SOCKET_COUNT; i++) {
+        if (net_sockets[i].used && net_sockets[i].local_port == port) return 1;
+    }
+    return 0;
+}
+
+static uint16_t net_socket_alloc_local_port() {
+    uint16_t base = (uint16_t)(41000U + (net_random16() % 2000U));
+
+    for (uint16_t i = 0; i < 2000U; i++) {
+        uint16_t port = (uint16_t)(41000U + ((base - 41000U + i) % 2000U));
+        if (!net_socket_local_port_in_use(port)) return port;
+    }
+    return 0;
+}
+
+static int net_socket_fail(net_socket_t* socket, int error) {
+    if (!socket) return error;
+    socket->last_error = error;
+    socket->state = NET_SOCKET_STATE_ERROR;
+    socket->tx_active = 0;
+    return error;
+}
+
+static int net_socket_transmit(net_socket_t* socket, uint32_t sequence, uint8_t flags,
+                               const void* payload, uint16_t payload_len) {
+    uint32_t acknowledgment = ((flags & TCP_FLAG_SYN) != 0) ? 0U : socket->recv_next;
+
+    if (!socket || !socket->used) return NET_ERR_INVALID;
+    if (net_send_tcp_segment(socket->remote_ip, socket->local_port, socket->remote_port,
+                             sequence, acknowledgment, flags,
+                             (uint16_t)TCP_WINDOW_SIZE, payload, payload_len) != 0) {
+        return net_socket_fail(socket, NET_ERR_IO);
+    }
+    socket->tx_last_tick = timer_ticks;
+    return NET_OK;
+}
+
+static int net_socket_retransmit(net_socket_t* socket) {
+    if (!socket || !socket->used) return NET_ERR_INVALID;
+    if (!socket->tx_active) return NET_OK;
+    if (socket->tx_attempts >= NET_SOCKET_MAX_RETRIES) {
+        return net_socket_fail(socket, NET_ERR_TIMEOUT);
+    }
+    socket->tx_attempts++;
+    return net_socket_transmit(socket, socket->tx_sequence, socket->tx_flags,
+                               socket->tx_buf, socket->tx_payload_len);
+}
+
+static int net_socket_queue_tx(net_socket_t* socket, uint8_t flags,
+                               const void* payload, uint16_t payload_len) {
+    if (!socket || !socket->used) return NET_ERR_INVALID;
+    if (payload_len > NET_SOCKET_TX_BUFFER || (payload_len != 0U && !payload)) return NET_ERR_INVALID;
+    if (socket->tx_active) return NET_ERR_STATE;
+
+    if (payload_len != 0U) memcpy(socket->tx_buf, payload, payload_len);
+    socket->tx_sequence = socket->send_next;
+    socket->tx_payload_len = payload_len;
+    socket->tx_flags = flags;
+    socket->tx_active = 1;
+    socket->tx_attempts = 0;
+    socket->send_next += net_tcp_sequence_advance(flags, payload_len);
+    return net_socket_retransmit(socket);
+}
+
+static int net_socket_append_rx(net_socket_t* socket, const uint8_t* data, uint16_t length) {
+    uint16_t available;
+
+    if (!socket || !socket->used || (!data && length != 0U)) return NET_ERR_INVALID;
+    available = (uint16_t)(NET_SOCKET_RX_BUFFER - socket->rx_len);
+    if (length > available) {
+        socket->overflowed = 1;
+        return net_socket_fail(socket, NET_ERR_OVERFLOW);
+    }
+    if (length != 0U) {
+        memcpy(socket->rx_buf + socket->rx_len, data, length);
+        socket->rx_len = (uint16_t)(socket->rx_len + length);
+    }
+    return NET_OK;
+}
+
+static int net_socket_service(net_socket_t* socket) {
+    if (!socket || !socket->used) return NET_ERR_INVALID;
+
+    rtl8139_poll_receive();
+    net_pump_ui();
+
+    if (socket->state == NET_SOCKET_STATE_ERROR) {
+        return socket->last_error != 0 ? socket->last_error : NET_ERR_IO;
+    }
+    if (socket->tx_active && timer_ticks - socket->tx_last_tick >= NET_TIMEOUT_TCP_RETRY) {
+        return net_socket_retransmit(socket);
+    }
+    return NET_OK;
+}
+
+static int net_socket_wait_connected_handle(net_socket_t* socket, uint32_t timeout_ticks) {
+    uint32_t deadline = timer_ticks + (timeout_ticks != 0U ? timeout_ticks : NET_TIMEOUT_CONNECT_DEFAULT);
+
+    while (timer_ticks <= deadline) {
+        int status = net_socket_service(socket);
+        if (socket->state == NET_SOCKET_STATE_ESTABLISHED) return NET_OK;
+        if (status < 0) return status;
+        asm volatile("hlt");
+    }
+    return net_socket_fail(socket, NET_ERR_TIMEOUT);
+}
+
+static int net_socket_wait_tx_clear(net_socket_t* socket, uint32_t timeout_ticks) {
+    uint32_t deadline = timer_ticks + (timeout_ticks != 0U ? timeout_ticks : NET_TIMEOUT_IO_DEFAULT);
+
+    while (timer_ticks <= deadline) {
+        int status = net_socket_service(socket);
+        if (status < 0) return status;
+        if (!socket->tx_active) return NET_OK;
+        asm volatile("hlt");
+    }
+    return net_socket_fail(socket, NET_ERR_TIMEOUT);
+}
+
+static int net_socket_wait_close_handle(net_socket_t* socket, uint32_t timeout_ticks) {
+    uint32_t deadline = timer_ticks + (timeout_ticks != 0U ? timeout_ticks : NET_TIMEOUT_CLOSE_DEFAULT);
+
+    while (timer_ticks <= deadline) {
+        int status = net_socket_service(socket);
+        if (status < 0) return status;
+        if (socket->state == NET_SOCKET_STATE_CLOSED || (!socket->tx_active && socket->peer_closed)) {
+            socket->state = NET_SOCKET_STATE_CLOSED;
+            return NET_OK;
+        }
+        asm volatile("hlt");
+    }
+    return NET_ERR_TIMEOUT;
+}
+
+static int net_socket_begin_connect_ip(net_socket_t* socket, uint32_t remote_ip, uint16_t remote_port) {
+    uint16_t local_port;
+
+    if (!socket || !socket->used || socket->type != NET_SOCK_STREAM) return NET_ERR_INVALID;
+    if (net_ensure_configured() != 0) return NET_ERR_NOT_READY;
+
+    local_port = net_socket_alloc_local_port();
+    if (local_port == 0U) return NET_ERR_NO_SOCKETS;
+
+    socket->state = NET_SOCKET_STATE_CONNECTING;
+    socket->last_error = 0;
+    socket->peer_closed = 0;
+    socket->overflowed = 0;
+    socket->remote_ip = remote_ip;
+    socket->local_port = local_port;
+    socket->remote_port = remote_port;
+    socket->send_next = 0x40000000U ^ net_random();
+    socket->recv_next = 0;
+    socket->rx_len = 0;
+    socket->tx_active = 0;
+    socket->last_event_tick = timer_ticks;
+
+    return net_socket_queue_tx(socket, TCP_FLAG_SYN, 0, 0);
+}
+
+static int net_http_get_ip(uint32_t server_ip, const char* host, const char* path,
+                           char* out_response, uint16_t out_response_len,
+                           uint16_t* out_actual_len, int* out_truncated, int* out_complete) {
+    char request[512];
+    uint16_t request_off = 0;
+    uint16_t request_len;
+    uint16_t response_off = 0;
+    uint32_t started = timer_ticks;
+    uint32_t last_progress = timer_ticks;
+    int socket_handle;
+    int socket_status;
+    char discard[128];
+
+    if (!host || !path || !out_response || out_response_len < 2U || !out_actual_len) return NET_ERR_INVALID;
+    if (out_truncated) *out_truncated = 0;
+    if (out_complete) *out_complete = 0;
+
+    request[0] = '\0';
+    if (net_append_text(request, sizeof(request), &request_off, "GET ") != 0 ||
+        net_append_text(request, sizeof(request), &request_off, path) != 0 ||
+        net_append_text(request, sizeof(request), &request_off, " HTTP/1.0\r\nHost: ") != 0 ||
+        net_append_text(request, sizeof(request), &request_off, host) != 0 ||
+        net_append_text(request, sizeof(request), &request_off, "\r\nUser-Agent: NarcOs/0.1\r\nConnection: close\r\n\r\n") != 0) {
+        return NET_ERR_OVERFLOW;
+    }
+    request_len = (uint16_t)strlen(request);
+
+    socket_handle = net_socket_open(NET_SOCK_STREAM);
+    if (socket_handle < 0) return socket_handle;
+    socket_status = net_socket_connect(socket_handle, server_ip, 80, NET_TIMEOUT_LONG);
+    if (socket_status != NET_OK) {
+        (void)net_socket_close(socket_handle);
+        return socket_status;
+    }
+    socket_status = net_socket_send(socket_handle, request, request_len);
+    if (socket_status < 0) {
+        (void)net_socket_close(socket_handle);
+        return socket_status;
+    }
+    if ((uint16_t)socket_status != request_len) {
+        (void)net_socket_close(socket_handle);
+        return NET_ERR_IO;
+    }
+
+    while ((timer_ticks - started) <= NET_TIMEOUT_HTTP_TOTAL) {
+        int available;
+
+        rtl8139_poll_receive();
+        net_pump_ui();
+        available = net_socket_available(socket_handle);
+        if (available == NET_ERR_CLOSED) {
+            if (out_complete) *out_complete = 1;
+            break;
+        }
+        if (available < 0) {
+            (void)net_socket_close(socket_handle);
+            return available;
+        }
+        if (available > 0) {
+            int capacity = (int)(out_response_len - 1U - response_off);
+            void* target_buf = out_response + response_off;
+            int to_read = available;
+            int got;
+
+            if (capacity <= 0) {
+                target_buf = discard;
+                to_read = available < (int)sizeof(discard) ? available : (int)sizeof(discard);
+                if (out_truncated) *out_truncated = 1;
+            } else if (to_read > capacity) {
+                to_read = capacity;
+                if (out_truncated) *out_truncated = 1;
+            }
+
+            got = net_socket_recv(socket_handle, target_buf, (uint16_t)to_read);
+            if (got < 0) {
+                (void)net_socket_close(socket_handle);
+                return got;
+            }
+            if (got > 0) {
+                if (target_buf == (void*)(out_response + response_off)) {
+                    response_off = (uint16_t)(response_off + (uint16_t)got);
+                }
+                last_progress = timer_ticks;
+            }
+        }
+
+        if (timer_ticks > last_progress + NET_TIMEOUT_HTTP_IDLE) {
+            if (out_complete) *out_complete = 0;
+            break;
+        }
+        asm volatile("hlt");
+    }
+
+    out_response[response_off] = '\0';
+    *out_actual_len = response_off;
+    socket_status = net_socket_close(socket_handle);
+    if (socket_status < 0 && socket_status != NET_ERR_TIMEOUT && response_off == 0U) return socket_status;
+    return response_off != 0U ? NET_OK : NET_ERR_TIMEOUT;
+}
+
+static int net_ntp_query_ip(uint32_t server_ip, uint32_t* out_unix_seconds) {
+    uint8_t request[48];
+    uint8_t response[64];
+    net_udp_response_info_t info;
+    uint32_t ntp_seconds;
+
+    if (!out_unix_seconds) return -1;
+
+    memset(request, 0, sizeof(request));
+    request[0] = 0x1B;
+
+    if (net_udp_exchange(server_ip, 0, 123, request, sizeof(request),
+                         response, sizeof(response), &info, NET_TIMEOUT_LONG) != 0) {
+        return -1;
+    }
+    if (info.length < 48U) return -1;
+
+    ntp_seconds = net_read32_be(response + 40);
+    if (ntp_seconds < 2208988800U) return -1;
+
+    *out_unix_seconds = ntp_seconds - 2208988800U;
+    return 0;
 }
 
 static int dhcp_option_u32(const uint8_t* options, uint16_t options_len, uint8_t key, uint32_t* out_value) {
@@ -987,6 +1537,112 @@ static void net_handle_dhcp_payload(const uint8_t* payload, uint16_t payload_len
     else if (msg_type == 5) dhcp_ack_state = parsed;
 }
 
+static void net_handle_tcp_payload(uint32_t src_ip, uint32_t dst_ip, const uint8_t* payload, uint16_t payload_len) {
+    const tcp_header_t* tcp;
+    net_socket_t* socket;
+    uint16_t header_len;
+    uint16_t src_port;
+    uint16_t dst_port;
+    uint32_t sequence;
+    uint32_t acknowledgment;
+    uint8_t flags;
+    const uint8_t* tcp_payload;
+    uint16_t tcp_payload_len;
+    uint32_t tx_end;
+
+    if (payload_len < sizeof(tcp_header_t)) return;
+    if (!net_state.configured || dst_ip != net_state.ip_addr) return;
+
+    tcp = (const tcp_header_t*)payload;
+    header_len = (uint16_t)(((tcp->data_offset_reserved >> 4) & 0x0F) * 4U);
+    if (header_len < sizeof(tcp_header_t) || payload_len < header_len) return;
+
+    src_port = net_ntohs(tcp->src_port);
+    dst_port = net_ntohs(tcp->dst_port);
+    socket = net_socket_find_tcp(src_ip, src_port, dst_port);
+    if (!socket) return;
+
+    sequence = net_ntohl(tcp->sequence);
+    acknowledgment = net_ntohl(tcp->acknowledgment);
+    flags = tcp->flags;
+    tcp_payload = payload + header_len;
+    tcp_payload_len = (uint16_t)(payload_len - header_len);
+
+    if ((flags & TCP_FLAG_RST) != 0) {
+        (void)net_socket_fail(socket, NET_ERR_RESET);
+        return;
+    }
+
+    socket->last_event_tick = timer_ticks;
+
+    if (socket->state == NET_SOCKET_STATE_CONNECTING) {
+        if ((flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK) &&
+            acknowledgment == socket->send_next) {
+            socket->recv_next = sequence + 1U;
+            socket->tx_active = 0;
+            socket->tx_payload_len = 0;
+            socket->tx_attempts = 0;
+            if (net_socket_transmit(socket, socket->send_next, TCP_FLAG_ACK, 0, 0) != NET_OK) {
+                return;
+            }
+            socket->state = NET_SOCKET_STATE_ESTABLISHED;
+        }
+        return;
+    }
+
+    if ((flags & TCP_FLAG_ACK) != 0) {
+        if (net_seq_gt(acknowledgment, socket->send_next)) {
+            (void)net_socket_fail(socket, NET_ERR_STATE);
+            return;
+        }
+        if (socket->tx_active) {
+            tx_end = socket->tx_sequence + net_tcp_sequence_advance(socket->tx_flags, socket->tx_payload_len);
+            if (!net_seq_lt(acknowledgment, tx_end)) {
+                socket->tx_active = 0;
+                socket->tx_payload_len = 0;
+                socket->tx_attempts = 0;
+                if (socket->state == NET_SOCKET_STATE_CLOSING && socket->peer_closed) {
+                    socket->state = NET_SOCKET_STATE_CLOSED;
+                }
+            }
+        }
+    }
+
+    if (socket->state != NET_SOCKET_STATE_ESTABLISHED &&
+        socket->state != NET_SOCKET_STATE_CLOSE_WAIT &&
+        socket->state != NET_SOCKET_STATE_CLOSING) {
+        return;
+    }
+
+    if ((tcp_payload_len != 0U || (flags & TCP_FLAG_FIN) != 0) && sequence != socket->recv_next) {
+        if ((flags & (TCP_FLAG_FIN | TCP_FLAG_SYN)) != 0 || tcp_payload_len != 0U) {
+            (void)net_socket_transmit(socket, socket->send_next, TCP_FLAG_ACK, 0, 0);
+        }
+        return;
+    }
+
+    if (tcp_payload_len != 0U) {
+        if (net_socket_append_rx(socket, tcp_payload, tcp_payload_len) != NET_OK) return;
+        socket->recv_next += tcp_payload_len;
+    }
+
+    if ((flags & TCP_FLAG_FIN) != 0) {
+        socket->recv_next += 1U;
+        socket->peer_closed = 1;
+        if (socket->state == NET_SOCKET_STATE_ESTABLISHED) {
+            socket->state = NET_SOCKET_STATE_CLOSE_WAIT;
+        }
+    }
+
+    if (tcp_payload_len != 0U || (flags & TCP_FLAG_FIN) != 0) {
+        if (net_socket_transmit(socket, socket->send_next, TCP_FLAG_ACK, 0, 0) != NET_OK) return;
+    }
+
+    if (socket->state == NET_SOCKET_STATE_CLOSING && socket->peer_closed && !socket->tx_active) {
+        socket->state = NET_SOCKET_STATE_CLOSED;
+    }
+}
+
 static void net_handle_icmp_payload(uint32_t src_ip, const uint8_t* payload, uint16_t payload_len) {
     const icmp_echo_header_t* icmp;
     uint16_t identifier;
@@ -1038,6 +1694,11 @@ static void net_handle_ipv4(const uint8_t* eth_src, const uint8_t* frame, uint16
         return;
     }
 
+    if (ip->protocol == IPV4_PROTOCOL_TCP) {
+        net_handle_tcp_payload(src_ip, dst_ip, payload, payload_len);
+        return;
+    }
+
     if (ip->protocol == IPV4_PROTOCOL_UDP) {
         const udp_header_t* udp;
         uint16_t src_port;
@@ -1057,6 +1718,19 @@ static void net_handle_ipv4(const uint8_t* eth_src, const uint8_t* frame, uint16
         } else if (dst_port == pending_dns_port && src_port == DNS_SERVER_PORT &&
                    net_state.configured && dst_ip == net_state.ip_addr) {
             net_handle_dns_payload(udp_payload, udp_payload_len);
+        } else if (pending_udp_status == -1 &&
+                   pending_udp_local_port != 0 &&
+                   dst_port == pending_udp_local_port &&
+                   (pending_udp_remote_port == 0 || src_port == pending_udp_remote_port) &&
+                   (pending_udp_remote_ip == 0 || src_ip == pending_udp_remote_ip) &&
+                   net_state.configured && dst_ip == net_state.ip_addr) {
+            uint16_t copy_len = udp_payload_len;
+            if (copy_len > pending_udp_response_buf_len) copy_len = pending_udp_response_buf_len;
+            if (copy_len != 0U) memcpy(pending_udp_response_buf, udp_payload, copy_len);
+            pending_udp_response_len = copy_len;
+            pending_udp_response_ip = src_ip;
+            pending_udp_response_port = src_port;
+            pending_udp_status = 0;
         }
     }
 }
@@ -1094,6 +1768,212 @@ int net_is_configured() {
     return net_state.present && net_state.configured;
 }
 
+int net_get_ipv4_config(net_ipv4_config_t* out_config) {
+    if (!out_config) return -1;
+
+    memset(out_config, 0, sizeof(*out_config));
+    out_config->available = net_state.present;
+    out_config->configured = net_state.present && net_state.configured;
+    out_config->ip_addr = net_state.ip_addr;
+    out_config->netmask = net_state.netmask;
+    out_config->gateway = net_state.gateway;
+    out_config->dns_server = net_state.dns_server;
+    return net_state.present ? 0 : -1;
+}
+
+int net_resolve_ipv4(const char* host, uint32_t* out_ip) {
+    if (!host || host[0] == '\0' || !out_ip) return -1;
+    if (net_ensure_configured() != 0) return -1;
+    if (net_parse_ipv4_text(host, out_ip) == 0) return 0;
+    return net_dns_lookup(host, out_ip);
+}
+
+int net_udp_exchange(uint32_t dst_ip, uint16_t src_port, uint16_t dst_port,
+                     const void* payload, uint16_t payload_len,
+                     void* response_buf, uint16_t response_buf_len,
+                     net_udp_response_info_t* out_info, uint32_t timeout_ticks) {
+    uint16_t local_port = src_port;
+
+    if ((payload_len != 0U && !payload) || !response_buf || response_buf_len == 0U || !out_info) return -1;
+    if (net_ensure_configured() != 0) return -1;
+
+    if (local_port == 0U) {
+        local_port = (uint16_t)(40000U + (net_random16() % 2000U));
+    }
+
+    net_clear_pending_udp();
+    pending_udp_local_port = local_port;
+    pending_udp_remote_port = dst_port;
+    pending_udp_remote_ip = dst_ip;
+    pending_udp_status = -1;
+    pending_udp_response_buf = (uint8_t*)response_buf;
+    pending_udp_response_buf_len = response_buf_len;
+
+    if (net_send_udp(net_state.ip_addr, dst_ip, local_port, dst_port, payload, payload_len, 0) != 0) {
+        net_clear_pending_udp();
+        return -1;
+    }
+
+    if (net_wait_until(&pending_udp_status, timeout_ticks != 0U ? timeout_ticks : NET_TIMEOUT_LONG) != 0 ||
+        pending_udp_status != 0) {
+        net_clear_pending_udp();
+        return -1;
+    }
+
+    out_info->src_ip = pending_udp_response_ip;
+    out_info->src_port = pending_udp_response_port;
+    out_info->length = pending_udp_response_len;
+    net_clear_pending_udp();
+    return 0;
+}
+
+int net_ntp_query(const char* host, uint32_t* out_unix_seconds) {
+    uint32_t server_ip;
+    const char* target = (host && host[0] != '\0') ? host : "time.google.com";
+
+    if (!out_unix_seconds) return -1;
+    if (net_resolve_ipv4(target, &server_ip) != 0) return -1;
+    return net_ntp_query_ip(server_ip, out_unix_seconds);
+}
+
+int net_socket_open(int type) {
+    if (type != NET_SOCK_STREAM) return NET_ERR_UNSUPPORTED;
+
+    for (int i = 0; i < NET_SOCKET_COUNT; i++) {
+        if (net_sockets[i].used) continue;
+        net_socket_reset(&net_sockets[i]);
+        net_sockets[i].used = 1;
+        net_sockets[i].type = type;
+        return i + 1;
+    }
+    return NET_ERR_NO_SOCKETS;
+}
+
+int net_socket_connect(int handle, uint32_t remote_ip, uint16_t port, uint32_t timeout_ticks) {
+    net_socket_t* socket = net_socket_from_handle(handle);
+    int status;
+
+    if (!socket) return NET_ERR_INVALID;
+    if (remote_ip == 0U || port == 0U) return NET_ERR_INVALID;
+    if (socket->state != NET_SOCKET_STATE_IDLE && socket->state != NET_SOCKET_STATE_CLOSED) {
+        return NET_ERR_STATE;
+    }
+
+    status = net_socket_begin_connect_ip(socket, remote_ip, port);
+    if (status < 0) return status;
+    return net_socket_wait_connected_handle(socket, timeout_ticks);
+}
+
+int net_socket_send(int handle, const void* data, uint16_t length) {
+    net_socket_t* socket = net_socket_from_handle(handle);
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint16_t sent = 0;
+
+    if (!socket) return NET_ERR_INVALID;
+    if (length == 0U) return 0;
+    if (!data) return NET_ERR_INVALID;
+    if (socket->state == NET_SOCKET_STATE_ERROR) return socket->last_error != 0 ? socket->last_error : NET_ERR_IO;
+    if (socket->state != NET_SOCKET_STATE_ESTABLISHED) {
+        return socket->peer_closed ? NET_ERR_CLOSED : NET_ERR_STATE;
+    }
+    if (socket->peer_closed) return NET_ERR_CLOSED;
+
+    while (sent < length) {
+        uint16_t chunk = (uint16_t)(length - sent);
+        int status;
+
+        if (chunk > NET_SOCKET_TX_BUFFER) chunk = NET_SOCKET_TX_BUFFER;
+        status = net_socket_queue_tx(socket, TCP_FLAG_ACK | TCP_FLAG_PSH, bytes + sent, chunk);
+        if (status < 0) return sent != 0U ? (int)sent : status;
+        status = net_socket_wait_tx_clear(socket, NET_TIMEOUT_IO_DEFAULT);
+        if (status < 0) return sent != 0U ? (int)sent : status;
+        sent = (uint16_t)(sent + chunk);
+    }
+
+    return (int)sent;
+}
+
+int net_socket_recv(int handle, void* data, uint16_t length) {
+    net_socket_t* socket = net_socket_from_handle(handle);
+    uint8_t* dst = (uint8_t*)data;
+    uint16_t copy_len;
+    uint16_t remaining;
+
+    if (!socket) return NET_ERR_INVALID;
+    if (length == 0U) return 0;
+    if (!data) return NET_ERR_INVALID;
+
+    if (socket->rx_len == 0U) {
+        int status = net_socket_service(socket);
+        if (status < 0 && socket->rx_len == 0U) return status;
+        if (socket->state == NET_SOCKET_STATE_ERROR) {
+            return socket->last_error != 0 ? socket->last_error : NET_ERR_IO;
+        }
+        if (socket->peer_closed || socket->state == NET_SOCKET_STATE_CLOSED || socket->state == NET_SOCKET_STATE_CLOSE_WAIT) {
+            return NET_ERR_CLOSED;
+        }
+        return NET_ERR_WOULD_BLOCK;
+    }
+
+    copy_len = length < socket->rx_len ? length : socket->rx_len;
+    memcpy(dst, socket->rx_buf, copy_len);
+    remaining = (uint16_t)(socket->rx_len - copy_len);
+    for (uint16_t i = 0; i < remaining; i++) {
+        socket->rx_buf[i] = socket->rx_buf[i + copy_len];
+    }
+    socket->rx_len = remaining;
+    return (int)copy_len;
+}
+
+int net_socket_available(int handle) {
+    net_socket_t* socket = net_socket_from_handle(handle);
+    int status;
+
+    if (!socket) return NET_ERR_INVALID;
+    status = net_socket_service(socket);
+    if (status < 0 && socket->rx_len == 0U) return status;
+    if (socket->rx_len != 0U) return (int)socket->rx_len;
+    if (socket->state == NET_SOCKET_STATE_ERROR) {
+        return socket->last_error != 0 ? socket->last_error : NET_ERR_IO;
+    }
+    if (socket->peer_closed || socket->state == NET_SOCKET_STATE_CLOSED || socket->state == NET_SOCKET_STATE_CLOSE_WAIT) {
+        return NET_ERR_CLOSED;
+    }
+    return 0;
+}
+
+int net_socket_close(int handle) {
+    net_socket_t* socket = net_socket_from_handle(handle);
+    int status = NET_OK;
+
+    if (!socket) return NET_ERR_INVALID;
+
+    if (socket->state == NET_SOCKET_STATE_ERROR) {
+        status = socket->last_error != 0 ? socket->last_error : NET_ERR_IO;
+        net_socket_reset(socket);
+        return status;
+    }
+    if (socket->state == NET_SOCKET_STATE_IDLE || socket->state == NET_SOCKET_STATE_CLOSED) {
+        net_socket_reset(socket);
+        return NET_OK;
+    }
+    if (socket->state == NET_SOCKET_STATE_CONNECTING) {
+        net_socket_reset(socket);
+        return NET_ERR_STATE;
+    }
+
+    if (socket->state == NET_SOCKET_STATE_ESTABLISHED || socket->state == NET_SOCKET_STATE_CLOSE_WAIT) {
+        socket->state = NET_SOCKET_STATE_CLOSING;
+        status = net_socket_queue_tx(socket, TCP_FLAG_ACK | TCP_FLAG_FIN, 0, 0);
+        if (status >= 0) status = net_socket_wait_close_handle(socket, NET_TIMEOUT_CLOSE_DEFAULT);
+    } else if (socket->state == NET_SOCKET_STATE_CLOSING) {
+        status = net_socket_wait_close_handle(socket, NET_TIMEOUT_CLOSE_DEFAULT);
+    }
+
+    net_socket_reset(socket);
+    return status;
+}
+
 void net_print_status() {
     if (!net_state.present) {
         vga_print_color("Network: RTL8139 not found.\n", 0x0C);
@@ -1126,6 +2006,93 @@ void net_print_status() {
     }
 }
 
+static int net_parse_http_target(const char* target, char* host, uint16_t host_len, char* path, uint16_t path_len) {
+    const char* cursor = target;
+    uint16_t host_off = 0;
+    uint16_t path_off = 0;
+
+    if (!target || !host || !path || host_len == 0U || path_len < 2U) return -1;
+    while (*cursor == ' ') cursor++;
+    if (strncmp(cursor, "http://", 7) == 0) cursor += 7;
+
+    while (*cursor && *cursor != ' ' && *cursor != '/') {
+        if (host_off + 1U >= host_len) return -1;
+        host[host_off++] = *cursor++;
+    }
+    host[host_off] = '\0';
+    if (host_off == 0U) return -1;
+
+    if (*cursor == '/') {
+        while (*cursor && *cursor != ' ') {
+            if (path_off + 1U >= path_len) return -1;
+            path[path_off++] = *cursor++;
+        }
+    } else {
+        while (*cursor == ' ') cursor++;
+        if (*cursor != '\0') {
+            if (*cursor != '/') {
+                if (path_off + 1U >= path_len) return -1;
+                path[path_off++] = '/';
+            }
+            while (*cursor) {
+                if (path_off + 1U >= path_len) return -1;
+                path[path_off++] = *cursor++;
+            }
+        }
+    }
+
+    if (path_off == 0U) path[path_off++] = '/';
+    path[path_off] = '\0';
+    return 0;
+}
+
+static void net_sanitize_text_response(char* buffer, uint16_t* io_len) {
+    uint16_t src = 0;
+    uint16_t dst = 0;
+    uint16_t len;
+
+    if (!buffer || !io_len) return;
+    len = *io_len;
+    while (src < len) {
+        char c = buffer[src++];
+        if (c == '\r') continue;
+        if (c == '\0') c = ' ';
+        if (c == '\n' || c == '\t' || (c >= ' ' && c <= '~')) buffer[dst++] = c;
+        else buffer[dst++] = '.';
+    }
+    buffer[dst] = '\0';
+    *io_len = dst;
+}
+
+int net_http_fetch(const char* target, char* response, uint16_t response_buf_len,
+                   net_http_result_t* out_result) {
+    char host[128];
+    char path[192];
+    uint32_t ip;
+    uint16_t response_len = 0;
+    int truncated = 0;
+    int complete = 0;
+
+    int status;
+
+    if (!target || target[0] == '\0' || !response || response_buf_len < 2U) return -1;
+    if (out_result) memset(out_result, 0, sizeof(*out_result));
+    if (net_parse_http_target(target, host, sizeof(host), path, sizeof(path)) != 0) return NET_ERR_INVALID;
+    status = net_resolve_ipv4(host, &ip);
+    if (status != NET_OK) return status == -1 ? NET_ERR_RESOLVE : status;
+    status = net_http_get_ip(ip, host, path, response, response_buf_len, &response_len, &truncated, &complete);
+    if (status != NET_OK) return status;
+
+    net_sanitize_text_response(response, &response_len);
+    if (out_result) {
+        out_result->resolved_ip = ip;
+        out_result->response_len = response_len;
+        out_result->truncated = (uint32_t)truncated;
+        out_result->complete = (uint32_t)complete;
+    }
+    return 0;
+}
+
 int net_dns_command(const char* host) {
     uint32_t ip;
 
@@ -1133,20 +2100,7 @@ int net_dns_command(const char* host) {
         vga_print_color("Usage: dns <host>\n", 0x0E);
         return -1;
     }
-    if (!net_state.present) {
-        vga_print_color("error: Network driver is not ready.\n", 0x0C);
-        return -1;
-    }
-    if (!net_state.configured && net_run_dhcp(0) < 0) {
-        vga_print_color("error: Failed to obtain IPv4 configuration.\n", 0x0C);
-        return -1;
-    }
-    if (net_parse_ipv4_text(host, &ip) == 0) {
-        net_print_ip(ip);
-        vga_println("");
-        return 0;
-    }
-    if (net_dns_lookup(host, &ip) != 0) {
+    if (net_resolve_ipv4(host, &ip) != 0) {
         vga_print_color("error: DNS lookup failed.\n", 0x0C);
         return -1;
     }
@@ -1169,11 +2123,7 @@ int net_ping_command(const char* target) {
         vga_print_color("error: RTL8139 NIC not found. Start QEMU with rtl8139 enabled.\n", 0x0C);
         return -1;
     }
-    if (!net_state.configured && net_run_dhcp(0) < 0) {
-        vga_print_color("error: Failed to obtain IPv4 configuration.\n", 0x0C);
-        return -1;
-    }
-    if (net_parse_ipv4_text(target, &ip) != 0 && net_dns_lookup(target, &ip) != 0) {
+    if (net_resolve_ipv4(target, &ip) != 0) {
         vga_print_color("error: Failed to resolve target host.\n", 0x0C);
         return -1;
     }
@@ -1207,6 +2157,72 @@ int net_ping_command(const char* target) {
             vga_println("Request timed out.");
             pending_ping_status = -1;
         }
+    }
+    return 0;
+}
+
+int net_ntp_command(const char* host) {
+    uint32_t ip;
+    uint32_t unix_seconds;
+    const char* target = (host && host[0] != '\0') ? host : "time.google.com";
+
+    if (!net_state.present) {
+        vga_print_color("error: Network driver is not ready.\n", 0x0C);
+        return -1;
+    }
+    if (net_resolve_ipv4(target, &ip) != 0) {
+        vga_print_color("error: Failed to resolve NTP server.\n", 0x0C);
+        return -1;
+    }
+    if (net_ntp_query_ip(ip, &unix_seconds) != 0) {
+        vga_print_color("error: NTP query failed.\n", 0x0C);
+        return -1;
+    }
+
+    vga_print("NTP server      : ");
+    vga_print(target);
+    vga_print(" [");
+    net_print_ip(ip);
+    vga_println("]");
+    vga_print("UTC time        : ");
+    net_print_unix_utc(unix_seconds);
+    vga_println("");
+    vga_print("Unix seconds    : ");
+    vga_print_int((int)unix_seconds);
+    vga_println("");
+    return 0;
+}
+
+int net_http_command(const char* target) {
+    static char response[4096];
+    net_http_result_t result;
+    int status;
+
+    if (!target || target[0] == '\0') {
+        vga_print_color("Usage: http <host> [path]\n", 0x0E);
+        return -1;
+    }
+    status = net_http_fetch(target, response, sizeof(response), &result);
+    if (status != NET_OK) {
+        vga_print_color("error: HTTP request failed: ", 0x0C);
+        vga_println(net_strerror(status));
+        return status;
+    }
+
+    vga_print("HTTP GET        : ");
+    vga_print(target);
+    vga_println("");
+    vga_print("Resolved        : ");
+    net_print_ip(result.resolved_ip);
+    vga_println("");
+    vga_println("---- response ----");
+    if (result.response_len != 0U) vga_println(response);
+    else vga_println("(empty response)");
+    if (result.truncated != 0U) {
+        vga_print_color("warning: Response truncated to local buffer size.\n", 0x0E);
+    }
+    if (result.complete == 0U) {
+        vga_print_color("warning: Remote peer did not close cleanly before timeout.\n", 0x0E);
     }
     return 0;
 }

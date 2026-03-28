@@ -18,6 +18,15 @@
 #define SYS_SNAKE_GET_INPUT 11
 #define SYS_SNAKE_CLOSE 12
 #define SYS_RANDOM 13
+#define SYS_NET_GET_CONFIG 14
+#define SYS_NET_RESOLVE 15
+#define SYS_NET_NTP_QUERY 16
+#define SYS_NET_SOCKET_OPEN 17
+#define SYS_NET_SOCKET_CONNECT 18
+#define SYS_NET_SOCKET_SEND 19
+#define SYS_NET_SOCKET_RECV 20
+#define SYS_NET_SOCKET_AVAILABLE 21
+#define SYS_NET_SOCKET_CLOSE 22
 
 void init_syscalls();
 void syscall_handler(trap_frame_t* frame);
