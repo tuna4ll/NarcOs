@@ -9,6 +9,7 @@ static volatile int mouse_x = 512;
 static volatile int mouse_y = 384;
 static int     left_button = 0;
 static int     right_button = 0;
+static volatile int mouse_moved = 0;
 
 void mouse_wait(uint8_t type) {
     uint32_t timeout = 100000;
@@ -43,6 +44,10 @@ void init_mouse() {
     mouse_read();     
     mouse_read();     
     mouse_write(0xF6);
+    mouse_read();
+    mouse_write(0xF3);
+    mouse_read();
+    mouse_write(200);
     mouse_read();
     mouse_write(0xF4);
     mouse_read();
@@ -88,6 +93,13 @@ void handle_mouse() {
             
             if (x_rel > 120 || x_rel < -120 || y_rel > 120 || y_rel < -120) continue;
             
+            x_rel *= 2;
+            y_rel *= 2;
+            if (x_rel > 6) x_rel += x_rel / 2;
+            if (x_rel < -6) x_rel += x_rel / 2;
+            if (y_rel > 6) y_rel += y_rel / 2;
+            if (y_rel < -6) y_rel += y_rel / 2;
+
             int new_x = mouse_x + x_rel;
             int new_y = mouse_y - y_rel;
             
@@ -99,8 +111,11 @@ void handle_mouse() {
             if (new_x >= max_w) new_x = max_w - 1;
             if (new_y >= max_h) new_y = max_h - 1;
             
-            mouse_x = new_x;
-            mouse_y = new_y;
+            if (new_x != mouse_x || new_y != mouse_y) {
+                mouse_x = new_x;
+                mouse_y = new_y;
+                mouse_moved = 1;
+            }
         }
     }
     outb(0x20, 0x20);
@@ -110,3 +125,8 @@ int get_mouse_x() { return mouse_x; }
 int get_mouse_y() { return mouse_y; }
 int mouse_left_pressed() { return left_button; }
 int mouse_right_pressed() { return right_button; }
+int mouse_consume_moved() {
+    int moved = mouse_moved;
+    mouse_moved = 0;
+    return moved;
+}

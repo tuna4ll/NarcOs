@@ -7,4 +7,5 @@ int get_mouse_x();
 int get_mouse_y();
 int mouse_left_pressed();
 int mouse_right_pressed();
+int mouse_consume_moved();
 #endif

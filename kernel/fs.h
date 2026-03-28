@@ -3,7 +3,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #define MAX_FILES 64
-#define MAX_FILE_SIZE 512
+#define MAX_FILE_SIZE 4096
+#define FS_NODE_FILE 1
+#define FS_NODE_DIR  2
 typedef struct {
     char name[32];
     uint32_t size;
@@ -22,7 +24,10 @@ int fs_write_file(const char* name, const char* data);
 int fs_read_file(const char* name, char* buffer, size_t max_len);
 int fs_delete_file(const char* name);
 int fs_move_file(const char* name, const char* target_dir);
+int fs_rename(const char* path, const char* new_name);
 void fs_list_dir();
 void fs_sync();
 void get_current_dir_name(char* buf);
+void fs_get_current_path(char* buf, size_t max_len);
+int fs_find_node(const char* path);
 #endif

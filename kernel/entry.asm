@@ -13,12 +13,22 @@ global vbe_alpha_blend_sse
 global gdt_flush
 global tss_flush
 global isr_syscall
+global isr_user_yield
 global jump_to_usermode
 global jump_to_usermode_v9
 global isr_gpf
 global isr_double_fault
+global load_page_directory
+global enable_paging
+global process_switch
+global run_user_task
 extern usermode_jump_eip
 extern usermode_jump_esp
+extern user_kernel_resume_esp
+extern user_kernel_ebx
+extern user_kernel_esi
+extern user_kernel_edi
+extern user_kernel_ebp
 SECTION .text.prologue
 _start:
     mov esp, 0x2800000
@@ -160,7 +170,69 @@ tss_flush:
     ltr ax
     ret
 
+load_page_directory:
+    mov eax, [esp + 4]
+    mov cr3, eax
+    ret
+
+enable_paging:
+    mov eax, cr4
+    or eax, 0x10
+    mov cr4, eax
+    mov eax, cr0
+    or eax, 0x80000000
+    mov cr0, eax
+    ret
+
+process_switch:
+    mov eax, [esp + 4]
+    mov edx, [esp + 8]
+    push ebp
+    push ebx
+    push esi
+    push edi
+    mov [eax], esp
+    mov esp, edx
+    pop edi
+    pop esi
+    pop ebx
+    pop ebp
+    ret
+
+run_user_task:
+    mov [user_kernel_resume_esp], esp
+    mov [user_kernel_ebx], ebx
+    mov [user_kernel_esi], esi
+    mov [user_kernel_edi], edi
+    mov [user_kernel_ebp], ebp
+    mov ebp, [esp + 4]
+
+    push dword [ebp + 68]
+    push dword [ebp + 64]
+    push dword [ebp + 60]
+    push dword [ebp + 56]
+    push dword [ebp + 52]
+
+    mov ax, [ebp + 12]
+    mov ds, ax
+    mov ax, [ebp + 8]
+    mov es, ax
+    mov ax, [ebp + 4]
+    mov fs, ax
+    mov ax, [ebp + 0]
+    mov gs, ax
+
+    mov edi, [ebp + 16]
+    mov esi, [ebp + 20]
+    mov edx, [ebp + 36]
+    mov ecx, [ebp + 40]
+    mov ebx, [ebp + 32]
+    mov eax, [ebp + 44]
+    mov ebp, [ebp + 24]
+    iret
+
 extern syscall_handler
+extern user_yield_handler
 
 SECTION .text
 
@@ -220,6 +292,38 @@ isr_syscall:
     popa
     add esp, 4 ; remove dummy error code
     iret
+
+isr_user_yield:
+    push dword 0
+    pusha
+
+    push ds
+    push es
+    push fs
+    push gs
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp
+    call user_yield_handler
+    add esp, 4
+
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    mov esp, [user_kernel_resume_esp]
+    mov ebx, [user_kernel_ebx]
+    mov esi, [user_kernel_esi]
+    mov edi, [user_kernel_edi]
+    mov ebp, [user_kernel_ebp]
+    ret
 
 extern gpf_handler
 isr_gpf:

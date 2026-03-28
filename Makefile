@@ -17,7 +17,7 @@ kernel_bin_target = kernel.bin
 
 C_SOURCES = $(wildcard $(KERN_DIR)/*.c)
 C_OBJECTS = $(patsubst $(KERN_DIR)/%.c, $(OBJ_DIR)/%.o, $(C_SOURCES))
-ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o
+ASM_OBJECTS = $(OBJ_DIR)/entry.o $(OBJ_DIR)/user_test.o $(OBJ_DIR)/user_snake.o
 
 OBJ_FILES = $(ASM_OBJECTS) $(C_OBJECTS)
 
@@ -30,16 +30,21 @@ all: pre-build minios.img
 pre-build:
 	@mkdir -p $(OBJ_DIR)
 
-$(BOOT_DIR)/boot.bin: $(BOOT_DIR)/boot.asm
-	$(AS) -f bin $< -o $@
+$(BOOT_DIR)/boot.bin: $(BOOT_DIR)/boot.asm $(BOOT_DIR)/stage2.bin
+	$(eval STAGE2_SECS := $(shell echo $$(( ($$(wc -c < $(BOOT_DIR)/stage2.bin) + 511) / 512 ))))
+	$(AS) -DSTAGE2_SECTORS=$(STAGE2_SECS) -f bin $< -o $@
 
-$(BOOT_DIR)/stage2.bin: $(BOOT_DIR)/stage2.asm
-	$(AS) -f bin $< -o $@
+$(BOOT_DIR)/stage2.bin: $(BOOT_DIR)/stage2.asm $(kernel_bin_target)
+	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(kernel_bin_target)) + 511) / 512 ))))
+	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -f bin $< -o $@
 
 $(OBJ_DIR)/entry.o: $(KERN_DIR)/entry.asm
 	$(AS) -f elf32 $< -o $@
 
 $(OBJ_DIR)/user_test.o: $(KERN_DIR)/user_test.asm
+	$(AS) -f elf32 $< -o $@
+
+$(OBJ_DIR)/user_snake.o: $(KERN_DIR)/user_snake.asm
 	$(AS) -f elf32 $< -o $@
 
 $(OBJ_DIR)/%.o: $(KERN_DIR)/%.c
@@ -52,7 +57,7 @@ $(kernel_bin_target): $(OBJ_FILES)
 minios.img: $(BOOT_BINS) $(kernel_bin_target)
 	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(kernel_bin_target)) + 511) / 512 + 1 ))))
 	@echo "[INFO] Kernel sector size: $(KERNEL_SECS)"
-	dd if=/dev/zero   of=minios.img bs=512 count=2880 2>/dev/null
+	dd if=/dev/zero   of=minios.img bs=512 count=32768 2>/dev/null
 	dd if=$(BOOT_DIR)/boot.bin    of=minios.img bs=512 seek=0  conv=notrunc 2>/dev/null
 	dd if=$(BOOT_DIR)/stage2.bin  of=minios.img bs=512 seek=1  conv=notrunc 2>/dev/null
 	dd if=$(kernel_bin_target)    of=minios.img bs=512 seek=18 conv=notrunc 2>/dev/null
