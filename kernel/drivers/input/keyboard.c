@@ -68,7 +68,7 @@ extern void explorer_modal_backspace();
 extern void explorer_modal_append_char(char c);
 
 static const char* shell_commands[] = {
-    "help", "clear", "mem", "snake", "ver", "uptime", "date", "time",
+    "help", "clear", "mem", "snake", "settings", "ver", "uptime", "date", "time",
     "ls", "pwd", "touch", "cat", "write", "edit", "mkdir", "cd",
     "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "netdemo", "fetch",
     "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"

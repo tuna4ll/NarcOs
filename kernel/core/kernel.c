@@ -94,8 +94,15 @@ void nwm_init_windows() {
     windows[3].visible = 0;
     windows[3].minimized = 0;
     windows[3].id = 3;
+    windows[4].type = WIN_TYPE_SETTINGS;
+    windows[4].x = 220; windows[4].y = 110;
+    windows[4].w = 520; windows[4].h = 330;
+    strcpy(windows[4].title, "Settings");
+    windows[4].visible = 0;
+    windows[4].minimized = 0;
+    windows[4].id = 4;
 
-    window_count = 4;
+    window_count = 5;
 }
 
 void nwm_bring_to_front(int idx) {
@@ -135,6 +142,126 @@ static void open_snake_window() {
     nwm_bring_to_front(idx);
     if (!user_snake_running()) launch_user_snake();
     gui_needs_redraw = 1;
+}
+
+static void open_terminal_window() {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
+    if (idx == -1) return;
+    windows[idx].visible = 1;
+    windows[idx].minimized = 0;
+    nwm_bring_to_front(idx);
+    gui_needs_redraw = 1;
+}
+
+static void open_narcpad_window() {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
+    if (idx == -1) return;
+    pad_file_idx = -1;
+    pad_content[0] = '\0';
+    strcpy(windows[idx].title, "untitled.txt");
+    windows[idx].visible = 1;
+    windows[idx].minimized = 0;
+    nwm_bring_to_front(idx);
+    gui_needs_redraw = 1;
+}
+
+static void open_settings_window() {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_SETTINGS);
+    if (idx == -1) return;
+    windows[idx].visible = 1;
+    windows[idx].minimized = 0;
+    nwm_bring_to_front(idx);
+    gui_needs_redraw = 1;
+}
+
+static void open_file_in_narcpad_by_path(const char* path) {
+    int pidx;
+    int file_idx;
+    const char* file_name;
+    if (!path || path[0] == '\0') return;
+    file_idx = fs_find_node(path);
+    if (file_idx < 0) return;
+    pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
+    if (pidx == -1) return;
+
+    if (fs_read_file_by_idx(file_idx, pad_content, sizeof(pad_content)) != 0) {
+        pad_content[0] = '\0';
+    }
+    pad_file_idx = file_idx;
+    file_name = path;
+    for (int i = 0; path[i] != '\0'; i++) {
+        if (path[i] == '/' && path[i + 1] != '\0') file_name = &path[i + 1];
+    }
+    strcpy(windows[pidx].title, file_name);
+    windows[pidx].visible = 1;
+    windows[pidx].minimized = 0;
+    nwm_bring_to_front(pidx);
+    gui_needs_redraw = 1;
+}
+
+static void open_timezone_config_in_narcpad() {
+    const char* path = "/system/timezone.cfg";
+    if (fs_find_node(path) < 0) {
+        if (rtc_save_timezone_setting() != 0) return;
+    }
+    open_file_in_narcpad_by_path(path);
+}
+
+static void settings_apply_timezone(int minutes) {
+    rtc_set_timezone_offset_minutes(minutes);
+    (void)rtc_save_timezone_setting();
+    gui_needs_redraw = 1;
+}
+
+static int settings_handle_click(window_t* win, int mx, int my) {
+    int cx, cy, cw, ch;
+    int local_x;
+    int local_y;
+    if (!win) return 0;
+    vbe_get_window_client_rect(win, &cx, &cy, &cw, &ch);
+    local_x = mx - cx;
+    local_y = my - cy;
+    if (local_x < 0 || local_y < 0 || local_x >= cw || local_y >= ch) return 0;
+
+    if (local_y >= 130 && local_y <= 152) {
+        if (local_x >= 216 && local_x <= 278) {
+            settings_apply_timezone(rtc_get_timezone_offset_minutes() - 30);
+            return 1;
+        }
+        if (local_x >= 286 && local_x <= 348) {
+            settings_apply_timezone(rtc_get_timezone_offset_minutes() + 30);
+            return 1;
+        }
+        if (local_x >= 360 && local_x <= 486) {
+            open_timezone_config_in_narcpad();
+            return 1;
+        }
+    }
+
+    if (local_y >= 180 && local_y <= 202) {
+        if (local_x >= 24 && local_x <= 92) {
+            settings_apply_timezone(-300);
+            return 1;
+        }
+        if (local_x >= 102 && local_x <= 150) {
+            settings_apply_timezone(0);
+            return 1;
+        }
+        if (local_x >= 160 && local_x <= 228) {
+            settings_apply_timezone(180);
+            return 1;
+        }
+        if (local_x >= 238 && local_x <= 334) {
+            settings_apply_timezone(330);
+            return 1;
+        }
+        if (local_x >= 344 && local_x <= 412) {
+            settings_apply_timezone(540);
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void explorer_open_dir(int new_dir) {
@@ -956,10 +1083,12 @@ void execute_command(char* cmd) {
         vga_println("  mem    - Memory map");
         if (graphics_mode) vga_println("  snake  - Snake game");
         else vga_println("  snake  - Snake game (requires graphics mode)");
+        if (graphics_mode) vga_println("  settings - Open settings");
+        else vga_println("  settings - Open settings (requires graphics mode)");
         vga_println("  ver    - Show version");
         vga_println("  uptime - Show system uptime in seconds");
-        vga_println("  date   - Show current date (RTC)");
-        vga_println("  time   - Show current time (RTC)");
+        vga_println("  date   - Show current local date");
+        vga_println("  time   - Show current local time");
         vga_println("  ls     - List files");
         vga_println("  pwd    - Show current path");
         vga_println("  touch  - Create empty file (touch <file>)");
@@ -1026,6 +1155,13 @@ void execute_command(char* cmd) {
         }
         open_snake_window();
         vga_println("Snake launched in Ring 3.");
+    } else if (strcmp(arg1, "settings") == 0) {
+        if (!graphics_mode) {
+            vga_print_color("error: settings requires graphics mode.\n", 0x0C);
+            return;
+        }
+        open_settings_window();
+        vga_println("Settings opened.");
     } else if (strcmp(arg1, "clear") == 0) {
         clear_screen();
     } else if (strcmp(arg1, "mem") == 0) {
@@ -1040,7 +1176,7 @@ void execute_command(char* cmd) {
         vga_println("");
     } else if (strcmp(arg1, "date") == 0) {
         read_rtc();
-        vga_print("Current Date: 20");
+        vga_print("Current Local Date: 20");
         vga_print_int(get_year());
         vga_print("-");
         if (get_month() < 10) vga_print("0");
@@ -1051,7 +1187,7 @@ void execute_command(char* cmd) {
         vga_println("");
     } else if (strcmp(arg1, "time") == 0) {
         read_rtc();
-        vga_print("Current Time: ");
+        vga_print("Current Local Time: ");
         if (get_hour() < 10) vga_print("0");
         vga_print_int(get_hour());
         vga_print(":");
@@ -1404,10 +1540,36 @@ static void desktop_process_main(void) {
                  ctx_visible = 0; gui_needs_redraw = 1;
                  goto process_done;
             }
+            if (start_menu_visible && mx >= 20 && mx <= 240) {
+                if (my >= 122 && my <= 146) {
+                    open_terminal_window();
+                    start_menu_visible = 0;
+                    goto process_done;
+                }
+                if (my >= 154 && my <= 178) {
+                    open_snake_window();
+                    start_menu_visible = 0;
+                    goto process_done;
+                }
+                if (my >= 186 && my <= 210) {
+                    open_narcpad_window();
+                    start_menu_visible = 0;
+                    goto process_done;
+                }
+                if (my >= 218 && my <= 242) {
+                    open_settings_window();
+                    start_menu_visible = 0;
+                    goto process_done;
+                }
+            }
             int double_click = (timer_ticks - last_click_tick < 40);
             last_click_tick = timer_ticks;
             if (my <= 35) {
                 if (mx >= 5 && mx <= 89) { start_menu_visible = !start_menu_visible; gui_needs_redraw = 1; }
+                else if (mx >= (int)vbe_get_width() - 104 && mx <= (int)vbe_get_width() - 14) {
+                    open_settings_window();
+                    start_menu_visible = 0;
+                }
                 else if (mx >= 96 && mx <= 136) {
                     int tidx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
                     if (tidx != -1) {
@@ -1550,6 +1712,8 @@ static void desktop_process_main(void) {
                                 }
                             }
                         }
+                    } else if (windows[hit_win].type == WIN_TYPE_SETTINGS) {
+                        if (settings_handle_click(&windows[hit_win], mx, my)) goto process_done;
                     }
                 } else {
                     if (start_menu_visible && (mx > 200 || my > 335)) { start_menu_visible = 0; gui_needs_redraw = 1; }
@@ -1747,6 +1911,8 @@ void kmain() {
     init_keyboard();
     storage_init();
     init_fs();
+    rtc_init_timezone();
+    read_rtc();
     init_heap();
     screen_set_graphics_enabled(0);
     if (boot_framebuffer_available()) {

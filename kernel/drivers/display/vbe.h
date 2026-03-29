@@ -6,7 +6,8 @@ typedef enum {
     WIN_TYPE_TERMINAL,
     WIN_TYPE_EXPLORER,
     WIN_TYPE_NARCPAD,
-    WIN_TYPE_SNAKE
+    WIN_TYPE_SNAKE,
+    WIN_TYPE_SETTINGS
 } window_type_t;
 
 typedef struct {
@@ -54,6 +55,7 @@ extern void vbe_memcpy_sse(void* dest, void* src, uint32_t count);
 extern void vbe_memset_sse(void* dest, uint32_t color, uint32_t count);
 extern void vbe_alpha_blend_sse(void* dest, uint32_t color, uint32_t alpha, uint32_t count);
 void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused);
+void vbe_get_window_client_rect(window_t* win, int* out_x, int* out_y, int* out_w, int* out_h);
 void vbe_draw_taskbar(int start_btn_active);
 void vbe_draw_start_menu();
 void vbe_draw_clock();

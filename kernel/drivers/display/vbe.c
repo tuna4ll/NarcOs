@@ -3,6 +3,7 @@
 #include "cpu.h"
 #include "string.h"
 #include "fs.h"
+#include "rtc.h"
 #include "usermode.h"
 #include "ui_theme.h"
 extern disk_fs_node_t dir_cache[MAX_FILES];
@@ -664,7 +665,7 @@ static void ui_draw_modal(void) {
     }
 }
 
-static void ui_get_window_client_rect(window_t* win, int* out_x, int* out_y, int* out_w, int* out_h) {
+void vbe_get_window_client_rect(window_t* win, int* out_x, int* out_y, int* out_w, int* out_h) {
     if (!win) return;
     if (out_x) *out_x = win->x + WINDOW_CLIENT_INSET_X;
     if (out_y) *out_y = win->y + WINDOW_CLIENT_TOP;
@@ -875,15 +876,13 @@ void vbe_draw_start_menu() {
     ui_draw_chip(20, 122, 220, 24, UI_SURFACE_2, UI_TEXT, "Terminal");
     ui_draw_chip(20, 154, 220, 24, UI_SURFACE_2, UI_TEXT, "Snake");
     ui_draw_chip(20, 186, 220, 24, UI_SURFACE_2, UI_TEXT, "NarcPad");
+    ui_draw_chip(20, 218, 220, 24, UI_SURFACE_2, UI_TEXT, "Settings");
 
     vbe_fill_rect_alpha(20, 286, 220, 1, UI_BORDER_SOFT, 255);
     vbe_draw_string(20, 306, "SESSION", UI_TEXT_SUBTLE);
     vbe_draw_string(20, 326, "narc desktop session", UI_ACCENT_ALT);
     vbe_draw_string(20, 346, "x86 experimental desktop", UI_TEXT_MUTED);
 }
-extern uint8_t get_hour();
-extern uint8_t get_minute();
-extern uint8_t get_second();
 void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
     (void)vertical;
     if (x < 0) { w += x; x = 0; }
@@ -1225,7 +1224,7 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                 extern int exp_dir;
                 {
                     int cx, cy, cw, ch;
-                    ui_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
+                    vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
                     vbe_draw_breadcrumb(cx, cy, cw, exp_dir);
                     vbe_draw_explorer_content(cx, cy + 36, cw, ch - 36, exp_dir);
                 }
@@ -1235,7 +1234,7 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                 extern char pad_content[1024];
                 {
                     int cx, cy, cw, ch;
-                    ui_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
+                    vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
                     vbe_draw_narcpad(cx, cy, cw, ch, windows[i].title, pad_content);
                 }
                 break;
@@ -1243,7 +1242,7 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                 vbe_blit_window(&windows[i], NULL, is_focused);
                 {
                     int cx, cy, cw, ch;
-                    ui_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
+                    vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
                 if (user_snake_running()) {
                     vbe_draw_snake_game(cx, cy, cw, ch,
                                         user_snake_state.px, user_snake_state.py,
@@ -1254,6 +1253,70 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                     extern int snk_px[100], snk_py[100], snk_len, apple_x, apple_y, snk_dead, snk_score, snk_best;
                     vbe_draw_snake_game(cx, cy, cw, ch, snk_px, snk_py, snk_len, apple_x, apple_y, snk_dead, snk_score, snk_best);
                 }
+                }
+                break;
+            case WIN_TYPE_SETTINGS:
+                vbe_blit_window(&windows[i], NULL, is_focused);
+                {
+                    int cx, cy, cw, ch;
+                    char time_str[9];
+                    char date_str[11];
+                    char tz_str[16];
+                    int offset = rtc_get_timezone_offset_minutes();
+                    vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
+                    rtc_format_timezone(tz_str, sizeof(tz_str));
+
+                    time_str[0] = (char)('0' + (get_hour() / 10));
+                    time_str[1] = (char)('0' + (get_hour() % 10));
+                    time_str[2] = ':';
+                    time_str[3] = (char)('0' + (get_minute() / 10));
+                    time_str[4] = (char)('0' + (get_minute() % 10));
+                    time_str[5] = ':';
+                    time_str[6] = (char)('0' + (get_second() / 10));
+                    time_str[7] = (char)('0' + (get_second() % 10));
+                    time_str[8] = '\0';
+
+                    date_str[0] = '2';
+                    date_str[1] = '0';
+                    date_str[2] = (char)('0' + ((get_year() / 10) % 10));
+                    date_str[3] = (char)('0' + (get_year() % 10));
+                    date_str[4] = '-';
+                    date_str[5] = (char)('0' + (get_month() / 10));
+                    date_str[6] = (char)('0' + (get_month() % 10));
+                    date_str[7] = '-';
+                    date_str[8] = (char)('0' + (get_day() / 10));
+                    date_str[9] = (char)('0' + (get_day() % 10));
+                    date_str[10] = '\0';
+
+                    ui_draw_panel_flat(cx, cy, cw, ch, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
+                    ui_draw_app_toolbar(cx, cy, cw, 0, 0);
+
+                    ui_draw_panel_flat(cx + 16, cy + 12, cw - 32, 80, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+                    vbe_draw_string(cx + 28, cy + 24, "LOCAL TIME", UI_TEXT_SUBTLE);
+                    vbe_draw_string_hd(cx + 28, cy + 42, time_str, UI_TEXT, 2);
+                    vbe_draw_string(cx + cw - 164, cy + 24, "DATE", UI_TEXT_SUBTLE);
+                    vbe_draw_string(cx + cw - 164, cy + 44, date_str, UI_ACCENT_ALT);
+                    ui_draw_chip(cx + cw - 164, cy + 62, 112, 20, UI_SURFACE_2, UI_TEXT, tz_str);
+
+                    ui_draw_panel_flat(cx + 16, cy + 104, cw - 32, ch - 120, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+                    vbe_draw_string(cx + 28, cy + 118, "TIME ZONE", UI_TEXT);
+                    vbe_draw_string(cx + 28, cy + 136, "Current", UI_TEXT_SUBTLE);
+                    ui_draw_chip(cx + 92, cy + 130, 112, 22, UI_ACCENT_DEEP, UI_TEXT, tz_str);
+                    ui_draw_chip(cx + 216, cy + 130, 62, 22, UI_SURFACE_2, UI_TEXT, "-30m");
+                    ui_draw_chip(cx + 286, cy + 130, 62, 22, UI_SURFACE_2, UI_TEXT, "+30m");
+                    ui_draw_chip(cx + 360, cy + 130, 126, 22, UI_SURFACE_2, UI_TEXT_MUTED, "Edit Config");
+
+                    vbe_draw_string(cx + 28, cy + 166, "PRESETS", UI_TEXT_SUBTLE);
+                    ui_draw_chip(cx + 24, cy + 180, 68, 22, offset == -300 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC-5");
+                    ui_draw_chip(cx + 102, cy + 180, 48, 22, offset == 0 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC");
+                    ui_draw_chip(cx + 160, cy + 180, 68, 22, offset == 180 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+3");
+                    ui_draw_chip(cx + 238, cy + 180, 96, 22, offset == 330 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+5:30");
+                    ui_draw_chip(cx + 344, cy + 180, 68, 22, offset == 540 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+9");
+
+                    vbe_draw_string(cx + 28, cy + 220, "Offset", UI_TEXT_SUBTLE);
+                    vbe_draw_int(cx + 84, cy + 220, offset, UI_ACCENT_ALT);
+                    vbe_draw_string(cx + 124, cy + 220, "min", UI_TEXT_MUTED);
+                    vbe_draw_string(cx + 28, cy + 238, "/system/timezone.cfg", UI_TEXT_MUTED);
                 }
                 break;
         }
