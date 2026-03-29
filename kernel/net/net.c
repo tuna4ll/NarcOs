@@ -2089,28 +2089,20 @@ int net_dns_command(const char* host) {
     return 0;
 }
 
-int net_ping_command(const char* target) {
+int net_ping_host(const char* target, net_ping_result_t* out_result) {
     uint32_t ip;
     uint16_t identifier;
+    int final_status = NET_OK;
 
-    if (!target || target[0] == '\0') {
-        vga_print_color("Usage: ping <host>\n", 0x0E);
-        return -1;
-    }
-    if (!net_state.present) {
-        vga_print_color("error: RTL8139 NIC not found. Start QEMU with rtl8139 enabled.\n", 0x0C);
-        return -1;
-    }
-    if (net_resolve_ipv4(target, &ip) != 0) {
-        vga_print_color("error: Failed to resolve target host.\n", 0x0C);
-        return -1;
-    }
+    if (!target || target[0] == '\0' || !out_result) return NET_ERR_INVALID;
+    memset(out_result, 0, sizeof(*out_result));
+    out_result->attempts = 4U;
+    for (int i = 0; i < 4; i++) out_result->reply_status[i] = NET_ERR_TIMEOUT;
 
-    vga_print("Pinging ");
-    vga_print(target);
-    vga_print(" [");
-    net_print_ip(ip);
-    vga_println("] ...");
+    if (!net_state.present) return NET_ERR_NOT_READY;
+    if (net_resolve_ipv4(target, &ip) != 0) return NET_ERR_RESOLVE;
+
+    out_result->resolved_ip = ip;
 
     identifier = (uint16_t)(0xB000U | (net_random16() & 0x0FFFU));
     for (int i = 0; i < 4; i++) {
@@ -2122,21 +2114,63 @@ int net_ping_command(const char* target) {
         pending_ping_rtt_ms = 0;
 
         if (net_send_icmp_echo(ip, pending_ping_identifier, pending_ping_sequence) != 0) {
-            vga_print_color("error: Failed to transmit ICMP packet.\n", 0x0C);
-            return -1;
+            out_result->reply_status[i] = NET_ERR_IO;
+            return NET_ERR_IO;
         }
         if (net_wait_until(&pending_ping_status, NET_TIMEOUT_LONG) == 0 && pending_ping_status == 0) {
+            out_result->reply_status[i] = NET_OK;
+            out_result->rtt_ms[i] = pending_ping_rtt_ms;
+            out_result->success_count++;
+        } else {
+            pending_ping_status = -1;
+            out_result->reply_status[i] = NET_ERR_TIMEOUT;
+            final_status = NET_ERR_TIMEOUT;
+        }
+    }
+    return out_result->success_count != 0U ? NET_OK : final_status;
+}
+
+int net_ping_command(const char* target) {
+    net_ping_result_t result;
+    int status;
+
+    if (!target || target[0] == '\0') {
+        vga_print_color("Usage: ping <host>\n", 0x0E);
+        return -1;
+    }
+
+    status = net_ping_host(target, &result);
+    if (status == NET_ERR_NOT_READY) {
+        vga_print_color("error: RTL8139 NIC not found. Start QEMU with rtl8139 enabled.\n", 0x0C);
+        return status;
+    }
+    if (status == NET_ERR_RESOLVE) {
+        vga_print_color("error: Failed to resolve target host.\n", 0x0C);
+        return status;
+    }
+    if (status == NET_ERR_IO) {
+        vga_print_color("error: Failed to transmit ICMP packet.\n", 0x0C);
+        return status;
+    }
+
+    vga_print("Pinging ");
+    vga_print(target);
+    vga_print(" [");
+    net_print_ip(result.resolved_ip);
+    vga_println("] ...");
+
+    for (uint32_t i = 0; i < result.attempts; i++) {
+        if (result.reply_status[i] == NET_OK) {
             vga_print("Reply from ");
-            net_print_ip(ip);
+            net_print_ip(result.resolved_ip);
             vga_print(": time=");
-            vga_print_int((int)pending_ping_rtt_ms);
+            vga_print_int((int)result.rtt_ms[i]);
             vga_println("ms");
         } else {
             vga_println("Request timed out.");
-            pending_ping_status = -1;
         }
     }
-    return 0;
+    return status;
 }
 
 int net_ntp_command(const char* host) {

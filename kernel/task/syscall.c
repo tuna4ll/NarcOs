@@ -4,13 +4,18 @@
 #include "memory_alloc.h"
 #include "fs.h"
 #include "net.h"
+#include "rtc.h"
 #include "usermode.h"
 
 extern void vga_println(const char* str);
+extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vbe_compose_scene_basic();
 extern int get_mouse_x();
 extern int get_mouse_y();
+extern void clear_screen(void);
+extern int kernel_run_privileged_command(int cmd, const char* arg);
+extern int kernel_gui_open_narcpad_file(const char* path);
 static uint32_t last_gui_tick = 0;
 extern uint32_t timer_ticks;
 static uint32_t kernel_rng_state = 0xA341316Cu;
@@ -60,6 +65,30 @@ void syscall_handler(trap_frame_t* frame) {
         frame->eax = (uint32_t)fs_read_file((const char*)ebx, (char*)ecx, (size_t)edx);
     } else if (eax == SYS_FS_WRITE) {
         frame->eax = (uint32_t)fs_write_file((const char*)ebx, (const char*)ecx);
+    } else if (eax == SYS_FS_LIST) {
+        frame->eax = (uint32_t)fs_list_dir_entries((disk_fs_node_t*)ebx, (int)ecx);
+    } else if (eax == SYS_FS_GET_CWD) {
+        fs_get_current_path((char*)ebx, (size_t)ecx);
+        frame->eax = 0;
+    } else if (eax == SYS_FS_TOUCH) {
+        int status = fs_create_file((const char*)ebx);
+        if (status != 0 && fs_find_node((const char*)ebx) >= 0) status = 0;
+        frame->eax = (uint32_t)status;
+    } else if (eax == SYS_FS_MKDIR) {
+        frame->eax = (uint32_t)fs_create_dir((const char*)ebx);
+    } else if (eax == SYS_FS_DELETE) {
+        frame->eax = (uint32_t)fs_delete_file((const char*)ebx);
+    } else if (eax == SYS_FS_MOVE) {
+        frame->eax = (uint32_t)fs_move_file((const char*)ebx, (const char*)ecx);
+    } else if (eax == SYS_FS_RENAME) {
+        frame->eax = (uint32_t)fs_rename((const char*)ebx, (const char*)ecx);
+    } else if (eax == SYS_FS_FIND_NODE) {
+        frame->eax = (uint32_t)fs_find_node((const char*)ebx);
+    } else if (eax == SYS_FS_GET_NODE_INFO) {
+        frame->eax = (uint32_t)fs_get_node_info((int)ebx, (disk_fs_node_t*)ecx);
+    } else if (eax == SYS_FS_GET_PATH) {
+        fs_get_path_by_index((int)ebx, (char*)ecx, (size_t)edx);
+        frame->eax = 0;
     } else if (eax == SYS_SNAKE_GET_INPUT) {
         frame->eax = (uint32_t)consume_user_snake_input();
     } else if (eax == SYS_SNAKE_CLOSE) {
@@ -69,10 +98,14 @@ void syscall_handler(trap_frame_t* frame) {
         frame->eax = kernel_next_random();
     } else if (eax == SYS_NET_GET_CONFIG) {
         frame->eax = (uint32_t)net_get_ipv4_config((net_ipv4_config_t*)ebx);
+    } else if (eax == SYS_NET_DHCP) {
+        frame->eax = (uint32_t)net_run_dhcp(0);
     } else if (eax == SYS_NET_RESOLVE) {
         frame->eax = (uint32_t)net_resolve_ipv4((const char*)ebx, (uint32_t*)ecx);
     } else if (eax == SYS_NET_NTP_QUERY) {
         frame->eax = (uint32_t)net_ntp_query((const char*)ebx, (uint32_t*)ecx);
+    } else if (eax == SYS_NET_PING) {
+        frame->eax = (uint32_t)net_ping_host((const char*)ebx, (net_ping_result_t*)ecx);
     } else if (eax == SYS_NET_SOCKET_OPEN) {
         frame->eax = (uint32_t)net_socket_open((int)ebx);
     } else if (eax == SYS_NET_SOCKET_CONNECT) {
@@ -85,6 +118,33 @@ void syscall_handler(trap_frame_t* frame) {
         frame->eax = (uint32_t)net_socket_available((int)ebx);
     } else if (eax == SYS_NET_SOCKET_CLOSE) {
         frame->eax = (uint32_t)net_socket_close((int)ebx);
+    } else if (eax == SYS_CLEAR_SCREEN) {
+        clear_screen();
+        frame->eax = 0;
+    } else if (eax == SYS_RTC_GET_LOCAL) {
+        rtc_local_time_t* out_time = (rtc_local_time_t*)ebx;
+        read_rtc();
+        out_time->year = (uint16_t)get_year();
+        out_time->month = get_month();
+        out_time->day = get_day();
+        out_time->hour = get_hour();
+        out_time->minute = get_minute();
+        out_time->second = get_second();
+        frame->eax = 0;
+    } else if (eax == SYS_RTC_GET_TZ_OFFSET) {
+        frame->eax = (uint32_t)rtc_get_timezone_offset_minutes();
+    } else if (eax == SYS_RTC_SET_TZ_OFFSET) {
+        rtc_set_timezone_offset_minutes((int)ebx);
+        frame->eax = 0;
+    } else if (eax == SYS_RTC_SAVE_TZ) {
+        frame->eax = (uint32_t)rtc_save_timezone_setting();
+    } else if (eax == SYS_PRIV_CMD) {
+        frame->eax = (uint32_t)kernel_run_privileged_command((int)ebx, (const char*)ecx);
+    } else if (eax == SYS_PRINT_RAW) {
+        vga_print((const char*)ebx);
+        frame->eax = 0;
+    } else if (eax == SYS_GUI_OPEN_NARCPAD_FILE) {
+        frame->eax = (uint32_t)kernel_gui_open_narcpad_file((const char*)ebx);
     } else if (eax == SYS_EXIT) {
         stop_user_snake();
         frame->eax = 0;

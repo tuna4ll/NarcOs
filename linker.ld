@@ -14,6 +14,27 @@ SECTIONS
         *(.text.*)
     }
 
+    .user_region : ALIGN(4096)
+    {
+        __user_region_start = .;
+        *(.user_code)
+        *(.user_code.*)
+        *(.user_rodata)
+        *(.user_rodata.*)
+        obj/apps/user_shell.o(.rodata)
+        obj/apps/user_shell.o(.rodata.*)
+        obj/apps/user_net_apps.o(.rodata)
+        obj/apps/user_net_apps.o(.rodata.*)
+        obj/apps/user_narcpad.o(.rodata)
+        obj/apps/user_narcpad.o(.rodata.*)
+        obj/apps/user_settings.o(.rodata)
+        obj/apps/user_settings.o(.rodata.*)
+        obj/apps/user_explorer.o(.rodata)
+        obj/apps/user_explorer.o(.rodata.*)
+        . = ALIGN(4096);
+        __user_region_end = .;
+    }
+
     .rodata : ALIGN(4)
     {
         *(.rodata)
@@ -24,17 +45,6 @@ SECTIONS
     {
         *(.data)
         *(.data.*)
-    }
-
-    .user_region : ALIGN(4096)
-    {
-        __user_region_start = .;
-        *(.user_code)
-        *(.user_code.*)
-        *(.user_rodata)
-        *(.user_rodata.*)
-        . = ALIGN(4096);
-        __user_region_end = .;
     }
 
     .bss : ALIGN(4)

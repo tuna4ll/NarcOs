@@ -633,32 +633,28 @@ static void ui_draw_app_toolbar(int x, int y, int w, const char* app_name, const
 }
 
 static void ui_draw_modal(void) {
-    extern int exp_modal_mode;
-    extern char exp_modal_input[32];
-    extern int exp_selected;
-    extern disk_fs_node_t dir_cache[MAX_FILES];
     int sw = (int)mode_info->width;
     int sh = (int)mode_info->height;
     int w = 320;
     int h = 140;
     int x = (sw - w) / 2;
     int y = (sh - h) / 2;
-    if (exp_modal_mode == 0) return;
+    if (user_explorer_state.modal_mode == USER_EXPLORER_MODAL_NONE) return;
     vbe_fill_rect_alpha(0, 0, sw, sh, 0x02060A, 110);
     ui_draw_panel(x, y, w, h, UI_RADIUS_LG, UI_SURFACE_1, 250, UI_BORDER_STRONG, 255);
-    if (exp_modal_mode == 1) {
+    if (user_explorer_state.modal_mode == USER_EXPLORER_MODAL_RENAME) {
         vbe_draw_string(x + 20, y + 20, "Rename Item", UI_TEXT);
         vbe_draw_string(x + 20, y + 38, "Type a new name and press Enter.", UI_TEXT_MUTED);
         vbe_fill_rect_alpha(x + 20, y + 60, w - 40, 28, UI_SURFACE_0, 255);
         vbe_draw_rect(x + 20, y + 60, w - 40, 28, UI_BORDER_SOFT);
-        vbe_draw_string(x + 28, y + 69, exp_modal_input, UI_TEXT);
+        vbe_draw_string(x + 28, y + 69, user_explorer_state.modal_input, UI_TEXT);
         ui_draw_chip(x + w - 136, y + h - 32, 50, 18, UI_SURFACE_2, UI_TEXT_MUTED, "Esc");
         ui_draw_chip(x + w - 78, y + h - 32, 54, 18, UI_ACCENT_DEEP, UI_TEXT, "Enter");
-    } else if (exp_modal_mode == 2) {
+    } else if (user_explorer_state.modal_mode == USER_EXPLORER_MODAL_DELETE) {
         vbe_draw_string(x + 20, y + 20, "Delete Item", UI_DANGER);
         vbe_draw_string(x + 20, y + 42, "Delete the selected item?", UI_TEXT);
-        if (exp_selected >= 0 && dir_cache[exp_selected].flags != 0) {
-            vbe_draw_string(x + 20, y + 60, dir_cache[exp_selected].name, UI_TEXT_MUTED);
+        if (user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
+            vbe_draw_string(x + 20, y + 60, dir_cache[user_explorer_state.selected_idx].name, UI_TEXT_MUTED);
         }
         ui_draw_chip(x + w - 136, y + h - 32, 50, 18, UI_SURFACE_2, UI_TEXT_MUTED, "Esc");
         ui_draw_chip(x + w - 78, y + h - 32, 54, 18, UI_DANGER, UI_TEXT, "Delete");
@@ -1038,7 +1034,6 @@ void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
     int list_y = panel_y + 48;
     int item_count = ui_count_children(current_dir);
     int content_h = panel_h;
-    extern int exp_selected;
 
     ui_draw_panel_flat(x, panel_y, sidebar_w, panel_h, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
     vbe_draw_string(x + 14, panel_y + 16, "PLACES", UI_TEXT_SUBTLE);
@@ -1049,8 +1044,8 @@ void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
     vbe_draw_string(x + 14, panel_y + 144, "ITEMS", UI_TEXT_SUBTLE);
     vbe_draw_int(x + 88, panel_y + 144, item_count, UI_ACCENT_ALT);
     vbe_draw_string(x + 14, panel_y + panel_h - 44, "Status", UI_TEXT_SUBTLE);
-    if (exp_selected >= 0 && dir_cache[exp_selected].flags != 0) {
-        vbe_draw_string(x + 14, panel_y + panel_h - 28, dir_cache[exp_selected].name, UI_TEXT);
+    if (user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
+        vbe_draw_string(x + 14, panel_y + panel_h - 28, dir_cache[user_explorer_state.selected_idx].name, UI_TEXT);
     } else {
         vbe_draw_string(x + 14, panel_y + panel_h - 28, "No selection", UI_TEXT_MUTED);
     }
@@ -1079,7 +1074,7 @@ void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == current_dir) {
             ui_draw_list_card(content_x + 16, list_y + row * 54, content_w - 32, 44,
-                              dir_cache[i].flags, dir_cache[i].name, (int)dir_cache[i].size, exp_selected == i);
+                              dir_cache[i].flags, dir_cache[i].name, (int)dir_cache[i].size, user_explorer_state.selected_idx == i);
             row++;
             if (list_y + row * 54 > panel_y + panel_h - 56) break;
         }
@@ -1089,8 +1084,8 @@ void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
     vbe_draw_string(content_x + 18, panel_y + content_h - 22, "Ready", UI_TEXT_MUTED);
     vbe_draw_int(content_x + 72, panel_y + content_h - 22, item_count, UI_ACCENT_ALT);
     vbe_draw_string(content_x + 90, panel_y + content_h - 22, "items", UI_TEXT_SUBTLE);
-    if (exp_selected >= 0 && dir_cache[exp_selected].flags != 0) {
-        vbe_draw_string(content_x + content_w - 132, panel_y + content_h - 22, dir_cache[exp_selected].name, UI_TEXT);
+    if (user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
+        vbe_draw_string(content_x + content_w - 132, panel_y + content_h - 22, dir_cache[user_explorer_state.selected_idx].name, UI_TEXT);
     }
 }
 void vbe_draw_desktop_icons(int desktop_dir) {
@@ -1221,21 +1216,19 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                 break;
             case WIN_TYPE_EXPLORER:
                 vbe_blit_window(&windows[i], NULL, is_focused);
-                extern int exp_dir;
                 {
                     int cx, cy, cw, ch;
                     vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
-                    vbe_draw_breadcrumb(cx, cy, cw, exp_dir);
-                    vbe_draw_explorer_content(cx, cy + 36, cw, ch - 36, exp_dir);
+                    vbe_draw_breadcrumb(cx, cy, cw, user_explorer_state.current_dir);
+                    vbe_draw_explorer_content(cx, cy + 36, cw, ch - 36, user_explorer_state.current_dir);
                 }
                 break;
             case WIN_TYPE_NARCPAD:
                 vbe_blit_window(&windows[i], NULL, is_focused);
-                extern char pad_content[1024];
                 {
                     int cx, cy, cw, ch;
                     vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
-                    vbe_draw_narcpad(cx, cy, cw, ch, windows[i].title, pad_content);
+                    vbe_draw_narcpad(cx, cy, cw, ch, windows[i].title, user_narcpad_state.content);
                 }
                 break;
             case WIN_TYPE_SNAKE:

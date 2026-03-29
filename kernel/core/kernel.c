@@ -49,15 +49,7 @@ int window_count = 0;
 int active_window_idx = -1;
 
 char pad_title[32] = "NarcPad";
-char pad_content[1024] = {0};
-int pad_file_idx = -1;
 volatile int snk_next_dir = -1;
-int exp_dir = -1;
-int exp_selected = -1;
-int exp_prev_dir = -1;
-int exp_modal_mode = 0;
-char exp_modal_input[32] = {0};
-int exp_modal_input_len = 0;
 int exp_drag_idx = -1;
 int exp_drag_source_dir = -1;
 int exp_drag_armed = 0;
@@ -153,12 +145,22 @@ static void open_terminal_window() {
     gui_needs_redraw = 1;
 }
 
+static void open_explorer_window(int initial_dir) {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_EXPLORER);
+    if (idx == -1) return;
+    launch_user_explorer(initial_dir);
+    queue_user_explorer_event(USER_EXPLORER_EVT_OPEN_DIR, initial_dir);
+    windows[idx].visible = 1;
+    windows[idx].minimized = 0;
+    nwm_bring_to_front(idx);
+    gui_needs_redraw = 1;
+}
+
 static void open_narcpad_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
     if (idx == -1) return;
-    pad_file_idx = -1;
-    pad_content[0] = '\0';
-    strcpy(windows[idx].title, "untitled.txt");
+    launch_user_narcpad();
+    request_user_narcpad_new();
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -168,6 +170,7 @@ static void open_narcpad_window() {
 static void open_settings_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_SETTINGS);
     if (idx == -1) return;
+    launch_user_settings();
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -175,42 +178,23 @@ static void open_settings_window() {
 }
 
 static void open_file_in_narcpad_by_path(const char* path) {
-    int pidx;
-    int file_idx;
-    const char* file_name;
     if (!path || path[0] == '\0') return;
-    file_idx = fs_find_node(path);
-    if (file_idx < 0) return;
-    pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
-    if (pidx == -1) return;
-
-    if (fs_read_file_by_idx(file_idx, pad_content, sizeof(pad_content)) != 0) {
-        pad_content[0] = '\0';
+    launch_user_narcpad();
+    request_user_narcpad_open(path);
+    {
+        int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
+        if (pidx == -1) return;
+        windows[pidx].visible = 1;
+        windows[pidx].minimized = 0;
+        nwm_bring_to_front(pidx);
     }
-    pad_file_idx = file_idx;
-    file_name = path;
-    for (int i = 0; path[i] != '\0'; i++) {
-        if (path[i] == '/' && path[i + 1] != '\0') file_name = &path[i + 1];
-    }
-    strcpy(windows[pidx].title, file_name);
-    windows[pidx].visible = 1;
-    windows[pidx].minimized = 0;
-    nwm_bring_to_front(pidx);
     gui_needs_redraw = 1;
 }
 
-static void open_timezone_config_in_narcpad() {
-    const char* path = "/system/timezone.cfg";
-    if (fs_find_node(path) < 0) {
-        if (rtc_save_timezone_setting() != 0) return;
-    }
+int kernel_gui_open_narcpad_file(const char* path) {
+    if (!path || path[0] == '\0') return -1;
     open_file_in_narcpad_by_path(path);
-}
-
-static void settings_apply_timezone(int minutes) {
-    rtc_set_timezone_offset_minutes(minutes);
-    (void)rtc_save_timezone_setting();
-    gui_needs_redraw = 1;
+    return 0;
 }
 
 static int settings_handle_click(window_t* win, int mx, int my) {
@@ -222,41 +206,42 @@ static int settings_handle_click(window_t* win, int mx, int my) {
     local_x = mx - cx;
     local_y = my - cy;
     if (local_x < 0 || local_y < 0 || local_x >= cw || local_y >= ch) return 0;
+    if (!user_settings_running()) launch_user_settings();
 
     if (local_y >= 130 && local_y <= 152) {
         if (local_x >= 216 && local_x <= 278) {
-            settings_apply_timezone(rtc_get_timezone_offset_minutes() - 30);
+            queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, -30);
             return 1;
         }
         if (local_x >= 286 && local_x <= 348) {
-            settings_apply_timezone(rtc_get_timezone_offset_minutes() + 30);
+            queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, 30);
             return 1;
         }
         if (local_x >= 360 && local_x <= 486) {
-            open_timezone_config_in_narcpad();
+            queue_user_settings_event(USER_SETTINGS_EVT_OPEN_CONFIG, 0);
             return 1;
         }
     }
 
     if (local_y >= 180 && local_y <= 202) {
         if (local_x >= 24 && local_x <= 92) {
-            settings_apply_timezone(-300);
+            queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, -300);
             return 1;
         }
         if (local_x >= 102 && local_x <= 150) {
-            settings_apply_timezone(0);
+            queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 0);
             return 1;
         }
         if (local_x >= 160 && local_x <= 228) {
-            settings_apply_timezone(180);
+            queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 180);
             return 1;
         }
         if (local_x >= 238 && local_x <= 334) {
-            settings_apply_timezone(330);
+            queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 330);
             return 1;
         }
         if (local_x >= 344 && local_x <= 412) {
-            settings_apply_timezone(540);
+            queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 540);
             return 1;
         }
     }
@@ -265,201 +250,62 @@ static int settings_handle_click(window_t* win, int mx, int my) {
 }
 
 static void explorer_open_dir(int new_dir) {
-    if (new_dir < -1 || new_dir >= MAX_FILES) return;
-    if (new_dir >= 0 && dir_cache[new_dir].flags != FS_NODE_DIR) return;
-    if (exp_dir != new_dir) exp_prev_dir = exp_dir;
-    exp_dir = new_dir;
-    exp_selected = -1;
-    gui_needs_redraw = 1;
+    if (!user_explorer_running()) launch_user_explorer(new_dir);
+    queue_user_explorer_event(USER_EXPLORER_EVT_OPEN_DIR, new_dir);
 }
 
-int explorer_modal_active() { return exp_modal_mode != 0; }
+int explorer_modal_active() { return user_explorer_running() && user_explorer_state.modal_mode != USER_EXPLORER_MODAL_NONE; }
 
 void explorer_cancel_modal() {
-    exp_modal_mode = 0;
-    exp_modal_input_len = 0;
-    exp_modal_input[0] = '\0';
-    gui_needs_redraw = 1;
-}
-
-static void explorer_build_path(int dir_idx, char* out, int out_len) {
-    int chain[16];
-    int count = 0;
-    int pos = 0;
-    if (!out || out_len <= 0) return;
-    if (dir_idx < 0) {
-        if (out_len >= 2) {
-            out[0] = '/';
-            out[1] = '\0';
-        }
-        return;
-    }
-    while (dir_idx >= 0 && count < 16) {
-        chain[count++] = dir_idx;
-        dir_idx = dir_cache[dir_idx].parent_index;
-    }
-    out[pos++] = '/';
-    for (int i = count - 1; i >= 0 && pos < out_len - 1; i--) {
-        for (int j = 0; dir_cache[chain[i]].name[j] != '\0' && pos < out_len - 1; j++) {
-            out[pos++] = dir_cache[chain[i]].name[j];
-        }
-        if (i > 0 && pos < out_len - 1) out[pos++] = '/';
-    }
-    out[pos] = '\0';
-}
-
-static void append_text(char* dst, const char* src) {
-    int pos = 0;
-    while (dst[pos] != '\0') pos++;
-    while (*src) dst[pos++] = *src++;
-    dst[pos] = '\0';
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_MODAL_CANCEL, 0);
 }
 
 static int explorer_create_in_dir(int dir_idx, int is_dir) {
-    char base_path[256];
-    char full_path[320];
-    int n;
-    explorer_build_path(dir_idx, base_path, sizeof(base_path));
-    for (n = 1; n < 100; n++) {
-        full_path[0] = '\0';
-        append_text(full_path, base_path);
-        if (!(base_path[0] == '/' && base_path[1] == '\0')) append_text(full_path, "/");
-        if (is_dir) {
-            append_text(full_path, "NewFolder");
-        } else {
-            append_text(full_path, "NewFile");
-        }
-        if (n > 1) {
-            char num[8];
-            int len = 0;
-            int v = n;
-            char rev[8];
-            while (v > 0 && len < 7) { rev[len++] = (char)('0' + (v % 10)); v /= 10; }
-            for (int i = len - 1; i >= 0; i--) {
-                num[len - 1 - i] = rev[i];
-            }
-            num[len] = '\0';
-            append_text(full_path, num);
-        }
-        if (!is_dir) append_text(full_path, ".txt");
-        if (fs_find_node(full_path) == -1) {
-            if (is_dir) return fs_create_dir(full_path);
-            if (fs_create_file(full_path) == 0) return fs_write_file(full_path, "");
-            return -1;
-        }
-    }
-    return -1;
-}
-
-static void explorer_build_selected_path(char* out, int out_len) {
-    if (!out || out_len <= 0) return;
-    out[0] = '\0';
-    if (exp_selected < 0 || exp_selected >= MAX_FILES || dir_cache[exp_selected].flags == 0) return;
-    explorer_build_path(dir_cache[exp_selected].parent_index, out, out_len);
-    if (!(out[0] == '/' && out[1] == '\0')) append_text(out, "/");
-    append_text(out, dir_cache[exp_selected].name);
+    (void)dir_idx;
+    if (!user_explorer_running()) return -1;
+    queue_user_explorer_event(is_dir ? USER_EXPLORER_EVT_CREATE_DIR : USER_EXPLORER_EVT_CREATE_FILE, 0);
+    return 0;
 }
 
 static void explorer_open_selected(void) {
-    if (exp_selected < 0 || exp_selected >= MAX_FILES || dir_cache[exp_selected].flags == 0) return;
-    if (dir_cache[exp_selected].flags == FS_NODE_DIR) {
-        explorer_open_dir(exp_selected);
-        return;
-    }
-    {
-        int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
-        if (pidx != -1) {
-            fs_read_file_by_idx(exp_selected, pad_content, sizeof(pad_content));
-            pad_file_idx = exp_selected;
-            strcpy(windows[pidx].title, dir_cache[exp_selected].name);
-            windows[pidx].visible = 1;
-            nwm_bring_to_front(pidx);
-            gui_needs_redraw = 1;
-        }
-    }
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_OPEN_SELECTED, 0);
 }
 
 static void explorer_open_with_selected(void) {
     explorer_open_selected();
 }
 
-static int explorer_delete_selected(void) {
-    char path[320];
-    if (exp_selected < 0 || exp_selected >= MAX_FILES || dir_cache[exp_selected].flags == 0) return -1;
-    explorer_build_selected_path(path, sizeof(path));
-    if (path[0] == '\0') return -1;
-    if (fs_delete_file(path) == 0) {
-        exp_selected = -1;
-        gui_needs_redraw = 1;
-        return 0;
-    }
-    return -1;
-}
-
 static void explorer_begin_rename_selected(void) {
-    int i = 0;
-    if (exp_selected < 0 || exp_selected >= MAX_FILES || dir_cache[exp_selected].flags == 0) return;
-    while (dir_cache[exp_selected].name[i] != '\0' && i < 31) {
-        exp_modal_input[i] = dir_cache[exp_selected].name[i];
-        i++;
-    }
-    exp_modal_input[i] = '\0';
-    exp_modal_input_len = i;
-    exp_modal_mode = 1;
-    gui_needs_redraw = 1;
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_BEGIN_RENAME, 0);
 }
 
 static void explorer_begin_delete_selected(void) {
-    if (exp_selected < 0 || exp_selected >= MAX_FILES || dir_cache[exp_selected].flags == 0) return;
-    exp_modal_mode = 2;
-    gui_needs_redraw = 1;
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_BEGIN_DELETE, 0);
 }
 
 void explorer_modal_append_char(char c) {
-    if (exp_modal_mode != 1) return;
-    if (c == 0 || c == '/' || exp_modal_input_len >= 31) return;
-    exp_modal_input[exp_modal_input_len++] = c;
-    exp_modal_input[exp_modal_input_len] = '\0';
-    gui_needs_redraw = 1;
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_MODAL_CHAR, (int)c);
 }
 
 void explorer_modal_backspace() {
-    if (exp_modal_mode != 1 || exp_modal_input_len <= 0) return;
-    exp_modal_input_len--;
-    exp_modal_input[exp_modal_input_len] = '\0';
-    gui_needs_redraw = 1;
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_MODAL_BACKSPACE, 0);
 }
 
 void explorer_modal_submit() {
-    if (exp_modal_mode == 1) {
-        char path[320];
-        if (exp_selected >= 0 && exp_selected < MAX_FILES && dir_cache[exp_selected].flags != 0 && exp_modal_input[0] != '\0') {
-            explorer_build_selected_path(path, sizeof(path));
-            if (path[0] != '\0') fs_rename(path, exp_modal_input);
-        }
-        explorer_cancel_modal();
-    } else if (exp_modal_mode == 2) {
-        explorer_delete_selected();
-        explorer_cancel_modal();
-    }
+    if (!user_explorer_running()) return;
+    queue_user_explorer_event(USER_EXPLORER_EVT_MODAL_SUBMIT, 0);
 }
 
 static int explorer_move_selected_to(int target_dir) {
-    char path[320];
-    char target_path[256];
-    if (exp_drag_idx < 0 || exp_drag_idx >= MAX_FILES || dir_cache[exp_drag_idx].flags == 0) return -1;
-    if (target_dir >= 0 && dir_cache[target_dir].flags != FS_NODE_DIR) return -1;
-    if (exp_drag_idx == target_dir) return -1;
-    explorer_build_path(dir_cache[exp_drag_idx].parent_index, path, sizeof(path));
-    if (!(path[0] == '/' && path[1] == '\0')) append_text(path, "/");
-    append_text(path, dir_cache[exp_drag_idx].name);
-    explorer_build_path(target_dir, target_path, sizeof(target_path));
-    if (fs_move_file(path, target_path) == 0) {
-        exp_selected = -1;
-        gui_needs_redraw = 1;
-        return 0;
-    }
-    return -1;
+    if (!user_explorer_running()) return -1;
+    queue_user_explorer_event(USER_EXPLORER_EVT_MOVE_SELECTED_TO, target_dir);
+    return 0;
 }
 
 extern void isr_default();
@@ -1058,302 +904,89 @@ void vbe_compose_scene_basic() {
     vbe_render_mouse(mx, my);
 }
 
-void execute_command(char* cmd) {
+static int run_usermode_test_command(void) {
+    extern void jump_to_usermode_v9(uint32_t eip, uint32_t esp, uint32_t lfb);
+    extern void usermode_entry_gate();
+    uint32_t user_esp = 0x90000;
+    uint32_t lfb_addr = *(uint32_t*)(0x6100 + 40);
+    uint32_t target_eip = (uint32_t)usermode_entry_gate;
+    uint32_t* magic_ptr = (uint32_t*)(target_eip - 4);
+    char buf[64];
+
+    vga_println("Launching Secure User Mode Test V12 (Final Victory)...");
+    vga_print("Target EIP Sym: ");
+    vga_print_int_hex(target_eip, buf);
+    vga_println(buf);
+
+    if (*magic_ptr != 0xDEADC0DE) {
+        vga_println("CRITICAL: MAGIC NUMBER MISMATCH!");
+        return -1;
+    }
+
+    vga_println("Magic Recognized. Transitioning to Ring 3...");
+    vga_println("Verification: If the heartbeat pixel is rotating and the");
+    vga_println("mouse is responsive, the transition was successful!");
+
+    set_tss_stack(KERNEL_BOOT_STACK_TOP);
+    jump_to_usermode_v9(target_eip, user_esp, lfb_addr);
+    return 0;
+}
+
+int kernel_run_privileged_command(int cmd, const char* arg) {
+    const char* value = arg ? arg : "";
     int graphics_mode = screen_is_graphics_enabled();
 
-    if (cmd[0] == '\0') return;
-    char arg1[32] = {0};
-    char arg2[128] = {0};
-    int i = 0, j = 0;
-    while (cmd[i] != ' ' && cmd[i] != '\0' && i < 31) {
-        arg1[i] = cmd[i];
-        i++;
+    switch (cmd) {
+        case PRIV_CMD_SNAKE:
+            if (!graphics_mode) return -1;
+            open_snake_window();
+            vga_println("Snake launched in Ring 3.");
+            return 0;
+        case PRIV_CMD_SETTINGS:
+            if (!graphics_mode) return -1;
+            open_settings_window();
+            vga_println("Settings opened.");
+            return 0;
+        case PRIV_CMD_EDIT:
+            if (value[0] == '\0') return -1;
+            editor_start(value);
+            clear_screen();
+            return 0;
+        case PRIV_CMD_MEM:
+            print_memory_info();
+            return 0;
+        case PRIV_CMD_MALLOC_TEST:
+            malloc_test();
+            return 0;
+        case PRIV_CMD_USERMODE_TEST:
+            if (!graphics_mode) return -1;
+            return run_usermode_test_command();
+        case PRIV_CMD_HWINFO:
+            print_hardware_info();
+            return 0;
+        case PRIV_CMD_PCI:
+            pci_print_devices();
+            return 0;
+        case PRIV_CMD_STORAGE:
+            pci_print_storage_devices();
+            storage_print_status();
+            return 0;
+        case PRIV_CMD_LOG:
+            print_kernel_log();
+            return 0;
+        case PRIV_CMD_REBOOT:
+            reboot_system();
+            return 0;
+        case PRIV_CMD_POWEROFF:
+            poweroff_system();
+            return 0;
+        default:
+            return -1;
     }
-    arg1[i] = '\0';
-    while (cmd[i] == ' ') i++;
-    while (cmd[i] != '\0' && j < 127) {
-        arg2[j] = cmd[i];
-        i++; j++;
-    }
-    arg2[j] = '\0';
-    if (strcmp(arg1, "help") == 0) {
-        vga_println("NarcOs Shell");
-        vga_println("  help   - Show this menu");
-        vga_println("  clear  - Clear the screen");
-        vga_println("  mem    - Memory map");
-        if (graphics_mode) vga_println("  snake  - Snake game");
-        else vga_println("  snake  - Snake game (requires graphics mode)");
-        if (graphics_mode) vga_println("  settings - Open settings");
-        else vga_println("  settings - Open settings (requires graphics mode)");
-        vga_println("  ver    - Show version");
-        vga_println("  uptime - Show system uptime in seconds");
-        vga_println("  date   - Show current local date");
-        vga_println("  time   - Show current local time");
-        vga_println("  ls     - List files");
-        vga_println("  pwd    - Show current path");
-        vga_println("  touch  - Create empty file (touch <file>)");
-        vga_println("  cat    - Read file (cat <file>)");
-        vga_println("  write  - Write to file (write <file> <text>)");
-        vga_println("  edit   - Open file in NarcVim (edit <file>)");
-        vga_println("  mkdir  - Create directory (mkdir <name>)");
-        vga_println("  cd     - Change directory (cd <name> or cd ..)");
-        vga_println("  rm     - Delete file (rm <file>)");
-        vga_println("  mv     - Move item (mv <src> <target-dir>)");
-        vga_println("  ren    - Rename item (ren <path> <new-name>)");
-        vga_println("  net    - Show network status");
-        vga_println("  dhcp   - Request IPv4 configuration");
-        vga_println("  dns    - Resolve hostname to IPv4");
-        vga_println("  ping   - Ping an IPv4 host");
-        vga_println("  ntp    - Query UTC time from an NTP server");
-        vga_println("  http   - Fetch HTTP/1.0 response (http <host> [path])");
-        vga_println("  netdemo - Run Ring 3 HTTP demo (netdemo <host> [path])");
-        vga_println("  fetch  - Download HTTP body to a file (fetch <host> [path] <file>)");
-        vga_println("  hwinfo - Show hardware summary");
-        vga_println("  pci    - List PCI devices");
-        vga_println("  storage - List storage controllers, partitions and active backend");
-        vga_println("  log    - Show kernel ring log");
-        vga_println("  reboot - Reboot system");
-        vga_println("  poweroff - Power off system");
-        vga_println("  malloc_test - Test dynamic heap memory");
-        vga_println("  usermode_test - Test Ring 3 transition and syscall");
-    } else if (strcmp(arg1, "usermode_test") == 0) {
-        if (!graphics_mode) {
-            vga_print_color("error: usermode_test requires graphics mode.\n", 0x0C);
-            return;
-        }
-        vga_println("Launching Secure User Mode Test V12 (Final Victory)...");
-        extern void jump_to_usermode_v9(uint32_t eip, uint32_t esp, uint32_t lfb);
-        extern void usermode_entry_gate();
-        
-        uint32_t user_esp = 0x90000; 
-        uint32_t lfb_addr = *(uint32_t*)(0x6100 + 40);
+}
 
-        char buf[64];
-        uint32_t target_eip = (uint32_t)usermode_entry_gate;
-        uint32_t* magic_ptr = (uint32_t*)(target_eip - 4);
-        
-        vga_print("Target EIP Sym: ");
-        vga_print_int_hex(target_eip, buf);
-        vga_println(buf);
-
-        if (*magic_ptr != 0xDEADC0DE) {
-            vga_println("CRITICAL: MAGIC NUMBER MISMATCH!");
-            return;
-        }
-
-        vga_println("Magic Recognized. Transitioning to Ring 3...");
-        vga_println("Verification: If the heartbeat pixel is rotating and the");
-        vga_println("mouse is responsive, the transition was successful!");
-
-        set_tss_stack(KERNEL_BOOT_STACK_TOP); 
-        
-        jump_to_usermode_v9(target_eip, user_esp, lfb_addr);
-    } else if (strcmp(arg1, "snake") == 0) {
-        if (!graphics_mode) {
-            vga_print_color("error: snake requires graphics mode.\n", 0x0C);
-            return;
-        }
-        open_snake_window();
-        vga_println("Snake launched in Ring 3.");
-    } else if (strcmp(arg1, "settings") == 0) {
-        if (!graphics_mode) {
-            vga_print_color("error: settings requires graphics mode.\n", 0x0C);
-            return;
-        }
-        open_settings_window();
-        vga_println("Settings opened.");
-    } else if (strcmp(arg1, "clear") == 0) {
-        clear_screen();
-    } else if (strcmp(arg1, "mem") == 0) {
-        print_memory_info();
-    } else if (strcmp(arg1, "malloc_test") == 0) {
-        malloc_test();
-    } else if (strcmp(arg1, "ver") == 0) {
-        vga_println("NarcOs");
-    } else if (strcmp(arg1, "uptime") == 0) {
-        vga_print("System Uptime (seconds): ");
-        vga_print_int(timer_ticks / 100);
-        vga_println("");
-    } else if (strcmp(arg1, "date") == 0) {
-        read_rtc();
-        vga_print("Current Local Date: 20");
-        vga_print_int(get_year());
-        vga_print("-");
-        if (get_month() < 10) vga_print("0");
-        vga_print_int(get_month());
-        vga_print("-");
-        if (get_day() < 10) vga_print("0");
-        vga_print_int(get_day());
-        vga_println("");
-    } else if (strcmp(arg1, "time") == 0) {
-        read_rtc();
-        vga_print("Current Local Time: ");
-        if (get_hour() < 10) vga_print("0");
-        vga_print_int(get_hour());
-        vga_print(":");
-        if (get_minute() < 10) vga_print("0");
-        vga_print_int(get_minute());
-        vga_print(":");
-        if (get_second() < 10) vga_print("0");
-        vga_print_int(get_second());
-        vga_println("");
-    } else if (strcmp(arg1, "ls") == 0) {
-        fs_list_dir();
-    } else if (strcmp(arg1, "pwd") == 0) {
-        char path[256];
-        fs_get_current_path(path, sizeof(path));
-        vga_println(path);
-    } else if (strcmp(arg1, "touch") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: touch <file>\n", 0x0E);
-            return;
-        }
-        if (fs_create_file(arg2) == 0 || fs_find_node(arg2) >= 0) {
-            vga_println("Success.");
-        } else {
-            vga_print_color("error: Failed to create file.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "cat") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: cat <file>\n", 0x0E);
-            return;
-        }
-        char buffer[2048] = {0};
-        if (fs_read_file(arg2, buffer, sizeof(buffer)) == 0) {
-            vga_println(buffer);
-        } else {
-            vga_print_color("error: File not found.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "write") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: write <file> <text>\n", 0x0E);
-            return;
-        }
-        char file_name[32] = {0};
-        int k = 0;
-        while(arg2[k] != ' ' && arg2[k] != '\0' && k < 31) {
-            file_name[k] = arg2[k];
-            k++;
-        }
-        file_name[k] = '\0';
-        while (arg2[k] == ' ') k++;
-        char* file_content = &arg2[k];
-        if (file_content[0] == '\0') {
-            vga_print_color("error: Text cannot be empty.\n", 0x0C);
-            return;
-        }
-        if (fs_write_file(file_name, file_content) == 0) {
-            vga_println("Success.");
-        } else {
-            vga_print_color("error: Failed to create file or not enough space.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "edit") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: edit <file>\n", 0x0E);
-            return;
-        }
-        editor_start(arg2);
-        clear_screen();
-        vga_print_color("Exited NarcVim. ", 0x0A);
-        vga_println(arg2);
-    } else if (strcmp(arg1, "mkdir") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: mkdir <name>\n", 0x0E);
-            return;
-        }
-        if (fs_create_dir(arg2) == 0) {
-            vga_println("Directory created.");
-        } else {
-            vga_print_color("error: Failed to create directory.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "cd") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: cd <name>\n", 0x0E);
-            return;
-        }
-        if (fs_change_dir(arg2) != 0) {
-            vga_print_color("error: Directory not found.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "rm") == 0) {
-        if (arg2[0] == '\0') {
-            vga_print_color("Usage: rm <file>\n", 0x0E);
-            return;
-        }
-        if (fs_delete_file(arg2) == 0) {
-            vga_println("Success. Item deleted.");
-        } else {
-            vga_print_color("error: Item not found or directory not empty.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "mv") == 0) {
-        char src[64] = {0};
-        int k = 0;
-        while (arg2[k] != ' ' && arg2[k] != '\0' && k < 63) {
-            src[k] = arg2[k];
-            k++;
-        }
-        src[k] = '\0';
-        while (arg2[k] == ' ') k++;
-        if (src[0] == '\0' || arg2[k] == '\0') {
-            vga_print_color("Usage: mv <src> <target-dir>\n", 0x0E);
-            return;
-        }
-        if (fs_move_file(src, &arg2[k]) == 0) {
-            vga_println("Success.");
-        } else {
-            vga_print_color("error: Move failed.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "ren") == 0) {
-        char src[64] = {0};
-        int k = 0;
-        while (arg2[k] != ' ' && arg2[k] != '\0' && k < 63) {
-            src[k] = arg2[k];
-            k++;
-        }
-        src[k] = '\0';
-        while (arg2[k] == ' ') k++;
-        if (src[0] == '\0' || arg2[k] == '\0') {
-            vga_print_color("Usage: ren <path> <new-name>\n", 0x0E);
-            return;
-        }
-        if (fs_rename(src, &arg2[k]) == 0) {
-            vga_println("Success.");
-        } else {
-            vga_print_color("error: Rename failed.\n", 0x0C);
-        }
-    } else if (strcmp(arg1, "net") == 0) {
-        net_print_status();
-    } else if (strcmp(arg1, "dhcp") == 0) {
-        (void)net_run_dhcp(1);
-    } else if (strcmp(arg1, "dns") == 0) {
-        (void)net_dns_command(arg2);
-    } else if (strcmp(arg1, "ping") == 0) {
-        (void)net_ping_command(arg2);
-    } else if (strcmp(arg1, "ntp") == 0) {
-        (void)net_ntp_command(arg2);
-    } else if (strcmp(arg1, "http") == 0) {
-        (void)net_http_command(arg2);
-    } else if (strcmp(arg1, "netdemo") == 0) {
-        (void)run_user_netdemo(arg2);
-    } else if (strcmp(arg1, "fetch") == 0) {
-        (void)run_user_fetch(arg2);
-    } else if (strcmp(arg1, "hwinfo") == 0) {
-        print_hardware_info();
-    } else if (strcmp(arg1, "pci") == 0) {
-        pci_print_devices();
-    } else if (strcmp(arg1, "storage") == 0) {
-        pci_print_storage_devices();
-        storage_print_status();
-    } else if (strcmp(arg1, "log") == 0) {
-        print_kernel_log();
-    } else if (strcmp(arg1, "reboot") == 0) {
-        reboot_system();
-    } else if (strcmp(arg1, "poweroff") == 0) {
-        poweroff_system();
-    } else {
-        vga_print_color("Error: Unknown command '", 0x0C);
-        vga_print_color(arg1, 0x0C);
-        vga_println("'");
-    }
+void execute_command(char* cmd) {
+    (void)run_user_shell_command(cmd);
 }
 
 extern char cmd_to_execute[128];
@@ -1409,9 +1042,6 @@ static void desktop_process_main(void) {
     fs_change_dir("user");
     fs_change_dir("Desktop");
     desk_dir_idx = current_dir_index;
-    exp_dir = desk_dir_idx;
-    exp_prev_dir = -1;
-    exp_selected = -1;
 
     uint32_t last_clock_tick = 0;
     uint32_t last_click_tick = 0;
@@ -1465,7 +1095,7 @@ static void desktop_process_main(void) {
                     int hit_slot = (my - list_y) / row_h;
                     int current_slot = 0;
                     for (int i = 0; i < MAX_FILES; i++) {
-                        if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == exp_dir) {
+                        if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) {
                             if (current_slot == hit_slot && dir_cache[i].flags == FS_NODE_DIR) {
                                 explorer_move_selected_to(i);
                                 break;
@@ -1512,11 +1142,7 @@ static void desktop_process_main(void) {
                  if (ctx_selected != -1) {
                      const char* cmd = ctx_items[ctx_selected];
                      if (strcmp(cmd, "Save") == 0) {
-                         int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
-                         if (pidx != -1) {
-                             if (pad_file_idx >= 0) fs_write_file_by_idx(pad_file_idx, pad_content);
-                             else fs_write_file(windows[pidx].title, pad_content);
-                         }
+                         queue_user_narcpad_event(USER_NARCPAD_EVT_SAVE, 0);
                      } else if (strcmp(cmd, "Open") == 0) {
                          explorer_open_selected();
                      } else if (strcmp(cmd, "Open With") == 0) {
@@ -1526,14 +1152,14 @@ static void desktop_process_main(void) {
                      } else if (strcmp(cmd, "Delete") == 0) {
                          explorer_begin_delete_selected();
                      } else if (strcmp(cmd, "New File") == 0) {
-                         explorer_create_in_dir(exp_dir, 0);
+                         explorer_create_in_dir(user_explorer_state.current_dir, 0);
                      } else if (strcmp(cmd, "New Folder") == 0) {
-                         explorer_create_in_dir(exp_dir, 1);
+                         explorer_create_in_dir(user_explorer_state.current_dir, 1);
                      } else if (strcmp(cmd, "Close") == 0) {
                          int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
                          if (pidx != -1) windows[pidx].visible = 0;
-                         pad_file_idx = -1;
                      } else if (strcmp(cmd, "Refresh") == 0) {
+                         if (user_explorer_running()) queue_user_explorer_event(USER_EXPLORER_EVT_REFRESH, 0);
                          gui_needs_redraw = 1;
                      }
                  }
@@ -1633,18 +1259,19 @@ static void desktop_process_main(void) {
                         }
                         else if (my >= panel_y + 8 && my <= panel_y + 28) {
                             if (mx >= content_x + 12 && mx <= content_x + 58) {
-                                if (exp_prev_dir != -1) explorer_open_dir(exp_prev_dir);
+                                if (user_explorer_state.prev_dir != -1) explorer_open_dir(user_explorer_state.prev_dir);
                             } else if (mx >= content_x + 66 && mx <= content_x + 104) {
-                                if (exp_dir != -1) explorer_open_dir(dir_cache[exp_dir].parent_index);
+                                if (user_explorer_state.current_dir != -1) explorer_open_dir(dir_cache[user_explorer_state.current_dir].parent_index);
                             } else if (mx >= content_x + 112 && mx <= content_x + 182) {
-                                if (explorer_create_in_dir(exp_dir, 0) == 0) gui_needs_redraw = 1;
+                                if (explorer_create_in_dir(user_explorer_state.current_dir, 0) == 0) gui_needs_redraw = 1;
                             } else if (mx >= content_x + 190 && mx <= content_x + 274) {
-                                if (explorer_create_in_dir(exp_dir, 1) == 0) gui_needs_redraw = 1;
+                                if (explorer_create_in_dir(user_explorer_state.current_dir, 1) == 0) gui_needs_redraw = 1;
                             } else if (mx >= content_x + 282 && mx <= content_x + 342) {
                                 explorer_begin_rename_selected();
                             } else if (mx >= content_x + 350 && mx <= content_x + 404) {
                                 explorer_begin_delete_selected();
                             } else if (mx >= content_x + content_w - 76 && mx <= content_x + content_w - 16) {
+                                if (user_explorer_running()) queue_user_explorer_event(USER_EXPLORER_EVT_REFRESH, 0);
                                 gui_needs_redraw = 1;
                             }
                         }
@@ -1667,23 +1294,13 @@ static void desktop_process_main(void) {
                                 int hit_slot = (my - list_y) / row_h;
                                 int current_slot = 0;
                                 for (int i = 0; i < MAX_FILES; i++) {
-                                    if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == exp_dir) {
+                                    if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) {
                                         if (current_slot == hit_slot) {
-                                            exp_selected = i;
+                                            queue_user_explorer_event(USER_EXPLORER_EVT_SELECT_IDX, i);
                                             exp_drag_idx = i;
-                                            exp_drag_source_dir = exp_dir;
+                                            exp_drag_source_dir = user_explorer_state.current_dir;
                                             exp_drag_armed = 1;
-                                            if (dir_cache[i].flags == 2) {
-                                                explorer_open_dir(i);
-                                            } else {
-                                                int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
-                                                if (pidx != -1) {
-                                                    fs_read_file_by_idx(i, pad_content, sizeof(pad_content));
-                                                    pad_file_idx = i;
-                                                    strcpy(windows[pidx].title, dir_cache[i].name);
-                                                    windows[pidx].visible = 1; nwm_bring_to_front(pidx); gui_needs_redraw = 1;
-                                                }
-                                            }
+                                            explorer_open_selected();
                                             break;
                                         }
                                         current_slot++;
@@ -1696,13 +1313,16 @@ static void desktop_process_main(void) {
                             if (mx >= card_x0 && mx <= card_x1 && my >= list_y) {
                                 int hit_slot = (my - list_y) / row_h;
                                 int current_slot = 0;
-                                exp_selected = -1;
+                                queue_user_explorer_event(USER_EXPLORER_EVT_SELECT_IDX, -1);
+                                exp_drag_idx = -1;
+                                exp_drag_source_dir = -1;
+                                exp_drag_armed = 0;
                                 for (int i = 0; i < MAX_FILES; i++) {
-                                    if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == exp_dir) {
+                                    if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) {
                                         if (current_slot == hit_slot) {
-                                            exp_selected = i;
+                                            queue_user_explorer_event(USER_EXPLORER_EVT_SELECT_IDX, i);
                                             exp_drag_idx = i;
-                                            exp_drag_source_dir = exp_dir;
+                                            exp_drag_source_dir = user_explorer_state.current_dir;
                                             exp_drag_armed = 1;
                                             gui_needs_redraw = 1;
                                             break;
@@ -1719,8 +1339,7 @@ static void desktop_process_main(void) {
                     if (start_menu_visible && (mx > 200 || my > 335)) { start_menu_visible = 0; gui_needs_redraw = 1; }
                     if (mx >= 20 && mx <= 60) {
                         if (my >= 60 && my <= 110 && double_click) { 
-                            int idx = nwm_get_idx_by_type(WIN_TYPE_EXPLORER);
-                            if (idx != -1) { windows[idx].visible = 1; nwm_bring_to_front(idx); gui_needs_redraw = 1; }
+                            open_explorer_window(desk_dir_idx);
                         }
                         else if (my >= 300 && my <= 350 && double_click) { 
                             open_snake_window();
@@ -1732,16 +1351,11 @@ static void desktop_process_main(void) {
                                 if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == desk_dir_idx) {
                                     if (current_row == row_idx) {
                                         if (dir_cache[i].flags == 2) {
-                                            int idx = nwm_get_idx_by_type(WIN_TYPE_EXPLORER);
-                                            if (idx != -1) { explorer_open_dir(i); windows[idx].visible = 1; nwm_bring_to_front(idx); }
+                                            open_explorer_window(i);
                                         } else {
-                                            int idx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
-                                            if (idx != -1) {
-                                                fs_read_file_by_idx(i, pad_content, sizeof(pad_content));
-                                                pad_file_idx = i;
-                                                strcpy(windows[idx].title, dir_cache[i].name);
-                                                windows[idx].visible = 1; nwm_bring_to_front(idx); gui_needs_redraw = 1;
-                                            }
+                                            char path[256];
+                                            fs_get_path_by_index(i, path, sizeof(path));
+                                            open_file_in_narcpad_by_path(path);
                                         }
                                         break;
                                     }

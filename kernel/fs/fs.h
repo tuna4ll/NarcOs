@@ -30,4 +30,7 @@ void fs_sync();
 void get_current_dir_name(char* buf);
 void fs_get_current_path(char* buf, size_t max_len);
 int fs_find_node(const char* path);
+int fs_list_dir_entries(disk_fs_node_t* out_entries, int max_entries);
+int fs_get_node_info(int idx, disk_fs_node_t* out_node);
+void fs_get_path_by_index(int idx, char* buf, size_t max_len);
 #endif

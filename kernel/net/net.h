@@ -55,6 +55,14 @@ typedef struct {
     uint32_t complete;
 } net_http_result_t;
 
+typedef struct {
+    uint32_t resolved_ip;
+    uint32_t attempts;
+    uint32_t success_count;
+    int32_t reply_status[4];
+    uint32_t rtt_ms[4];
+} net_ping_result_t;
+
 void net_init();
 void net_poll();
 int net_is_available();
@@ -75,6 +83,7 @@ int net_socket_available(int handle);
 int net_socket_close(int handle);
 int net_http_fetch(const char* target, char* response, uint16_t response_buf_len,
                    net_http_result_t* out_result);
+int net_ping_host(const char* target, net_ping_result_t* out_result);
 void net_print_status();
 int net_run_dhcp(int verbose);
 int net_dns_command(const char* host);

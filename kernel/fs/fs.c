@@ -380,6 +380,26 @@ void fs_list_dir() {
         }
     }
 }
+
+int fs_list_dir_entries(disk_fs_node_t* out_entries, int max_entries) {
+    int count = 0;
+
+    if (!out_entries || max_entries <= 0) return -1;
+    for (int i = 0; i < MAX_FILES && count < max_entries; i++) {
+        if (dir_cache[i].flags == 0 || dir_cache[i].parent_index != current_dir_index) continue;
+        out_entries[count++] = dir_cache[i];
+    }
+    return count;
+}
+
+int fs_get_node_info(int idx, disk_fs_node_t* out_node) {
+    if (!out_node) return -1;
+    if (idx < 0 || idx >= MAX_FILES) return -1;
+    if (dir_cache[idx].flags == 0) return -1;
+    *out_node = dir_cache[idx];
+    return 0;
+}
+
 void get_current_dir_name(char* buf) {
     if (current_dir_index == FS_ROOT_INDEX) {
         buf[0] = '\0';
@@ -399,6 +419,54 @@ int fs_find_node(const char* path) {
     int parent = fs_walk_path(path, 1, leaf);
     if (parent == FS_INVALID_INDEX || leaf[0] == '\0') return -1;
     return fs_find_child(parent, leaf, 0);
+}
+
+void fs_get_path_by_index(int idx, char* buf, size_t max_len) {
+    char temp[256];
+    int segments[32];
+    int count = 0;
+
+    if (!buf || max_len == 0) return;
+    buf[0] = '\0';
+    if (idx == FS_ROOT_INDEX) {
+        if (max_len >= 2) {
+            buf[0] = '/';
+            buf[1] = '\0';
+        }
+        return;
+    }
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags == 0) return;
+
+    while (idx >= 0 && count < 32) {
+        segments[count++] = idx;
+        idx = dir_cache[idx].parent_index;
+    }
+
+    temp[0] = '\0';
+    for (int i = count - 1; i >= 0; i--) {
+        size_t len = strlen(temp);
+        if (len + 1 >= sizeof(temp)) break;
+        temp[len] = '/';
+        temp[len + 1] = '\0';
+        len++;
+        size_t j = 0;
+        while (dir_cache[segments[i]].name[j] != '\0' && len + j + 1 < sizeof(temp)) {
+            temp[len + j] = dir_cache[segments[i]].name[j];
+            j++;
+        }
+        temp[len + j] = '\0';
+    }
+
+    if (temp[0] == '\0') {
+        if (max_len >= 2) {
+            buf[0] = '/';
+            buf[1] = '\0';
+        }
+        return;
+    }
+
+    strncpy(buf, temp, max_len - 1);
+    buf[max_len - 1] = '\0';
 }
 
 void fs_get_current_path(char* buf, size_t max_len) {

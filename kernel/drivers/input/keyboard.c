@@ -58,8 +58,6 @@ extern volatile int snk_next_dir;
 extern volatile int editor_running;
 extern volatile int editor_input_key;
 extern volatile int editor_special_key;
-extern char pad_content[1024];
-extern int pad_file_idx;
 extern volatile int gui_needs_redraw;
 extern int explorer_modal_active();
 extern void explorer_cancel_modal();
@@ -212,21 +210,15 @@ void handle_keyboard()
         if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
         else if (capslock_active && c >= 'A' && c <= 'Z') c += 32;
 
-        size_t len = 0;
-        while(pad_content[len]) len++;
-
         if (is_ctrl && scancode == 0x1F) {
-            if (pad_file_idx >= 0) fs_write_file_by_idx(pad_file_idx, pad_content);
-            else fs_write_file(windows[active_window_idx].title, pad_content);
+            queue_user_narcpad_event(USER_NARCPAD_EVT_SAVE, 0);
         } else if (scancode == 0x0E) {
-            if (len > 0) pad_content[len-1] = '\0';
+            queue_user_narcpad_event(USER_NARCPAD_EVT_BACKSPACE, 0);
         } else if (scancode == 0x1C) {
-            if (len < 1022) { pad_content[len] = '\n'; pad_content[len+1] = '\0'; }
-        } else if (c != 0 && len < 1023) {
-            pad_content[len] = c;
-            pad_content[len+1] = '\0';
+            queue_user_narcpad_event(USER_NARCPAD_EVT_NEWLINE, 0);
+        } else if (c != 0) {
+            queue_user_narcpad_event(USER_NARCPAD_EVT_CHAR, (int)c);
         }
-        gui_needs_redraw = 1;
         outb(0x20, 0x20);
         return;
     }

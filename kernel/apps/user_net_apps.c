@@ -3,9 +3,15 @@
 #include "net.h"
 #include "usermode.h"
 #include "user_abi.h"
+#include "user_net_apps.h"
 
 #define USER_CODE __attribute__((section(".user_code")))
 #define USER_RODATA __attribute__((section(".user_rodata")))
+
+#include "user_string.h"
+
+#define strlen user_strlen
+#define memset user_memset
 #define USER_HTTP_IDLE_TIMEOUT 300U
 #define USER_HTTP_TOTAL_TIMEOUT 1200U
 
@@ -35,9 +41,9 @@ static USER_CODE int user_append_text(char* dst, uint16_t dst_len, uint16_t* io_
     return NET_OK;
 }
 
-static USER_CODE int user_http_fetch_text(const char* host, const char* path,
-                                          char* response, uint16_t response_cap,
-                                          net_http_result_t* out_result) {
+int USER_CODE user_http_fetch_text(const char* host, const char* path,
+                                   char* response, uint16_t response_cap,
+                                   net_http_result_t* out_result) {
     char request[512];
     char discard[128];
     uint16_t request_off = 0;
@@ -147,7 +153,7 @@ static USER_CODE int user_http_fetch_text(const char* host, const char* path,
     return response_off != 0U ? NET_OK : NET_ERR_TIMEOUT;
 }
 
-static USER_CODE uint32_t user_http_find_body(const char* response, uint32_t length) {
+uint32_t USER_CODE user_http_find_body(const char* response, uint32_t length) {
     for (uint32_t i = 0; i + 3U < length; i++) {
         if (response[i] == '\r' && response[i + 1U] == '\n' &&
             response[i + 2U] == '\r' && response[i + 3U] == '\n') {
