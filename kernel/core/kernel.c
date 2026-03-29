@@ -126,6 +126,49 @@ int nwm_find_window_at(int mx, int my) {
     return -1;
 }
 
+#define DESKTOP_CLICK_TARGET_NONE           (-1)
+#define DESKTOP_CLICK_TARGET_EXPLORER_ICON  1
+#define DESKTOP_CLICK_TARGET_SNAKE_ICON     2
+#define DESKTOP_CLICK_TARGET_FILE_BASE      100
+#define DESKTOP_CLICK_TARGET_EXPLORER_BASE  1000
+#define DESKTOP_DOUBLE_CLICK_TICKS          70U
+
+static int get_desktop_click_target(int mx, int my) {
+    if (mx < 20 || mx > 60) return DESKTOP_CLICK_TARGET_NONE;
+    if (my >= 60 && my <= 110) return DESKTOP_CLICK_TARGET_EXPLORER_ICON;
+    if (my >= 300 && my <= 350) return DESKTOP_CLICK_TARGET_SNAKE_ICON;
+    if (my >= 140) return DESKTOP_CLICK_TARGET_FILE_BASE + ((my - 140) / 80);
+    return DESKTOP_CLICK_TARGET_NONE;
+}
+
+static int get_explorer_list_click_target(int mx, int my, window_t* win) {
+    int client_x;
+    int client_y;
+    int client_w;
+    int sidebar_w;
+    int content_x;
+    int content_w;
+    int panel_y;
+    int list_y;
+    int row_h;
+
+    if (!win || win->type != WIN_TYPE_EXPLORER) return DESKTOP_CLICK_TARGET_NONE;
+    client_x = win->x + 8;
+    client_y = win->y + 40;
+    client_w = win->w - 16;
+    sidebar_w = 136;
+    content_x = client_x + sidebar_w + 14;
+    content_w = client_w - sidebar_w - 26;
+    panel_y = client_y + 36;
+    list_y = panel_y + 48;
+    row_h = 54;
+
+    if (mx < content_x + 16 || mx > content_x + content_w - 16 || my < list_y) {
+        return DESKTOP_CLICK_TARGET_NONE;
+    }
+    return DESKTOP_CLICK_TARGET_EXPLORER_BASE + ((my - list_y) / row_h);
+}
+
 static void open_snake_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_SNAKE);
     if (idx == -1) return;
@@ -1045,6 +1088,7 @@ static void desktop_process_main(void) {
 
     uint32_t last_clock_tick = 0;
     uint32_t last_click_tick = 0;
+    int last_click_target = DESKTOP_CLICK_TARGET_NONE;
     int last_mx = 0, last_my = 0, last_lp = 0, last_rp = 0;
     int mx = get_mouse_x();
     int my = get_mouse_y();
@@ -1188,7 +1232,20 @@ static void desktop_process_main(void) {
                     goto process_done;
                 }
             }
-            int double_click = (timer_ticks - last_click_tick < 40);
+            int click_target = DESKTOP_CLICK_TARGET_NONE;
+            int preview_hit_win = -1;
+            if (my > 35) {
+                preview_hit_win = nwm_find_window_at(mx, my);
+                if (preview_hit_win != -1 && windows[preview_hit_win].type == WIN_TYPE_EXPLORER) {
+                    click_target = get_explorer_list_click_target(mx, my, &windows[preview_hit_win]);
+                } else if (preview_hit_win == -1) {
+                    click_target = get_desktop_click_target(mx, my);
+                }
+            }
+            int double_click = (click_target != DESKTOP_CLICK_TARGET_NONE &&
+                                click_target == last_click_target &&
+                                timer_ticks - last_click_tick < DESKTOP_DOUBLE_CLICK_TICKS);
+            last_click_target = click_target;
             last_click_tick = timer_ticks;
             if (my <= 35) {
                 if (mx >= 5 && mx <= 89) { start_menu_visible = !start_menu_visible; gui_needs_redraw = 1; }
