@@ -1,6 +1,7 @@
 #ifndef USER_ABI_H
 #define USER_ABI_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "fs.h"
 #include "net.h"
@@ -65,6 +66,18 @@ static inline void user_print_raw(const char* text) {
 
 static inline uint32_t user_uptime_ticks(void) {
     return (uint32_t)user_syscall0(SYS_UPTIME);
+}
+
+static inline void* user_malloc(size_t size) {
+    return (void*)(uintptr_t)user_syscall1(SYS_MALLOC, (uint32_t)size);
+}
+
+static inline void user_free(void* ptr) {
+    (void)user_syscall1(SYS_FREE, (uint32_t)(uintptr_t)ptr);
+}
+
+static inline int user_getrandom(void* buf, uint32_t len) {
+    return user_syscall2(SYS_GETRANDOM, (uint32_t)(uintptr_t)buf, len);
 }
 
 static inline int user_fs_read(const char* path, char* buffer, uint32_t max_len) {

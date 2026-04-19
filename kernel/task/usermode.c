@@ -1,9 +1,12 @@
 #include "usermode.h"
 #include "paging.h"
 #include "process.h"
+#include "serial.h"
 #include "string.h"
 #include "vbe.h"
 
+extern uint8_t __user_region_start[];
+extern uint8_t __user_region_end[];
 extern volatile int gui_needs_redraw;
 extern window_t windows[MAX_WINDOWS];
 extern int active_window_idx;
@@ -19,6 +22,7 @@ extern void vga_print(const char* str);
 extern void vga_println(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_print_int(int num);
+extern void net_print_ip(uint32_t ip);
 
 typedef enum {
     USER_TASK_NONE = 0,
@@ -30,6 +34,27 @@ typedef enum {
     USER_TASK_SETTINGS,
     USER_TASK_EXPLORER
 } user_task_kind_t;
+
+static const char* user_https_stage_name(uint32_t stage) {
+    switch (stage) {
+        case 1U: return "entry";
+        case 2U: return "fetch";
+        default: return "unknown";
+    }
+}
+
+static const char* user_task_kind_name(user_task_kind_t kind) {
+    switch (kind) {
+        case USER_TASK_SNAKE: return "snake";
+        case USER_TASK_NETDEMO: return "netdemo";
+        case USER_TASK_FETCH: return "fetch";
+        case USER_TASK_SHELL: return "shell";
+        case USER_TASK_NARCPAD: return "narcpad";
+        case USER_TASK_SETTINGS: return "settings";
+        case USER_TASK_EXPLORER: return "explorer";
+        default: return "unknown";
+    }
+}
 
 static trap_frame_t snake_context;
 static trap_frame_t netdemo_context;
@@ -56,33 +81,33 @@ static int snake_last_best = -1;
 
 #define USER_PAGE_SIZE              4096U
 #define USER_SNAKE_STATE_PAGES      1U
-#define USER_SNAKE_STACK_PAGES      1U
+#define USER_SNAKE_STACK_PAGES      2U
 #define USER_NETDEMO_STATE_PAGES    1U
-#define USER_NETDEMO_STACK_PAGES    1U
+#define USER_NETDEMO_STACK_PAGES    2U
 #define USER_FETCH_STATE_PAGES      2U
-#define USER_FETCH_STACK_PAGES      1U
-#define USER_SHELL_STATE_PAGES      4U
-#define USER_SHELL_STACK_PAGES      1U
+#define USER_FETCH_STACK_PAGES      2U
+#define USER_SHELL_STATE_PAGES      6U
+#define USER_SHELL_STACK_PAGES      4U
 #define USER_NARCPAD_STATE_PAGES    1U
-#define USER_NARCPAD_STACK_PAGES    1U
+#define USER_NARCPAD_STACK_PAGES    2U
 #define USER_SETTINGS_STATE_PAGES   1U
-#define USER_SETTINGS_STACK_PAGES   1U
+#define USER_SETTINGS_STACK_PAGES   2U
 #define USER_EXPLORER_STATE_PAGES   1U
-#define USER_EXPLORER_STACK_PAGES   1U
+#define USER_EXPLORER_STACK_PAGES   2U
 #define USER_SNAKE_STATE_VA         (USER_DATA_WINDOW_BASE + 0x0000U)
 #define USER_SNAKE_STACK_VA         (USER_DATA_WINDOW_BASE + 0x1000U)
-#define USER_NETDEMO_STATE_VA       (USER_DATA_WINDOW_BASE + 0x2000U)
-#define USER_NETDEMO_STACK_VA       (USER_DATA_WINDOW_BASE + 0x3000U)
-#define USER_FETCH_STATE_VA         (USER_DATA_WINDOW_BASE + 0x4000U)
-#define USER_FETCH_STACK_VA         (USER_DATA_WINDOW_BASE + 0x6000U)
-#define USER_SHELL_STATE_VA         (USER_DATA_WINDOW_BASE + 0x7000U)
-#define USER_SHELL_STACK_VA         (USER_DATA_WINDOW_BASE + 0xB000U)
-#define USER_NARCPAD_STATE_VA       (USER_DATA_WINDOW_BASE + 0xC000U)
-#define USER_NARCPAD_STACK_VA       (USER_DATA_WINDOW_BASE + 0xD000U)
-#define USER_SETTINGS_STATE_VA      (USER_DATA_WINDOW_BASE + 0xE000U)
-#define USER_SETTINGS_STACK_VA      (USER_DATA_WINDOW_BASE + 0xF000U)
-#define USER_EXPLORER_STATE_VA      (USER_DATA_WINDOW_BASE + 0x10000U)
-#define USER_EXPLORER_STACK_VA      (USER_DATA_WINDOW_BASE + 0x11000U)
+#define USER_NETDEMO_STATE_VA       (USER_DATA_WINDOW_BASE + 0x3000U)
+#define USER_NETDEMO_STACK_VA       (USER_DATA_WINDOW_BASE + 0x4000U)
+#define USER_FETCH_STATE_VA         (USER_DATA_WINDOW_BASE + 0x6000U)
+#define USER_FETCH_STACK_VA         (USER_DATA_WINDOW_BASE + 0x8000U)
+#define USER_SHELL_STATE_VA         (USER_DATA_WINDOW_BASE + 0xA000U)
+#define USER_SHELL_STACK_VA         (USER_DATA_WINDOW_BASE + 0x10000U)
+#define USER_NARCPAD_STATE_VA       (USER_DATA_WINDOW_BASE + 0x14000U)
+#define USER_NARCPAD_STACK_VA       (USER_DATA_WINDOW_BASE + 0x15000U)
+#define USER_SETTINGS_STATE_VA      (USER_DATA_WINDOW_BASE + 0x17000U)
+#define USER_SETTINGS_STACK_VA      (USER_DATA_WINDOW_BASE + 0x18000U)
+#define USER_EXPLORER_STATE_VA      (USER_DATA_WINDOW_BASE + 0x1A000U)
+#define USER_EXPLORER_STACK_VA      (USER_DATA_WINDOW_BASE + 0x1B000U)
 
 static uint8_t snake_state_region[USER_SNAKE_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t snake_stack_region[USER_SNAKE_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
@@ -99,6 +124,7 @@ static uint8_t settings_stack_region[USER_SETTINGS_STACK_PAGES * USER_PAGE_SIZE]
 static uint8_t explorer_state_region[USER_EXPLORER_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t explorer_stack_region[USER_EXPLORER_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static int user_memory_ready = 0;
+trap_frame_t* user_current_task_frame_ptr = (trap_frame_t*)0;
 
 user_snake_state_t* user_snake_state_ptr = (user_snake_state_t*)snake_state_region;
 user_netdemo_state_t* user_netdemo_state_ptr = (user_netdemo_state_t*)netdemo_state_region;
@@ -112,6 +138,33 @@ uint32_t user_kernel_ebx = 0;
 uint32_t user_kernel_esi = 0;
 uint32_t user_kernel_edi = 0;
 uint32_t user_kernel_ebp = 0;
+
+static int user_context_in_user_code(uint32_t eip) {
+    uint32_t start = (uint32_t)__user_region_start;
+    uint32_t end = (uint32_t)__user_region_end;
+    return eip >= start && eip < end;
+}
+
+static int user_context_on_stack(uint32_t esp, uint32_t stack_base, uint32_t stack_pages) {
+    uint32_t stack_top = stack_base + stack_pages * USER_PAGE_SIZE;
+    return esp >= stack_base && esp <= stack_top;
+}
+
+static int validate_user_context(trap_frame_t* context, uint32_t stack_base, uint32_t stack_pages) {
+    (void)stack_base;
+    (void)stack_pages;
+    return context != 0;
+}
+
+static void invalidate_user_task(user_task_kind_t kind) {
+    if (kind == USER_TASK_SNAKE) snake_running = 0;
+    else if (kind == USER_TASK_NETDEMO) user_netdemo_state.status = -1;
+    else if (kind == USER_TASK_FETCH) user_fetch_state.status = -1;
+    else if (kind == USER_TASK_SHELL) user_shell_state.status = -1;
+    else if (kind == USER_TASK_NARCPAD) narcpad_running = 0;
+    else if (kind == USER_TASK_SETTINGS) settings_running = 0;
+    else if (kind == USER_TASK_EXPLORER) explorer_running = 0;
+}
 
 static void reset_user_snake_state() {
     memset(&user_snake_state, 0, sizeof(user_snake_state));
@@ -238,6 +291,17 @@ static void init_user_context(trap_frame_t* context, uint32_t user_stack_base, u
     context->user_ss = USER_DATA_SEG;
 }
 
+static void sanitize_user_context(trap_frame_t* context) {
+    if (!context) return;
+    context->gs = USER_DATA_SEG;
+    context->fs = USER_DATA_SEG;
+    context->es = USER_DATA_SEG;
+    context->ds = USER_DATA_SEG;
+    context->cs = USER_CODE_SEG;
+    context->user_ss = USER_DATA_SEG;
+    context->eflags |= 0x200U;
+}
+
 static int parse_http_target(const char* target, char* host, int host_len, char* path, int path_len) {
     const char* cursor = target;
     int host_off = 0;
@@ -246,6 +310,7 @@ static int parse_http_target(const char* target, char* host, int host_len, char*
     if (!target || !host || !path || host_len <= 1 || path_len <= 1) return -1;
     while (*cursor == ' ') cursor++;
     if (strncmp(cursor, "http://", 7) == 0) cursor += 7;
+    else if (strncmp(cursor, "https://", 8) == 0) cursor += 8;
 
     while (*cursor && *cursor != ' ' && *cursor != '/') {
         if (host_off + 1 >= host_len) return -1;
@@ -285,6 +350,7 @@ static int parse_host_only(const char* text, char* host, int host_len) {
     if (!text || !host || host_len <= 1) return -1;
     while (*cursor == ' ') cursor++;
     if (strncmp(cursor, "http://", 7) == 0) cursor += 7;
+    else if (strncmp(cursor, "https://", 8) == 0) cursor += 8;
     while (*cursor && *cursor != ' ' && *cursor != '/') {
         if (off + 1 >= host_len) return -1;
         host[off++] = *cursor++;
@@ -311,13 +377,15 @@ static int next_arg_token(const char* src, int* io_off, char* out, int out_len) 
 }
 
 static int parse_fetch_args(const char* args, char* host, int host_len,
-                            char* path, int path_len, char* output_path, int output_path_len) {
+                            char* path, int path_len, char* output_path, int output_path_len,
+                            uint32_t* out_use_https) {
     char token0[128];
     char token1[128];
     char token2[128];
     int off = 0;
     int token_count = 0;
 
+    if (out_use_https) *out_use_https = 0U;
     token0[0] = '\0';
     token1[0] = '\0';
     token2[0] = '\0';
@@ -330,12 +398,14 @@ static int parse_fetch_args(const char* args, char* host, int host_len,
     if (args[off] != '\0') return -1;
 
     if (token_count == 2) {
+        if (strncmp(token0, "https://", 8) == 0 && out_use_https) *out_use_https = 1U;
         if (parse_http_target(token0, host, host_len, path, path_len) != 0) return -1;
         strncpy(output_path, token1, (size_t)(output_path_len - 1));
         output_path[output_path_len - 1] = '\0';
         return 0;
     }
     if (token_count == 3) {
+        if (strncmp(token0, "https://", 8) == 0 && out_use_https) *out_use_https = 1U;
         if (parse_host_only(token0, host, host_len) != 0) return -1;
         strncpy(path, token1, (size_t)(path_len - 1));
         path[path_len - 1] = '\0';
@@ -350,12 +420,61 @@ static int parse_fetch_args(const char* args, char* host, int host_len,
 static void dispatch_user_task(user_task_kind_t kind, trap_frame_t* context) {
     process_t* current = process_current();
     uint32_t resume_stack_top = current ? current->kernel_stack_top : KERNEL_BOOT_STACK_TOP;
+    uint32_t stack_base = 0;
+    uint32_t stack_pages = 0;
+
+    if (kind == USER_TASK_SNAKE) {
+        stack_base = USER_SNAKE_STACK_VA;
+        stack_pages = USER_SNAKE_STACK_PAGES;
+    } else if (kind == USER_TASK_NETDEMO) {
+        stack_base = USER_NETDEMO_STACK_VA;
+        stack_pages = USER_NETDEMO_STACK_PAGES;
+    } else if (kind == USER_TASK_FETCH) {
+        stack_base = USER_FETCH_STACK_VA;
+        stack_pages = USER_FETCH_STACK_PAGES;
+    } else if (kind == USER_TASK_SHELL) {
+        stack_base = USER_SHELL_STACK_VA;
+        stack_pages = USER_SHELL_STACK_PAGES;
+    } else if (kind == USER_TASK_NARCPAD) {
+        stack_base = USER_NARCPAD_STACK_VA;
+        stack_pages = USER_NARCPAD_STACK_PAGES;
+    } else if (kind == USER_TASK_SETTINGS) {
+        stack_base = USER_SETTINGS_STACK_VA;
+        stack_pages = USER_SETTINGS_STACK_PAGES;
+    } else if (kind == USER_TASK_EXPLORER) {
+        stack_base = USER_EXPLORER_STACK_VA;
+        stack_pages = USER_EXPLORER_STACK_PAGES;
+    }
+
+    if (!validate_user_context(context, stack_base, stack_pages)) {
+        serial_write("[user] invalid context kind=");
+        serial_write_hex32((uint32_t)kind);
+        serial_write(" eip=");
+        serial_write_hex32(context ? context->eip : 0U);
+        serial_write(" esp=");
+        serial_write_hex32(context ? context->user_esp : 0U);
+        serial_write_char('\n');
+        vga_print_color("user task invalid context: ", 0x0C);
+        vga_println(user_task_kind_name(kind));
+        invalidate_user_task(kind);
+        return;
+    }
 
     active_user_task = kind;
     /* User traps must land on a clean kernel stack; otherwise INT frames overwrite
        the suspended process stack frame that run_user_task will later resume. */
     set_tss_stack(KERNEL_BOOT_STACK_TOP);
+    serial_write("[user] dispatch kind=");
+    serial_write_hex32((uint32_t)kind);
+    serial_write(" eip=");
+    serial_write_hex32(context ? context->eip : 0);
+    serial_write(" esp=");
+    serial_write_hex32(context ? context->user_esp : 0);
+    serial_write_char('\n');
+    sanitize_user_context(context);
+    user_current_task_frame_ptr = context;
     run_user_task(context);
+    user_current_task_frame_ptr = (trap_frame_t*)0;
     set_tss_stack(resume_stack_top);
     active_user_task = USER_TASK_NONE;
 }
@@ -391,6 +510,13 @@ int init_usermode() {
     explorer_running = 0;
     active_user_task = USER_TASK_NONE;
     if (init_user_memory_layout() != 0) return -1;
+    serial_write("[user] init snake_running=");
+    serial_write_hex32((uint32_t)snake_running);
+    serial_write(" snake_eip=");
+    serial_write_hex32(snake_context.eip);
+    serial_write(" snake_esp=");
+    serial_write_hex32(snake_context.user_esp);
+    serial_write_char('\n');
     return 0;
 }
 
@@ -482,6 +608,13 @@ void run_user_tasks() {
     }
 }
 
+void stop_all_background_user_tasks() {
+    snake_running = 0;
+    narcpad_running = 0;
+    settings_running = 0;
+    explorer_running = 0;
+}
+
 int run_user_netdemo(const char* target) {
     const char* resolved_target = (target && target[0] != '\0') ? target : "example.com /";
     int status;
@@ -495,12 +628,64 @@ int run_user_netdemo(const char* target) {
     }
 
     user_netdemo_state.status = USER_APP_STATUS_RUNNING;
+    user_netdemo_state.use_https = 0U;
     init_user_context(&netdemo_context, USER_NETDEMO_STACK_VA, USER_NETDEMO_STACK_PAGES,
                       (uint32_t)user_netdemo_entry_gate, USER_NETDEMO_STATE_VA);
     status = run_sync_user_app(USER_TASK_NETDEMO, &netdemo_context, &user_netdemo_state.status);
     if (status < 0) {
         vga_print_color("netdemo: ", 0x0C);
         vga_println(net_strerror(status));
+    }
+    return status;
+}
+
+int run_user_https_command(const char* target) {
+    int status;
+
+    memset(&user_netdemo_state, 0, sizeof(user_netdemo_state));
+    if (parse_http_target(target,
+                          user_netdemo_state.host, sizeof(user_netdemo_state.host),
+                          user_netdemo_state.path, sizeof(user_netdemo_state.path)) != 0) {
+        vga_print_color("Usage: https https://<host>/<path>\n", 0x0E);
+        return -1;
+    }
+
+    user_netdemo_state.status = USER_APP_STATUS_RUNNING;
+    user_netdemo_state.use_https = 1U;
+    init_user_context(&netdemo_context, USER_NETDEMO_STACK_VA, USER_NETDEMO_STACK_PAGES,
+                      (uint32_t)user_netdemo_entry_gate, USER_NETDEMO_STATE_VA);
+    status = run_sync_user_app(USER_TASK_NETDEMO, &netdemo_context, &user_netdemo_state.status);
+    if (status < 0) {
+        vga_print_color("https: ", 0x0C);
+        if (status <= NET_ERR_INVALID && status >= NET_ERR_OVERFLOW) {
+            vga_println(net_strerror(status));
+        } else {
+            vga_println(user_tls_error_string(status));
+        }
+        vga_print("https stage   : ");
+        vga_println(user_https_stage_name(user_netdemo_state.debug_stage));
+        vga_print("tls stage     : ");
+        vga_println(user_tls_debug_stage_name());
+        if (user_tls_debug_detail()[0] != '\0') {
+            vga_print("tls detail    : ");
+            vga_println(user_tls_debug_detail());
+        }
+        return status;
+    }
+
+    vga_print("HTTPS GET       : ");
+    vga_println(target);
+    vga_print("Resolved        : ");
+    net_print_ip(user_netdemo_state.result.resolved_ip);
+    vga_println("");
+    vga_println("---- response ----");
+    if (user_netdemo_state.result.response_len != 0U) vga_println(user_netdemo_state.response);
+    else vga_println("(empty response)");
+    if (user_netdemo_state.result.truncated != 0U) {
+        vga_print_color("warning: Response truncated to local buffer size.\n", 0x0E);
+    }
+    if (user_netdemo_state.result.complete == 0U) {
+        vga_print_color("warning: Remote peer did not close cleanly before timeout.\n", 0x0E);
     }
     return status;
 }
@@ -512,8 +697,10 @@ int run_user_fetch(const char* args) {
     if (parse_fetch_args(args,
                          user_fetch_state.host, sizeof(user_fetch_state.host),
                          user_fetch_state.path, sizeof(user_fetch_state.path),
-                         user_fetch_state.output_path, sizeof(user_fetch_state.output_path)) != 0) {
+                         user_fetch_state.output_path, sizeof(user_fetch_state.output_path),
+                         &user_fetch_state.use_https) != 0) {
         vga_print_color("Usage: fetch <host> [path] <output-file>\n", 0x0E);
+        vga_print_color("   or: fetch https://host/path <output-file>\n", 0x0E);
         return -1;
     }
 
@@ -586,6 +773,18 @@ int user_settings_running() {
 
 int user_explorer_running() {
     return explorer_running;
+}
+
+void usermode_debug_dump(const char* tag) {
+    serial_write("[user] dump ");
+    serial_write(tag ? tag : "");
+    serial_write(" snake_run=");
+    serial_write_hex32((uint32_t)snake_running);
+    serial_write(" snake_eip=");
+    serial_write_hex32(snake_context.eip);
+    serial_write(" snake_esp=");
+    serial_write_hex32(snake_context.user_esp);
+    serial_write_char('\n');
 }
 
 void queue_user_snake_input(int input) {

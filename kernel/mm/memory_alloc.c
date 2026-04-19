@@ -1,10 +1,12 @@
 #include "memory_alloc.h"
+#include <stdint.h>
 extern void vga_print(const char* str);
 extern void vga_print_int(int num);
 extern void vga_println(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
-#define HEAP_START 0x200000 
 #define HEAP_SIZE  (2 * 1024 * 1024)
+
+extern uint8_t __kernel_end[];
 typedef struct block_header {
     size_t size;
     uint8_t is_free;
@@ -12,7 +14,9 @@ typedef struct block_header {
 } block_header_t;
 static block_header_t* head = NULL;
 void init_heap() {
-    head = (block_header_t*)HEAP_START;
+    uint32_t heap_start = (uint32_t)__kernel_end;
+    heap_start = (heap_start + 15U) & ~15U;
+    head = (block_header_t*)heap_start;
     head->size = HEAP_SIZE - sizeof(block_header_t);
     head->is_free = 1;
     head->next = NULL;

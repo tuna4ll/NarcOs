@@ -27,6 +27,7 @@
 #define TERM_CELL_H         12
 #define TERM_COLS           (TERM_CONTENT_W / TERM_CELL_W)
 #define TERM_ROWS           (TERM_CONTENT_H / TERM_CELL_H)
+#define TERM_SCROLLBACK_LINES 512
 #define VGA_TEXT_COLS       80
 #define VGA_TEXT_ROWS       25
 #define VGA_TEXT_BASE       ((volatile uint16_t*)0xB8000)
@@ -44,7 +45,10 @@ int win_visible = 0;
 static int cursor_x = 0;
 static int cursor_y = 0;
 static int screen_graphics_enabled = 0;
-static screen_char_t text_buffer[TERM_ROWS][TERM_COLS];
+/* Keep a longer terminal history so the window can scroll back. */
+static screen_char_t text_buffer[TERM_SCROLLBACK_LINES][TERM_COLS];
+static int term_line_count = 1;
+static int term_view_scroll = 0;
 
 extern volatile uint32_t timer_ticks;
 
@@ -58,6 +62,67 @@ static const uint32_t term_palette[16] = {
 static const screen_char_t term_blank_cell = {
     0, 0x07, 0, TERM_TEXT
 };
+
+static void term_clear_line(int line) {
+    if (line < 0 || line >= TERM_SCROLLBACK_LINES) return;
+    for (int x = 0; x < TERM_COLS; x++) {
+        text_buffer[line][x] = term_blank_cell;
+    }
+}
+
+static int term_max_scroll(void) {
+    if (term_line_count <= TERM_ROWS) return 0;
+    return term_line_count - TERM_ROWS;
+}
+
+static void term_clamp_view_scroll(void) {
+    int max_scroll = term_max_scroll();
+    if (term_view_scroll < 0) term_view_scroll = 0;
+    if (term_view_scroll > max_scroll) term_view_scroll = max_scroll;
+}
+
+static int term_first_visible_line(void) {
+    int first_line = term_line_count - TERM_ROWS - term_view_scroll;
+    if (first_line < 0) first_line = 0;
+    return first_line;
+}
+
+static int term_cursor_screen_y(void) {
+    int first_line;
+    int screen_y;
+
+    if (term_view_scroll != 0) return -1;
+    first_line = term_first_visible_line();
+    screen_y = cursor_y - first_line;
+    if (screen_y < 0 || screen_y >= TERM_ROWS) return -1;
+    return screen_y;
+}
+
+static void term_shift_history_up(void) {
+    for (int y = 0; y < TERM_SCROLLBACK_LINES - 1; y++) {
+        memcpy(text_buffer[y], text_buffer[y + 1], sizeof(text_buffer[y]));
+    }
+    term_clear_line(TERM_SCROLLBACK_LINES - 1);
+    if (cursor_y > 0) cursor_y--;
+}
+
+static void term_append_blank_line(void) {
+    int preserve_view = (term_view_scroll > 0);
+
+    if (term_line_count < TERM_SCROLLBACK_LINES) {
+        cursor_y++;
+        term_line_count = cursor_y + 1;
+        term_clear_line(cursor_y);
+    } else {
+        term_shift_history_up();
+        cursor_y = TERM_SCROLLBACK_LINES - 1;
+        term_clear_line(cursor_y);
+        term_line_count = TERM_SCROLLBACK_LINES;
+    }
+
+    if (preserve_view) term_view_scroll++;
+    term_clamp_view_scroll();
+}
 
 static void textmode_update_cursor(void) {
     uint16_t pos = (uint16_t)(cursor_y * VGA_TEXT_COLS + cursor_x);
@@ -173,11 +238,16 @@ static void term_draw_shell(void) {
 }
 
 static void term_draw_cursor(void) {
-    if (((timer_ticks / 25) % 2) == 0) {
-        int px = TERM_CONTENT_X + cursor_x * TERM_CELL_W;
-        int py = TERM_CONTENT_Y + cursor_y * TERM_CELL_H;
-        vbe_fill_rect_alpha(px, py + 10, 8, 2, TERM_ACCENT, 255);
-    }
+    int screen_y;
+    int px;
+    int py;
+
+    if (((timer_ticks / 25) % 2) != 0) return;
+    screen_y = term_cursor_screen_y();
+    if (screen_y < 0) return;
+    px = TERM_CONTENT_X + cursor_x * TERM_CELL_W;
+    py = TERM_CONTENT_Y + screen_y * TERM_CELL_H;
+    vbe_fill_rect_alpha(px, py + 10, 8, 2, TERM_ACCENT, 255);
 }
 
 void vga_set_window_pos(int x, int y) {
@@ -197,11 +267,15 @@ void vga_prepare_win_draw() {
 }
 
 void vga_redraw_text_to_buffer() {
+    int first_line = term_first_visible_line();
+
     for (int y = 0; y < TERM_ROWS; y++) {
+        int line_idx = first_line + y;
+        if (line_idx >= term_line_count) break;
         for (int x = 0; x < TERM_COLS; x++) {
-            if (text_buffer[y][x].glyph != 0) {
+            if (text_buffer[line_idx][x].glyph != 0) {
                 term_draw_glyph(TERM_CONTENT_X + x * TERM_CELL_W, TERM_CONTENT_Y + y * TERM_CELL_H,
-                                text_buffer[y][x].glyph, text_buffer[y][x].rgb);
+                                text_buffer[line_idx][x].glyph, text_buffer[line_idx][x].rgb);
             }
         }
     }
@@ -226,11 +300,7 @@ void vga_scroll() {
         textmode_update_cursor();
         return;
     }
-    memcpy(&text_buffer[0][0], &text_buffer[1][0], (size_t)(TERM_COLS * (TERM_ROWS - 1)) * sizeof(screen_char_t));
-    for (int x = 0; x < TERM_COLS; x++) {
-        text_buffer[TERM_ROWS - 1][x] = term_blank_cell;
-    }
-    cursor_y = TERM_ROWS - 2;
+    term_append_blank_line();
     vga_refresh_window();
 }
 
@@ -244,15 +314,13 @@ void clear_screen() {
         textmode_update_cursor();
         return;
     }
-    {
-        screen_char_t* cells = &text_buffer[0][0];
-        int total = TERM_ROWS * TERM_COLS;
-        for (int i = 0; i < total; i++) {
-            cells[i] = term_blank_cell;
-        }
+    for (int y = 0; y < TERM_SCROLLBACK_LINES; y++) {
+        term_clear_line(y);
     }
     cursor_x = 0;
     cursor_y = 0;
+    term_line_count = 1;
+    term_view_scroll = 0;
     vga_refresh_window();
 }
 
@@ -264,7 +332,11 @@ void vga_newline() {
         textmode_update_cursor();
         return;
     }
-    if (cursor_y >= TERM_ROWS - 1) vga_scroll();
+    if (cursor_y >= term_line_count) {
+        if (cursor_y > 0) cursor_y--;
+        term_append_blank_line();
+    }
+    vga_refresh_window();
 }
 
 static void vga_put_glyph_color(uint16_t glyph, uint8_t color) {
@@ -290,14 +362,22 @@ static void vga_put_glyph_color(uint16_t glyph, uint8_t color) {
     }
     if (cursor_x >= TERM_COLS - 1) vga_newline();
     term_store_cell(&text_buffer[cursor_y][cursor_x], glyph, color);
-    rgb = text_buffer[cursor_y][cursor_x].rgb;
-    vga_prepare_win_draw();
-    term_draw_glyph(TERM_CONTENT_X + cursor_x * TERM_CELL_W, TERM_CONTENT_Y + cursor_y * TERM_CELL_H, glyph, rgb);
-    vbe_fill_rect_alpha(TERM_CONTENT_X + cursor_x * TERM_CELL_W, TERM_CONTENT_Y + cursor_y * TERM_CELL_H + 10, 8, 2, TERM_PANEL_ALT, 255);
+    if (term_view_scroll == 0) {
+        int screen_y = term_cursor_screen_y();
+        if (screen_y >= 0) {
+            rgb = text_buffer[cursor_y][cursor_x].rgb;
+            vga_prepare_win_draw();
+            term_draw_glyph(TERM_CONTENT_X + cursor_x * TERM_CELL_W, TERM_CONTENT_Y + screen_y * TERM_CELL_H, glyph, rgb);
+            vbe_fill_rect_alpha(TERM_CONTENT_X + cursor_x * TERM_CELL_W, TERM_CONTENT_Y + screen_y * TERM_CELL_H + 10, 8, 2, TERM_PANEL_ALT, 255);
+            cursor_x++;
+            term_draw_cursor();
+            vbe_set_target(vbe_get_backbuffer(), vbe_get_width());
+            gui_needs_redraw = 1;
+            return;
+        }
+    }
     cursor_x++;
-    term_draw_cursor();
-    vbe_set_target(vbe_get_backbuffer(), vbe_get_width());
-    gui_needs_redraw = 1;
+    vga_refresh_window();
 }
 
 void vga_putchar_color(char c, uint8_t color) {
@@ -338,12 +418,32 @@ void vga_backspace() {
     if (cursor_x > 0) {
         cursor_x--;
         text_buffer[cursor_y][cursor_x] = term_blank_cell;
-        vga_prepare_win_draw();
-        vbe_fill_rect(TERM_CONTENT_X + cursor_x * TERM_CELL_W, TERM_CONTENT_Y + cursor_y * TERM_CELL_H, TERM_CELL_W, TERM_CELL_H, TERM_PANEL_ALT);
-        term_draw_cursor();
-        vbe_set_target(vbe_get_backbuffer(), vbe_get_width());
-        gui_needs_redraw = 1;
+        vga_refresh_window();
     }
+}
+
+void vga_scrollback_page(int direction) {
+    if (!screen_graphics_enabled || direction == 0) return;
+    term_view_scroll += direction * (TERM_ROWS - 2);
+    term_clamp_view_scroll();
+    vga_refresh_window();
+}
+
+void vga_scrollback_home(void) {
+    if (!screen_graphics_enabled) return;
+    term_view_scroll = term_max_scroll();
+    vga_refresh_window();
+}
+
+void vga_scrollback_end(void) {
+    if (!screen_graphics_enabled) return;
+    if (term_view_scroll == 0) return;
+    term_view_scroll = 0;
+    vga_refresh_window();
+}
+
+void vga_scrollback_follow_live(void) {
+    vga_scrollback_end();
 }
 
 void vga_print_int(int num) {

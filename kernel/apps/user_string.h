@@ -45,4 +45,34 @@ static USER_CODE void* user_memset(void* s, int c, size_t n) {
     return s;
 }
 
+static USER_CODE void* user_memcpy(void* dest, const void* src, size_t n) {
+    unsigned char* d = (unsigned char*)dest;
+    const unsigned char* s = (const unsigned char*)src;
+
+    while (n-- != 0U) *d++ = *s++;
+    return dest;
+}
+
+static USER_CODE int user_memcmp(const void* s1, const void* s2, size_t n) {
+    const unsigned char* a = (const unsigned char*)s1;
+    const unsigned char* b = (const unsigned char*)s2;
+
+    while (n != 0U) {
+        if (*a != *b) return (int)*a - (int)*b;
+        a++;
+        b++;
+        n--;
+    }
+    return 0;
+}
+
+static USER_CODE int user_memeq_consttime(const void* s1, const void* s2, size_t n) {
+    const unsigned char* a = (const unsigned char*)s1;
+    const unsigned char* b = (const unsigned char*)s2;
+    unsigned char diff = 0;
+
+    while (n-- != 0U) diff |= (unsigned char)(*a++ ^ *b++);
+    return diff == 0U;
+}
+
 #endif

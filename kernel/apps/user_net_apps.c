@@ -4,6 +4,7 @@
 #include "usermode.h"
 #include "user_abi.h"
 #include "user_net_apps.h"
+#include "user_tls.h"
 
 #define USER_CODE __attribute__((section(".user_code")))
 #define USER_RODATA __attribute__((section(".user_rodata")))
@@ -27,7 +28,6 @@ static const char user_netdemo_msg_truncated[] USER_RODATA = "Ring3 netdemo: res
 static const char user_netdemo_msg_partial[] USER_RODATA = "Ring3 netdemo: connection timed out before clean close";
 static const char user_fetch_msg_start[] USER_RODATA = "Ring3 fetch: downloading";
 static const char user_fetch_msg_write_err[] USER_RODATA = "Ring3 fetch: failed to write file";
-
 static USER_CODE int user_append_text(char* dst, uint16_t dst_len, uint16_t* io_offset, const char* src) {
     uint16_t off = *io_offset;
 
@@ -41,12 +41,38 @@ static USER_CODE int user_append_text(char* dst, uint16_t dst_len, uint16_t* io_
     return NET_OK;
 }
 
+static USER_CODE int user_build_http_get_request(const char* host, const char* path,
+                                                 char* request, uint16_t request_cap,
+                                                 uint16_t* out_request_len) {
+    uint16_t request_off = 0;
+
+    if (!host || !path || !request || request_cap < 2U || !out_request_len) return NET_ERR_INVALID;
+
+    request[0] = '\0';
+    if (user_append_text(request, request_cap, &request_off, user_http_get_prefix) != NET_OK ||
+        user_append_text(request, request_cap, &request_off, path) != NET_OK ||
+        user_append_text(request, request_cap, &request_off, user_http_host_prefix) != NET_OK ||
+        user_append_text(request, request_cap, &request_off, host) != NET_OK ||
+        user_append_text(request, request_cap, &request_off, user_http_headers) != NET_OK) {
+        return NET_ERR_OVERFLOW;
+    }
+
+    *out_request_len = (uint16_t)strlen(request);
+    return NET_OK;
+}
+
+static USER_CODE void user_http_finalize_response(char* response, uint16_t response_off,
+                                                  net_http_result_t* out_result) {
+    if (!response || !out_result) return;
+    response[response_off] = '\0';
+    out_result->response_len = response_off;
+}
+
 int USER_CODE user_http_fetch_text(const char* host, const char* path,
                                    char* response, uint16_t response_cap,
                                    net_http_result_t* out_result) {
     char request[512];
     char discard[128];
-    uint16_t request_off = 0;
     uint16_t request_len;
     uint16_t response_off = 0;
     uint32_t server_ip = 0;
@@ -61,17 +87,11 @@ int USER_CODE user_http_fetch_text(const char* host, const char* path,
     response[0] = '\0';
 
     if (user_net_resolve(host, &server_ip) != NET_OK) return NET_ERR_RESOLVE;
+    if (server_ip == 0U) return NET_ERR_RESOLVE;
     out_result->resolved_ip = server_ip;
 
-    request[0] = '\0';
-    if (user_append_text(request, sizeof(request), &request_off, user_http_get_prefix) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, path) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, user_http_host_prefix) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, host) != NET_OK ||
-        user_append_text(request, sizeof(request), &request_off, user_http_headers) != NET_OK) {
-        return NET_ERR_OVERFLOW;
-    }
-    request_len = (uint16_t)strlen(request);
+    status = user_build_http_get_request(host, path, request, sizeof(request), &request_len);
+    if (status != NET_OK) return status;
 
     socket_handle = user_net_socket(NET_SOCK_STREAM);
     if (socket_handle < 0) return socket_handle;
@@ -146,10 +166,97 @@ int USER_CODE user_http_fetch_text(const char* host, const char* path,
         user_yield();
     }
 
-    response[response_off] = '\0';
-    out_result->response_len = response_off;
+    user_http_finalize_response(response, response_off, out_result);
     status = user_net_close(socket_handle);
     if (status < 0 && status != NET_ERR_TIMEOUT && response_off == 0U) return status;
+    return response_off != 0U ? NET_OK : NET_ERR_TIMEOUT;
+}
+
+int USER_CODE user_https_fetch_text(const char* host, const char* path,
+                                    char* response, uint16_t response_cap,
+                                    net_http_result_t* out_result) {
+    char request[512];
+    char discard[128];
+    uint16_t request_len = 0;
+    uint16_t response_off = 0;
+    uint32_t server_ip = 0;
+    uint32_t started;
+    uint32_t last_progress;
+    int status = NET_OK;
+
+    if (!host || !path || !response || response_cap < 2U || !out_result) return NET_ERR_INVALID;
+
+    memset(out_result, 0, sizeof(*out_result));
+    response[0] = '\0';
+
+    if (user_net_resolve(host, &server_ip) != NET_OK) return NET_ERR_RESOLVE;
+    out_result->resolved_ip = server_ip;
+
+    status = user_build_http_get_request(host, path, request, sizeof(request), &request_len);
+    if (status != NET_OK) return status;
+
+    status = user_tls_open(host);
+    if (status != NET_OK) return status;
+
+    status = user_tls_send(request, request_len);
+    if (status < 0) {
+        (void)user_tls_close();
+        return status;
+    }
+    if ((uint16_t)status != request_len) {
+        (void)user_tls_close();
+        return NET_ERR_IO;
+    }
+
+    started = user_uptime_ticks();
+    last_progress = started;
+
+    while ((user_uptime_ticks() - started) <= USER_HTTP_TOTAL_TIMEOUT) {
+        int capacity = (int)(response_cap - 1U - response_off);
+        void* target_buf = response + response_off;
+        uint32_t to_read = capacity > 0 ? (uint32_t)capacity : (uint32_t)sizeof(discard);
+        int got;
+
+        if (capacity <= 0) {
+            target_buf = discard;
+            out_result->truncated = 1U;
+        }
+
+        got = user_tls_recv(target_buf, to_read);
+        if (got == NET_ERR_CLOSED) {
+            out_result->complete = 1U;
+            break;
+        }
+        if (got < 0) {
+            if (response_off == 0U) {
+                (void)user_tls_close();
+                return got;
+            }
+            break;
+        }
+        if (got > 0) {
+            if (target_buf == (void*)(response + response_off)) {
+                response_off = (uint16_t)(response_off + (uint16_t)got);
+            } else {
+                out_result->truncated = 1U;
+            }
+            last_progress = user_uptime_ticks();
+            continue;
+        }
+
+        if (user_uptime_ticks() > last_progress + USER_HTTP_IDLE_TIMEOUT) break;
+        user_yield();
+    }
+
+    user_http_finalize_response(response, response_off, out_result);
+    status = user_tls_close();
+    if (status < 0 &&
+        status != NET_ERR_TIMEOUT &&
+        status != NET_ERR_CLOSED &&
+        status != USER_TLS_ERR_ALERT &&
+        response_off == 0U) {
+        return status;
+    }
     return response_off != 0U ? NET_OK : NET_ERR_TIMEOUT;
 }
 
@@ -172,9 +279,17 @@ void USER_CODE user_netdemo_entry_c(user_netdemo_state_t* state) {
     if (!state) return;
 
     user_print(user_netdemo_msg_start);
-    status = user_http_fetch_text(state->host, state->path,
-                                  state->response, sizeof(state->response),
-                                  &state->result);
+    state->debug_stage = 1U;
+    if (state->use_https != 0U) {
+        state->debug_stage = 2U;
+        status = user_https_fetch_text(state->host, state->path,
+                                       state->response, sizeof(state->response),
+                                       &state->result);
+    } else {
+        status = user_http_fetch_text(state->host, state->path,
+                                      state->response, sizeof(state->response),
+                                      &state->result);
+    }
     state->status = status;
     if (status < 0) {
         user_print(user_netdemo_msg_err);
@@ -194,9 +309,15 @@ void USER_CODE user_fetch_entry_c(user_fetch_state_t* state) {
     if (!state) return;
 
     user_print(user_fetch_msg_start);
-    status = user_http_fetch_text(state->host, state->path,
-                                  state->response, sizeof(state->response),
-                                  &state->result);
+    if (state->use_https != 0U) {
+        status = user_https_fetch_text(state->host, state->path,
+                                       state->response, sizeof(state->response),
+                                       &state->result);
+    } else {
+        status = user_http_fetch_text(state->host, state->path,
+                                      state->response, sizeof(state->response),
+                                      &state->result);
+    }
     if (status < 0) {
         state->status = status;
         return;

@@ -48,30 +48,21 @@ static uint8_t* current_target = (uint8_t*)0x800000;
 static uint32_t current_target_width = 0;
 
 static void vbe_memcpy_fast(void* dest, const void* src, uint32_t count) {
-    if (cpu_sse_enabled()) vbe_memcpy_sse(dest, (void*)src, count);
-    else vbe_memcpy(dest, (void*)src, count);
+    vbe_memcpy(dest, (void*)src, count);
 }
 
 static void vbe_memset_fast(void* dest, uint32_t color, uint32_t count_bytes) {
-    if (cpu_sse_enabled()) {
-        vbe_memset_sse(dest, color, count_bytes);
-    } else {
-        uint32_t* pixels = (uint32_t*)dest;
-        uint32_t count = count_bytes / 4U;
-        for (uint32_t i = 0; i < count; i++) {
-            pixels[i] = color;
-        }
+    uint32_t* pixels = (uint32_t*)dest;
+    uint32_t count = count_bytes / 4U;
+    for (uint32_t i = 0; i < count; i++) {
+        pixels[i] = color;
     }
 }
 
 static void vbe_alpha_blend_fast(void* dest, uint32_t color, uint32_t alpha, uint32_t count_pixels) {
-    if (cpu_sse_enabled()) {
-        vbe_alpha_blend_sse(dest, color, alpha, count_pixels);
-    } else {
-        uint32_t* pixels = (uint32_t*)dest;
-        for (uint32_t i = 0; i < count_pixels; i++) {
-            pixels[i] = vbe_mix_color(color, pixels[i], (int)alpha);
-        }
+    uint32_t* pixels = (uint32_t*)dest;
+    for (uint32_t i = 0; i < count_pixels; i++) {
+        pixels[i] = vbe_mix_color(color, pixels[i], (int)alpha);
     }
 }
 

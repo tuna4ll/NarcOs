@@ -179,7 +179,8 @@ static void init_low_identity_window() {
         low_identity_page_table[page] = (page * PAGE_SIZE) | PTE_PRESENT | PDE_RW;
     }
 
-    low_identity_mark_user_range(user_region_start, user_region_end, 0);
+    /* User apps now carry writable .data/.bss inside the low identity image. */
+    low_identity_mark_user_range(user_region_start, user_region_end, PAGING_FLAG_WRITE);
     low_identity_mark_user_range(0x00090000U, 0x00091000U, PAGING_FLAG_WRITE);
 
     kernel_page_directory[0] = ((uint32_t)low_identity_page_table) | PDE_PRESENT | PDE_RW | PDE_USER;

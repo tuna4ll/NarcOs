@@ -20,14 +20,46 @@ static uint32_t last_gui_tick = 0;
 extern uint32_t timer_ticks;
 static uint32_t kernel_rng_state = 0xA341316Cu;
 
-static uint32_t kernel_next_random() {
-    uint32_t mix = timer_ticks ^ ((uint32_t)get_mouse_x() << 16) ^ (uint32_t)get_mouse_y();
+static void kernel_rng_stir() {
+    uint32_t mix;
+
+    read_rtc();
+    mix = timer_ticks ^ ((uint32_t)get_mouse_x() << 16) ^ (uint32_t)get_mouse_y();
+    mix ^= ((uint32_t)get_year() << 24) |
+           ((uint32_t)get_month() << 16) |
+           ((uint32_t)get_day() << 8) |
+           (uint32_t)get_second();
+    mix ^= ((uint32_t)get_hour() << 24) | ((uint32_t)get_minute() << 16);
     kernel_rng_state ^= mix + 0x9E3779B9u;
+}
+
+static uint32_t kernel_next_random() {
+    kernel_rng_stir();
     kernel_rng_state ^= kernel_rng_state << 13;
     kernel_rng_state ^= kernel_rng_state >> 17;
     kernel_rng_state ^= kernel_rng_state << 5;
     if (kernel_rng_state == 0) kernel_rng_state = 0x6D2B79F5u;
     return kernel_rng_state;
+}
+
+static int kernel_fill_random(void* buffer, uint32_t length) {
+    uint8_t* out = (uint8_t*)buffer;
+    uint32_t word = 0;
+    uint32_t word_bytes = 0;
+
+    if (!out && length != 0U) return -1;
+
+    while (length != 0U) {
+        if (word_bytes == 0U) {
+            word = kernel_next_random();
+            word_bytes = sizeof(word);
+        }
+        *out++ = (uint8_t)(word & 0xFFU);
+        word >>= 8;
+        word_bytes--;
+        length--;
+    }
+    return 0;
 }
 
 void syscall_handler(trap_frame_t* frame) {
@@ -96,6 +128,8 @@ void syscall_handler(trap_frame_t* frame) {
         frame->eax = 0;
     } else if (eax == SYS_RANDOM) {
         frame->eax = kernel_next_random();
+    } else if (eax == SYS_GETRANDOM) {
+        frame->eax = (uint32_t)kernel_fill_random((void*)ebx, ecx);
     } else if (eax == SYS_NET_GET_CONFIG) {
         frame->eax = (uint32_t)net_get_ipv4_config((net_ipv4_config_t*)ebx);
     } else if (eax == SYS_NET_DHCP) {

@@ -69,6 +69,7 @@ typedef struct {
 #define SYS_RTC_SET_TZ_OFFSET 40
 #define SYS_RTC_SAVE_TZ 41
 #define SYS_GUI_OPEN_NARCPAD_FILE 42
+#define SYS_GETRANDOM 43
 
 void init_syscalls();
 void syscall_handler(trap_frame_t* frame);

@@ -1029,7 +1029,20 @@ int kernel_run_privileged_command(int cmd, const char* arg) {
 }
 
 void execute_command(char* cmd) {
-    (void)run_user_shell_command(cmd);
+    int status;
+    if (!cmd) return;
+    if (strcmp(cmd, "http") == 0 || strncmp(cmd, "http ", 5) == 0) {
+        const char* arg = cmd + 4;
+        while (*arg == ' ') arg++;
+        (void)net_http_command(arg);
+        return;
+    }
+    status = run_user_shell_command(cmd);
+    if (status < 0) {
+        vga_print_color("shell command failed: ", 0x0C);
+        vga_print_int(status);
+        vga_println("");
+    }
 }
 
 extern char cmd_to_execute[128];
@@ -1531,7 +1544,7 @@ static void service_process_main(void* arg) {
     (void)arg;
     for (;;) {
         net_poll();
-        run_user_tasks();
+        stop_all_background_user_tasks();
         process_poll();
         asm volatile("hlt");
         process_poll();
@@ -1579,26 +1592,43 @@ void kmain() {
         boot_fatal("User memory initialization failed.",
                    "Ring 3 code/data alias mappings could not be established.");
     }
+    usermode_debug_dump("post-usermode");
     init_keyboard();
+    usermode_debug_dump("post-kbd");
     storage_init();
+    usermode_debug_dump("post-storage");
     init_fs();
+    usermode_debug_dump("post-fs");
     rtc_init_timezone();
     read_rtc();
+    usermode_debug_dump("post-rtc");
     init_heap();
+    usermode_debug_dump("post-heap");
     screen_set_graphics_enabled(0);
     if (boot_framebuffer_available()) {
         serial_write_line("[boot] init_vbe");
         init_vbe();
+        usermode_debug_dump("post-init_vbe");
         kernel_graphics_ready = 1;
         screen_set_graphics_enabled(1);
+        usermode_debug_dump("post-graphics-flag");
         init_mouse();
+        usermode_debug_dump("post-init_mouse");
     } else {
         serial_write_line("[boot] framebuffer unavailable, using text fallback");
         kernel_graphics_ready = 0;
     }
+    if (init_usermode() != 0) {
+        boot_fatal("User memory reinitialization failed.",
+                   "Ring 3 runtime state could not be restored after display setup.");
+    }
+    usermode_debug_dump("post-usermode-reinit");
+    usermode_debug_dump("post-vbe");
     net_init();
+    usermode_debug_dump("post-net");
     serial_write_line("[boot] process_init");
     process_init();
+    usermode_debug_dump("post-procinit");
     console_pid = -1;
     desktop_pid = -1;
     if (screen_is_graphics_enabled()) {
@@ -1635,6 +1665,7 @@ void kmain() {
     } else {
         print_text_fallback_banner();
     }
+    usermode_debug_dump("pre-sched");
     serial_write_line("[boot] scheduler start");
     scheduler_start();
 }

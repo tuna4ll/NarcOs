@@ -64,16 +64,27 @@ extern void explorer_cancel_modal();
 extern void explorer_modal_submit();
 extern void explorer_modal_backspace();
 extern void explorer_modal_append_char(char c);
+extern void vga_scrollback_page(int direction);
+extern void vga_scrollback_home(void);
+extern void vga_scrollback_end(void);
+extern void vga_scrollback_follow_live(void);
 
 static const char* shell_commands[] = {
     "help", "clear", "mem", "snake", "settings", "ver", "uptime", "date", "time",
     "ls", "pwd", "touch", "cat", "write", "edit", "mkdir", "cd",
-    "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "netdemo", "fetch",
-    "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"
+    "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "https", "netdemo", "fetch",
+    "tls_test", "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"
 };
+
+static int terminal_window_active(void) {
+    return active_window_idx != -1 &&
+           windows[active_window_idx].visible &&
+           windows[active_window_idx].type == WIN_TYPE_TERMINAL;
+}
 
 static void set_input_line(const char* text) {
     int i = 0;
+    vga_scrollback_follow_live();
     while (input_pos > 0) {
         input_pos--;
         vga_backspace();
@@ -91,6 +102,7 @@ static void autocomplete_input_line() {
     int prefix_len = 0;
     int matches = 0;
     int match_idx = -1;
+    vga_scrollback_follow_live();
     for (int i = 0; i < input_pos; i++) {
         if (input_buf[i] == ' ') return;
     }
@@ -175,6 +187,28 @@ void handle_keyboard()
         outb(0x20, 0x20);
         return;
     }
+    if (terminal_window_active()) {
+        if (scancode == 0x49) {
+            vga_scrollback_page(1);
+            outb(0x20, 0x20);
+            return;
+        }
+        if (scancode == 0x51) {
+            vga_scrollback_page(-1);
+            outb(0x20, 0x20);
+            return;
+        }
+        if (scancode == 0x47) {
+            vga_scrollback_home();
+            outb(0x20, 0x20);
+            return;
+        }
+        if (scancode == 0x4F) {
+            vga_scrollback_end();
+            outb(0x20, 0x20);
+            return;
+        }
+    }
     if (active_window_idx != -1 && windows[active_window_idx].visible && windows[active_window_idx].type == WIN_TYPE_SNAKE) {
         switch (scancode) {
             case 0x11: case 0x48:
@@ -246,6 +280,7 @@ void handle_keyboard()
         return;
     }
     if (scancode == 0x0E) {
+        vga_scrollback_follow_live();
         if (input_pos > 0) {
             input_pos--;
             input_buf[input_pos] = '\0';
@@ -253,6 +288,7 @@ void handle_keyboard()
         }
     }
     else if (scancode == 0x1C) {
+        vga_scrollback_follow_live();
         vga_newline();
         input_buf[input_pos] = '\0';
         if (input_pos > 0) {
@@ -321,6 +357,7 @@ void handle_keyboard()
         if (capslock_active && c >= 'a' && c <= 'z') c -= 32;
         else if (capslock_active && c >= 'A' && c <= 'Z') c += 32;
         if (c != 0 && input_pos < INPUT_BUF_SIZE - 1) {
+            vga_scrollback_follow_live();
             input_buf[input_pos++] = c;
             vga_putchar(c);
         }

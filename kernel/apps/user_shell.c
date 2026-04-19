@@ -6,6 +6,7 @@
 #include "usermode.h"
 #include "user_abi.h"
 #include "user_net_apps.h"
+#include "user_tls.h"
 
 #define USER_CODE __attribute__((section(".user_code")))
 #define USER_RODATA __attribute__((section(".user_rodata")))
@@ -46,8 +47,10 @@ static const char shell_help_lines[][72] USER_RODATA = {
     "  ping    - Ping an IPv4 host",
     "  ntp     - Query UTC time from an NTP server",
     "  http    - Fetch HTTP/1.0 response (http <host> [path])",
+    "  https   - Fetch HTTPS response (https https://host/path)",
     "  netdemo - Run Ring 3 HTTP demo (netdemo <host> [path])",
-    "  fetch   - Download HTTP body to a file (fetch <host> [path] <file>)",
+    "  fetch   - Download HTTP/HTTPS body to a file",
+    "  tls_test - Run TLS userland self-tests",
     "  hwinfo  - Show hardware summary",
     "  pci     - List PCI devices",
     "  storage - List storage controllers, partitions and active backend",
@@ -71,6 +74,10 @@ static const char msg_netdemo_truncated[] USER_RODATA = "Ring3 netdemo: response
 static const char msg_netdemo_partial[] USER_RODATA = "Ring3 netdemo: connection timed out before clean close";
 static const char msg_fetch_start[] USER_RODATA = "Ring3 fetch: downloading";
 static const char msg_fetch_write_err[] USER_RODATA = "Ring3 fetch: failed to write file";
+static const char msg_tls_test_header[] USER_RODATA = "TLS Self-Test";
+static const char msg_tls_test_case_prefix[] USER_RODATA = "[";
+static const char msg_tls_test_case_sep[] USER_RODATA = "] ";
+static const char msg_tls_test_dash[] USER_RODATA = " - ";
 
 static USER_CODE const char* shell_net_error_string(int status) {
     switch (status) {
@@ -224,6 +231,7 @@ static USER_CODE int shell_parse_http_target(const char* target, char* host, int
 
     if (!cursor || !host || !path || host_len <= 1 || path_len <= 1) return -1;
     if (strncmp(cursor, "http://", 7) == 0) cursor += 7;
+    else if (strncmp(cursor, "https://", 8) == 0) cursor += 8;
 
     while (*cursor && *cursor != ' ' && *cursor != '/') {
         if (host_off + 1 >= host_len) return -1;
@@ -257,19 +265,22 @@ static USER_CODE int shell_parse_http_target(const char* target, char* host, int
 }
 
 static USER_CODE int shell_parse_fetch_args(const char* args, char* host, int host_len,
-                                            char* path, int path_len, char* output_path, int output_path_len) {
+                                            char* path, int path_len, char* output_path, int output_path_len,
+                                            int* out_use_https) {
     char first[128];
     char second[128];
     char third[128];
     const char* tail0;
     const char* tail1;
 
+    if (out_use_https) *out_use_https = 0;
     if (shell_copy_token(args, first, sizeof(first)) != 0) return -1;
     tail0 = shell_find_arg_tail(args);
     if (shell_copy_token(tail0, second, sizeof(second)) != 0) return -1;
     tail1 = shell_find_arg_tail(tail0);
 
     if (*tail1 == '\0') {
+        if (strncmp(first, "https://", 8) == 0 && out_use_https) *out_use_https = 1;
         if (shell_parse_http_target(first, host, host_len, path, path_len) != 0) return -1;
         strncpy(output_path, second, (size_t)(output_path_len - 1));
         output_path[output_path_len - 1] = '\0';
@@ -282,6 +293,10 @@ static USER_CODE int shell_parse_fetch_args(const char* args, char* host, int ho
     {
         const char* host_token = first;
         if (strncmp(host_token, "http://", 7) == 0) host_token += 7;
+        else if (strncmp(host_token, "https://", 8) == 0) {
+            host_token += 8;
+            if (out_use_https) *out_use_https = 1;
+        }
         strncpy(host, host_token, (size_t)(host_len - 1));
     }
     host[host_len - 1] = '\0';
@@ -653,16 +668,20 @@ static USER_CODE int shell_run_ping(user_shell_state_t* state, const char* arg) 
 
 static USER_CODE int shell_run_ntp(user_shell_state_t* state, const char* arg) {
     uint32_t unix_seconds = 0;
-    const char* host = (arg && arg[0] != '\0') ? arg : "time.google.com";
+    const char* host = (arg && arg[0] != '\0') ? arg : user_tls_default_ntp_host();
     char line[160];
     rtc_local_time_t utc_time;
     int status;
     int off = 0;
 
     if (!state) return -1;
-    status = user_net_ntp_query(host, &unix_seconds);
+    status = user_tls_get_utc_unix_time_for_host((arg && arg[0] != '\0') ? arg : (const char*)0, &unix_seconds);
     if (status != NET_OK) {
-        shell_print_error("error: NTP query failed.");
+        line[0] = '\0';
+        off = 0;
+        (void)shell_append_text(line, sizeof(line), &off, "error: NTP query failed: ");
+        (void)shell_append_text(line, sizeof(line), &off, shell_net_error_string(status));
+        shell_print_error(line);
         return -1;
     }
 
@@ -737,6 +756,45 @@ static USER_CODE int shell_run_http(user_shell_state_t* state, const char* arg) 
     return shell_print_http_response(arg, state->scratch, &state->http_result);
 }
 
+static USER_CODE int shell_run_https(user_shell_state_t* state, const char* arg) {
+    char host[96];
+    char path[160];
+    char line[192];
+    int status;
+
+    if (!state) return -1;
+    if (!arg || arg[0] == '\0') {
+        shell_print_usage("Usage: https https://<host>/<path>");
+        return -1;
+    }
+    if (shell_parse_http_target(arg, host, sizeof(host), path, sizeof(path)) != 0) {
+        shell_print_usage("Usage: https https://<host>/<path>");
+        return -1;
+    }
+    status = user_https_fetch_text(host, path, state->scratch, sizeof(state->scratch), &state->http_result);
+    if (status != NET_OK) {
+        int off = 0;
+        line[0] = '\0';
+        (void)shell_append_text(line, sizeof(line), &off, "error: HTTPS request failed: ");
+        (void)shell_append_text(line, sizeof(line), &off, user_tls_error_string(status));
+        shell_println(line);
+        line[0] = '\0';
+        off = 0;
+        (void)shell_append_text(line, sizeof(line), &off, "https stage: ");
+        (void)shell_append_text(line, sizeof(line), &off, user_tls_debug_stage_name());
+        shell_println(line);
+        if (user_tls_debug_detail()[0] != '\0') {
+            line[0] = '\0';
+            off = 0;
+            (void)shell_append_text(line, sizeof(line), &off, "https detail: ");
+            (void)shell_append_text(line, sizeof(line), &off, user_tls_debug_detail());
+            shell_println(line);
+        }
+        return -1;
+    }
+    return shell_print_http_response(arg, state->scratch, &state->http_result);
+}
+
 static USER_CODE int shell_run_netdemo(user_shell_state_t* state, const char* arg) {
     char host[96];
     char path[160];
@@ -771,28 +829,52 @@ static USER_CODE int shell_run_fetch(user_shell_state_t* state, const char* arg)
     char output_path[128];
     char line[192];
     int status;
+    int use_https = 0;
     uint32_t body_offset;
     int off = 0;
 
     if (!state) return -1;
     if (!arg || arg[0] == '\0') {
         shell_print_usage("Usage: fetch <host> [path] <output-file>");
+        shell_print_usage("   or: fetch https://<host>/<path> <output-file>");
         return -1;
     }
-    if (shell_parse_fetch_args(arg, host, sizeof(host), path, sizeof(path), output_path, sizeof(output_path)) != 0) {
+    if (shell_parse_fetch_args(arg, host, sizeof(host), path, sizeof(path),
+                               output_path, sizeof(output_path), &use_https) != 0) {
         shell_print_usage("Usage: fetch <host> [path] <output-file>");
+        shell_print_usage("   or: fetch https://<host>/<path> <output-file>");
         return -1;
     }
 
     shell_println(msg_fetch_start);
-    status = user_http_fetch_text(host, path, state->scratch, sizeof(state->scratch), &state->http_result);
+    if (use_https) {
+        status = user_https_fetch_text(host, path, state->scratch, sizeof(state->scratch), &state->http_result);
+    } else {
+        status = user_http_fetch_text(host, path, state->scratch, sizeof(state->scratch), &state->http_result);
+    }
     if (status != NET_OK) {
         char err_line[160];
         int err_off = 0;
         err_line[0] = '\0';
         (void)shell_append_text(err_line, sizeof(err_line), &err_off, "fetch: ");
-        (void)shell_append_text(err_line, sizeof(err_line), &err_off, shell_net_error_string(status));
+        (void)shell_append_text(err_line, sizeof(err_line), &err_off,
+                                use_https ? user_tls_error_string(status) : shell_net_error_string(status));
         shell_println(err_line);
+        if (use_https) {
+            char tls_line[192];
+            int tls_off = 0;
+            tls_line[0] = '\0';
+            (void)shell_append_text(tls_line, sizeof(tls_line), &tls_off, "fetch https stage: ");
+            (void)shell_append_text(tls_line, sizeof(tls_line), &tls_off, user_tls_debug_stage_name());
+            shell_println(tls_line);
+            if (user_tls_debug_detail()[0] != '\0') {
+                tls_line[0] = '\0';
+                tls_off = 0;
+                (void)shell_append_text(tls_line, sizeof(tls_line), &tls_off, "fetch https detail: ");
+                (void)shell_append_text(tls_line, sizeof(tls_line), &tls_off, user_tls_debug_detail());
+                shell_println(tls_line);
+            }
+        }
         return -1;
     }
 
@@ -811,6 +893,56 @@ static USER_CODE int shell_run_fetch(user_shell_state_t* state, const char* arg)
     if (state->http_result.truncated != 0U) shell_println(msg_http_truncated);
     if (state->http_result.complete == 0U) shell_println(msg_http_partial);
     return 0;
+}
+
+static USER_CODE void shell_print_tls_summary_line(const char* label, uint32_t value) {
+    char line[96];
+    int off = 0;
+
+    line[0] = '\0';
+    (void)shell_append_text(line, sizeof(line), &off, label);
+    (void)shell_append_uint(line, sizeof(line), &off, value);
+    shell_println(line);
+}
+
+static USER_CODE void shell_print_tls_case(const user_tls_selftest_case_t* test_case) {
+    char line[192];
+    int off = 0;
+
+    if (!test_case) return;
+    line[0] = '\0';
+    (void)shell_append_text(line, sizeof(line), &off, msg_tls_test_case_prefix);
+    (void)shell_append_text(line, sizeof(line), &off, user_tls_test_status_name(test_case->status));
+    (void)shell_append_text(line, sizeof(line), &off, msg_tls_test_case_sep);
+    (void)shell_append_text(line, sizeof(line), &off, test_case->name);
+    if (test_case->detail[0] != '\0') {
+        (void)shell_append_text(line, sizeof(line), &off, msg_tls_test_dash);
+        (void)shell_append_text(line, sizeof(line), &off, test_case->detail);
+    }
+    shell_println(line);
+}
+
+static USER_CODE int shell_run_tls_test(user_shell_state_t* state, const char* arg) {
+    int status;
+
+    if (!state) return -1;
+    if (arg && shell_skip_spaces(arg)[0] != '\0') {
+        shell_print_usage("Usage: tls_test");
+        return -1;
+    }
+
+    status = user_tls_run_selftests(&state->tls_report);
+    shell_println(msg_tls_test_header);
+    shell_print_tls_summary_line("Total          : ", state->tls_report.total_count);
+    shell_print_tls_summary_line("Passed         : ", state->tls_report.pass_count);
+    shell_print_tls_summary_line("Failed         : ", state->tls_report.fail_count);
+    shell_print_tls_summary_line("Pending        : ", state->tls_report.pending_count);
+    shell_print_tls_summary_line("Skipped        : ", state->tls_report.skip_count);
+
+    for (uint32_t i = 0; i < state->tls_report.total_count && i < USER_TLS_SELFTEST_MAX_CASES; i++) {
+        shell_print_tls_case(&state->tls_report.cases[i]);
+    }
+    return status;
 }
 
 static USER_CODE int shell_run_edit(const char* arg) {
@@ -887,8 +1019,10 @@ void USER_CODE user_shell_entry_c(user_shell_state_t* state) {
     else if (strcmp(command, "ping") == 0) status = shell_run_ping(state, args);
     else if (strcmp(command, "ntp") == 0) status = shell_run_ntp(state, args);
     else if (strcmp(command, "http") == 0) status = shell_run_http(state, args);
+    else if (strcmp(command, "https") == 0) status = shell_run_https(state, args);
     else if (strcmp(command, "netdemo") == 0) status = shell_run_netdemo(state, args);
     else if (strcmp(command, "fetch") == 0) status = shell_run_fetch(state, args);
+    else if (strcmp(command, "tls_test") == 0) status = shell_run_tls_test(state, args);
     else if (strcmp(command, "malloc_test") == 0) status = shell_run_privileged(PRIV_CMD_MALLOC_TEST, "", "error: malloc_test failed.");
     else if (strcmp(command, "usermode_test") == 0) status = shell_run_privileged(PRIV_CMD_USERMODE_TEST, "", "error: usermode_test requires graphics mode.");
     else if (strcmp(command, "hwinfo") == 0) status = shell_run_privileged(PRIV_CMD_HWINFO, "", "error: Unable to show hardware info.");

@@ -6,6 +6,7 @@
 #include "gdt.h"
 #include "net.h"
 #include "syscall.h"
+#include "user_tls.h"
 
 #define USER_APP_STATUS_OK 0
 #define USER_APP_STATUS_RUNNING 1
@@ -25,6 +26,8 @@ typedef struct {
 
 typedef struct {
     int status;
+    uint32_t use_https;
+    uint32_t debug_stage;
     net_http_result_t result;
     char host[96];
     char path[160];
@@ -33,6 +36,7 @@ typedef struct {
 
 typedef struct {
     int status;
+    uint32_t use_https;
     uint32_t body_offset;
     uint32_t saved_len;
     net_http_result_t result;
@@ -47,6 +51,7 @@ typedef struct {
     int exit_code;
     net_http_result_t http_result;
     net_ping_result_t ping_result;
+    user_tls_selftest_report_t tls_report;
     rtc_local_time_t local_time;
     disk_fs_node_t dir_entries[MAX_FILES];
     char command[128];
@@ -141,7 +146,9 @@ void launch_user_narcpad();
 void launch_user_settings();
 void launch_user_explorer(int initial_dir);
 void run_user_tasks();
+void stop_all_background_user_tasks();
 int run_user_netdemo(const char* target);
+int run_user_https_command(const char* target);
 int run_user_fetch(const char* args);
 int run_user_shell_command(const char* command);
 void stop_user_snake();
@@ -157,6 +164,7 @@ void queue_user_narcpad_event(int type, int value);
 void queue_user_settings_event(int type, int value);
 void queue_user_explorer_event(int type, int value);
 void user_yield_handler(trap_frame_t* frame);
+void usermode_debug_dump(const char* tag);
 
 extern user_snake_state_t* user_snake_state_ptr;
 extern user_netdemo_state_t* user_netdemo_state_ptr;

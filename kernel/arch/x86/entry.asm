@@ -31,15 +31,24 @@ global process_switch
 global run_user_task
 extern usermode_jump_eip
 extern usermode_jump_esp
+extern __bss_start
+extern __bss_end
 extern user_kernel_resume_esp
 extern user_kernel_ebx
 extern user_kernel_esi
 extern user_kernel_edi
 extern user_kernel_ebp
+extern user_current_task_frame_ptr
 SECTION .text.prologue
 _start:
     mov esp, 0x02C00000
     mov ebp, esp
+    cld
+    mov edi, __bss_start
+    mov ecx, __bss_end
+    sub ecx, edi
+    xor eax, eax
+    rep stosb
     call kmain
     cli
 .halt:
@@ -235,7 +244,7 @@ run_user_task:
     mov [user_kernel_esi], esi
     mov [user_kernel_edi], edi
     mov [user_kernel_ebp], ebp
-    mov ebp, [esp + 4]
+    mov ebp, [user_current_task_frame_ptr]
 
     push dword [ebp + 68]
     push dword [ebp + 64]
@@ -296,10 +305,18 @@ isr_syscall:
     pusha
     
     ; Save old segments
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
     
     ; Load kernel segments
     mov ax, 0x10
@@ -314,10 +331,14 @@ isr_syscall:
     add esp, 4
 
     ; Restore segments
-    pop gs
-    pop fs
-    pop es
-    pop ds
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
+    pop eax
+    mov es, ax
+    pop eax
+    mov ds, ax
 
     popa
     add esp, 4 ; remove dummy error code
@@ -327,10 +348,18 @@ isr_user_yield:
     push dword 0
     pusha
 
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
 
     mov ax, 0x10
     mov ds, ax
@@ -361,10 +390,18 @@ isr_gpf:
     pusha
     
     ; Save old segments
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
     
     ; Load kernel segments
     mov ax, 0x10
@@ -377,10 +414,14 @@ isr_gpf:
     call gpf_handler
     add esp, 4
     
-    pop gs
-    pop fs
-    pop es
-    pop ds
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
+    pop eax
+    mov es, ax
+    pop eax
+    mov ds, ax
     
     popa
     add esp, 4 ; Error code
@@ -391,10 +432,18 @@ isr_invalid_opcode:
     push dword 0
     pusha
 
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
 
     mov ax, 0x10
     mov ds, ax
@@ -406,10 +455,14 @@ isr_invalid_opcode:
     call invalid_opcode_handler
     add esp, 4
 
-    pop gs
-    pop fs
-    pop es
-    pop ds
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
+    pop eax
+    mov es, ax
+    pop eax
+    mov ds, ax
 
     popa
     add esp, 4
@@ -419,10 +472,18 @@ extern stack_fault_handler
 isr_stack_fault:
     pusha
 
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
 
     mov ax, 0x10
     mov ds, ax
@@ -434,10 +495,14 @@ isr_stack_fault:
     call stack_fault_handler
     add esp, 4
 
-    pop gs
-    pop fs
-    pop es
-    pop ds
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
+    pop eax
+    mov es, ax
+    pop eax
+    mov ds, ax
 
     popa
     add esp, 4
@@ -447,10 +512,18 @@ extern page_fault_handler
 isr_page_fault:
     pusha
 
-    push ds
-    push es
-    push fs
-    push gs
+    xor eax, eax
+    mov ax, ds
+    push eax
+    xor eax, eax
+    mov ax, es
+    push eax
+    xor eax, eax
+    mov ax, fs
+    push eax
+    xor eax, eax
+    mov ax, gs
+    push eax
 
     mov ax, 0x10
     mov ds, ax
@@ -462,10 +535,14 @@ isr_page_fault:
     call page_fault_handler
     add esp, 4
 
-    pop gs
-    pop fs
-    pop es
-    pop ds
+    pop eax
+    mov gs, ax
+    pop eax
+    mov fs, ax
+    pop eax
+    mov es, ax
+    pop eax
+    mov ds, ax
 
     popa
     add esp, 4
