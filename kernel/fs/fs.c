@@ -1,6 +1,7 @@
 #include "fs.h"
 #include "string.h"
 #include "storage.h"
+#include "memory_alloc.h"
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
@@ -15,6 +16,31 @@ disk_fs_node_t dir_cache[MAX_FILES];
 uint8_t sector_buffer[512];
 int current_dir_index = -1;
 
+extern const uint8_t _binary_obj_user_bin_hello_start[];
+extern const uint8_t _binary_obj_user_bin_hello_end[];
+extern const uint8_t _binary_obj_user_bin_ps_start[];
+extern const uint8_t _binary_obj_user_bin_ps_end[];
+extern const uint8_t _binary_obj_user_bin_cat_start[];
+extern const uint8_t _binary_obj_user_bin_cat_end[];
+extern const uint8_t _binary_obj_user_bin_echo_start[];
+extern const uint8_t _binary_obj_user_bin_echo_end[];
+extern const uint8_t _binary_obj_user_bin_kill_start[];
+extern const uint8_t _binary_obj_user_bin_kill_end[];
+
+typedef struct {
+    const char* path;
+    const uint8_t* start;
+    const uint8_t* end;
+} fs_packaged_binary_t;
+
+static const fs_packaged_binary_t fs_packaged_binaries[] = {
+    { "/bin/hello", _binary_obj_user_bin_hello_start, _binary_obj_user_bin_hello_end },
+    { "/bin/ps", _binary_obj_user_bin_ps_start, _binary_obj_user_bin_ps_end },
+    { "/bin/cat", _binary_obj_user_bin_cat_start, _binary_obj_user_bin_cat_end },
+    { "/bin/echo", _binary_obj_user_bin_echo_start, _binary_obj_user_bin_echo_end },
+    { "/bin/kill", _binary_obj_user_bin_kill_start, _binary_obj_user_bin_kill_end }
+};
+
 static uint32_t node_sector_count(const disk_fs_node_t* node) {
     uint32_t count;
     memcpy(&count, node->reserved, sizeof(count));
@@ -24,6 +50,41 @@ static uint32_t node_sector_count(const disk_fs_node_t* node) {
 
 static void set_node_sector_count(disk_fs_node_t* node, uint32_t count) {
     memcpy(node->reserved, &count, sizeof(count));
+}
+
+static int fs_blob_matches_file(const char* path, const uint8_t* data, size_t len) {
+    uint8_t verify_buffer[512];
+    size_t offset = 0;
+    int idx = fs_find_node(path);
+
+    if (idx < 0 || dir_cache[idx].flags != FS_NODE_FILE) return 0;
+    if (dir_cache[idx].size != len) return 0;
+
+    while (offset < len) {
+        size_t chunk = len - offset;
+        int read_status;
+
+        if (chunk > sizeof(verify_buffer)) chunk = sizeof(verify_buffer);
+        read_status = fs_read_file_raw_by_idx(idx, verify_buffer, offset, chunk);
+        if (read_status != (int)chunk) return 0;
+        if (memcmp(verify_buffer, data + offset, chunk) != 0) return 0;
+        offset += chunk;
+    }
+    return 1;
+}
+
+static void fs_sync_packaged_binaries() {
+    size_t count = sizeof(fs_packaged_binaries) / sizeof(fs_packaged_binaries[0]);
+
+    (void)fs_create_dir("/bin");
+    for (size_t i = 0; i < count; i++) {
+        const fs_packaged_binary_t* entry = &fs_packaged_binaries[i];
+        size_t len = (size_t)(entry->end - entry->start);
+
+        if (len == 0U) continue;
+        if (fs_blob_matches_file(entry->path, entry->start, len)) continue;
+        (void)fs_write_file_raw(entry->path, entry->start, len);
+    }
 }
 
 static int fs_find_child(int parent_idx, const char* name, uint32_t type) {
@@ -196,6 +257,7 @@ void init_fs() {
     load_dir_cache();
     current_dir_index = FS_ROOT_INDEX;
     if (!fs_validate()) fs_format();
+    fs_sync_packaged_binaries();
 }
 int fs_create_file(const char* name) {
     char leaf[32];
@@ -245,14 +307,19 @@ int fs_change_dir(const char* name) {
     }
     return -1;
 }
-int fs_write_file_by_idx(int idx, const char* data) {
-    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE || !data) return -1;
-    size_t len = strlen(data);
-    if (len > MAX_FILE_SIZE) len = MAX_FILE_SIZE;
-    uint32_t needed_sectors = (uint32_t)((len + 511) / 512);
-    uint32_t current_sectors = node_sector_count(&dir_cache[idx]);
-    uint32_t old_lba = dir_cache[idx].lba;
+int fs_write_file_raw_by_idx(int idx, const void* data, size_t len) {
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint32_t needed_sectors;
+    uint32_t current_sectors;
+    uint32_t old_lba;
     int moved = 0;
+
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+    if (!bytes && len != 0U) return -1;
+    if (len > MAX_FILE_SIZE) len = MAX_FILE_SIZE;
+    current_sectors = node_sector_count(&dir_cache[idx]);
+    old_lba = dir_cache[idx].lba;
+    needed_sectors = (uint32_t)((len + 511U) / 512U);
 
     if (needed_sectors != 0) {
         if (dir_cache[idx].lba == 0 || current_sectors < needed_sectors) {
@@ -268,22 +335,64 @@ int fs_write_file_by_idx(int idx, const char* data) {
     dir_cache[idx].size = (uint32_t)len;
     set_node_sector_count(&dir_cache[idx], needed_sectors);
     fs_sync();
-    if (needed_sectors == 0) return 0;
+    if (needed_sectors == 0) {
+        if (old_lba != 0 && current_sectors != 0) fs_zero_sectors(old_lba, current_sectors);
+        return 0;
+    }
 
     for (uint32_t sector = 0; sector < needed_sectors; sector++) {
         size_t offset = sector * 512U;
         size_t chunk = len > offset ? len - offset : 0;
         if (chunk > 512U) chunk = 512U;
         memset(sector_buffer, 0, sizeof(sector_buffer));
-        memcpy(sector_buffer, data + offset, chunk);
+        memcpy(sector_buffer, bytes + offset, chunk);
         if (storage_write_sector(dir_cache[idx].lba + sector, sector_buffer) != 0) return -1;
     }
     if (current_sectors > needed_sectors && dir_cache[idx].lba != 0) {
         fs_zero_sectors(dir_cache[idx].lba + needed_sectors, current_sectors - needed_sectors);
     }
     if (moved && old_lba != 0) fs_zero_sectors(old_lba, current_sectors);
-    if (needed_sectors == 0 && old_lba != 0) fs_zero_sectors(old_lba, current_sectors);
-    return 0;
+    return (int)len;
+}
+
+int fs_write_file_by_idx(int idx, const char* data) {
+    size_t len;
+
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE || !data) return -1;
+    len = strlen(data);
+    if (len > MAX_FILE_SIZE) len = MAX_FILE_SIZE;
+    return fs_write_file_raw_by_idx(idx, data, len) < 0 ? -1 : 0;
+}
+int fs_write_file_raw_at_by_idx(int idx, const void* data, size_t offset, size_t len) {
+    uint8_t* merged;
+    size_t old_size;
+    size_t new_size;
+    int read_status;
+    int write_status;
+
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+    if (!data && len != 0U) return -1;
+    if (offset > MAX_FILE_SIZE) return -1;
+    if (len > MAX_FILE_SIZE - offset) len = MAX_FILE_SIZE - offset;
+    if (len == 0U) return 0;
+    old_size = dir_cache[idx].size;
+    new_size = old_size > offset + len ? old_size : offset + len;
+    if (new_size == 0U) return fs_write_file_raw_by_idx(idx, 0, 0U);
+
+    merged = (uint8_t*)malloc(new_size);
+    if (!merged) return -1;
+    memset(merged, 0, new_size);
+    if (old_size != 0U) {
+        read_status = fs_read_file_raw_by_idx(idx, merged, 0U, old_size);
+        if (read_status < 0) {
+            free(merged);
+            return -1;
+        }
+    }
+    if (len != 0U) memcpy(merged + offset, data, len);
+    write_status = fs_write_file_raw_by_idx(idx, merged, new_size);
+    free(merged);
+    return write_status;
 }
 int fs_write_file(const char* name, const char* data) {
     int idx = fs_find_node(name);
@@ -291,29 +400,79 @@ int fs_write_file(const char* name, const char* data) {
         if (fs_create_file(name) == -1) return -1;
         idx = fs_find_node(name);
     }
-    if (idx == -1 || dir_cache[idx].flags != 1) return -1;
+    if (idx == -1 || dir_cache[idx].flags != FS_NODE_FILE) return -1;
     return fs_write_file_by_idx(idx, data);
 }
-int fs_read_file_by_idx(int idx, char* buffer, size_t max_len) {
-    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE || !buffer || max_len == 0) return -1;
-    size_t read_len = dir_cache[idx].size;
-    if (read_len >= max_len) read_len = max_len - 1;
-    uint32_t sectors = node_sector_count(&dir_cache[idx]);
+int fs_read_file_raw_by_idx(int idx, void* buffer, size_t offset, size_t max_len) {
+    uint8_t* bytes = (uint8_t*)buffer;
+    size_t read_len;
+    uint32_t sectors;
     size_t copied = 0;
-    for (uint32_t sector = 0; sector < sectors && copied < read_len; sector++) {
+    uint32_t start_sector;
+    size_t sector_offset;
+
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+    if (!bytes && max_len != 0U) return -1;
+    if (offset >= dir_cache[idx].size || max_len == 0U) return 0;
+
+    sectors = node_sector_count(&dir_cache[idx]);
+    read_len = dir_cache[idx].size - offset;
+    if (read_len > max_len) read_len = max_len;
+    start_sector = (uint32_t)(offset / 512U);
+    sector_offset = offset % 512U;
+
+    for (uint32_t sector = start_sector; sector < sectors && copied < read_len; sector++) {
+        size_t chunk;
+
         if (storage_read_sector(dir_cache[idx].lba + sector, sector_buffer) != 0) return -1;
-        size_t chunk = read_len - copied;
-        if (chunk > 512U) chunk = 512U;
-        memcpy(buffer + copied, sector_buffer, chunk);
+        chunk = 512U - sector_offset;
+        if (chunk > read_len - copied) chunk = read_len - copied;
+        memcpy(bytes + copied, sector_buffer + sector_offset, chunk);
         copied += chunk;
+        sector_offset = 0U;
     }
+
+    return (int)copied;
+}
+int fs_read_file_by_idx(int idx, char* buffer, size_t max_len) {
+    int read_len;
+
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE || !buffer || max_len == 0) return -1;
+    read_len = fs_read_file_raw_by_idx(idx, buffer, 0U, max_len - 1U);
+    if (read_len < 0) return -1;
     buffer[read_len] = '\0';
     return 0;
+}
+int fs_write_file_raw(const char* name, const void* data, size_t len) {
+    int idx = fs_find_node(name);
+
+    if (idx == -1) {
+        if (fs_create_file(name) == -1) return -1;
+        idx = fs_find_node(name);
+    }
+    if (idx == -1 || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+    return fs_write_file_raw_by_idx(idx, data, len);
+}
+int fs_write_file_raw_at(const char* name, const void* data, size_t offset, size_t len) {
+    int idx = fs_find_node(name);
+
+    if (idx == -1) {
+        if (fs_create_file(name) == -1) return -1;
+        idx = fs_find_node(name);
+    }
+    if (idx == -1 || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+    return fs_write_file_raw_at_by_idx(idx, data, offset, len);
 }
 int fs_read_file(const char* name, char* buffer, size_t max_len) {
     int idx = fs_find_node(name);
     if (idx == -1) return -1;
     return fs_read_file_by_idx(idx, buffer, max_len);
+}
+int fs_read_file_raw(const char* name, void* buffer, size_t offset, size_t max_len) {
+    int idx = fs_find_node(name);
+
+    if (idx == -1) return -1;
+    return fs_read_file_raw_by_idx(idx, buffer, offset, max_len);
 }
 int fs_delete_file(const char* name) {
     int idx = fs_find_node(name);

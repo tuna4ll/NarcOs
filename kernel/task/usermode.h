@@ -10,6 +10,10 @@
 
 #define USER_APP_STATUS_OK 0
 #define USER_APP_STATUS_RUNNING 1
+#define USER_KERNEL_RETURN_NONE 0U
+#define USER_KERNEL_RETURN_KERNEL 1U
+
+typedef struct process process_t;
 
 typedef struct {
     int px[100];
@@ -151,6 +155,10 @@ int run_user_netdemo(const char* target);
 int run_user_https_command(const char* target);
 int run_user_fetch(const char* args);
 int run_user_shell_command(const char* command);
+int usermode_prepare_process_context(process_t* proc);
+int usermode_run_external_process(process_t* proc);
+int usermode_schedule_current_process_exit(int exit_code);
+uint32_t usermode_active_trap_stack_top(void);
 void stop_user_snake();
 int user_snake_running();
 int user_narcpad_running();
@@ -165,6 +173,7 @@ void queue_user_settings_event(int type, int value);
 void queue_user_explorer_event(int type, int value);
 void user_yield_handler(trap_frame_t* frame);
 void usermode_debug_dump(const char* tag);
+int usermode_exit_current_task(int exit_code);
 
 extern user_snake_state_t* user_snake_state_ptr;
 extern user_netdemo_state_t* user_netdemo_state_ptr;
@@ -185,6 +194,8 @@ extern uint32_t user_kernel_ebx;
 extern uint32_t user_kernel_esi;
 extern uint32_t user_kernel_edi;
 extern uint32_t user_kernel_ebp;
+extern uint32_t user_kernel_return_mode;
+extern trap_frame_t* user_current_task_frame_ptr;
 extern void run_user_task(trap_frame_t* frame);
 
 #endif

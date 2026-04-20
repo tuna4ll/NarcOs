@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #define MAX_FILES 64
-#define MAX_FILE_SIZE 4096
+#define MAX_FILE_SIZE 16384
 #define FS_NODE_FILE 1
 #define FS_NODE_DIR  2
 typedef struct {
@@ -18,8 +18,14 @@ void init_fs();
 int fs_create_file(const char* name);
 int fs_create_dir(const char* name);
 int fs_change_dir(const char* name);
+int fs_write_file_raw_by_idx(int idx, const void* data, size_t len);
+int fs_write_file_raw_at_by_idx(int idx, const void* data, size_t offset, size_t len);
+int fs_read_file_raw_by_idx(int idx, void* buffer, size_t offset, size_t max_len);
 int fs_write_file_by_idx(int idx, const char* data);
 int fs_read_file_by_idx(int idx, char* buffer, size_t max_len);
+int fs_write_file_raw(const char* name, const void* data, size_t len);
+int fs_write_file_raw_at(const char* name, const void* data, size_t offset, size_t len);
+int fs_read_file_raw(const char* name, void* buffer, size_t offset, size_t max_len);
 int fs_write_file(const char* name, const char* data);
 int fs_read_file(const char* name, char* buffer, size_t max_len);
 int fs_delete_file(const char* name);

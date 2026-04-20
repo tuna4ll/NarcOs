@@ -304,6 +304,8 @@ void USER_CODE user_netdemo_entry_c(user_netdemo_state_t* state) {
 }
 
 void USER_CODE user_fetch_entry_c(user_fetch_state_t* state) {
+    const void* body_ptr;
+    uint32_t body_len;
     int status;
 
     if (!state) return;
@@ -324,8 +326,14 @@ void USER_CODE user_fetch_entry_c(user_fetch_state_t* state) {
     }
 
     state->body_offset = user_http_find_body(state->response, state->result.response_len);
-    state->saved_len = (uint32_t)strlen(state->response + state->body_offset);
-    if (user_fs_write(state->output_path, state->response + state->body_offset) != 0) {
+    body_ptr = state->response;
+    body_len = state->result.response_len;
+    if (state->body_offset < body_len) {
+        body_ptr = state->response + state->body_offset;
+        body_len -= state->body_offset;
+    }
+    state->saved_len = body_len;
+    if (user_fs_write_raw(state->output_path, body_ptr, body_len) != (int)body_len) {
         state->status = NET_ERR_IO;
         user_print(user_fetch_msg_write_err);
         return;

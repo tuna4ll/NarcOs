@@ -389,6 +389,28 @@ int paging_map_user_region(uint32_t virt_addr, uint32_t phys_addr, size_t size, 
     return 0;
 }
 
+void paging_unmap_user_region(uint32_t virt_addr, size_t size) {
+    uint32_t page_count;
+    uint32_t first_slot;
+
+    if (size == 0) return;
+    if ((virt_addr & (PAGE_SIZE - 1U)) != 0U) return;
+    if (virt_addr < USER_DATA_WINDOW_BASE) return;
+    if (virt_addr >= USER_DATA_WINDOW_BASE + USER_DATA_WINDOW_SIZE) return;
+
+    page_count = (uint32_t)((size + PAGE_SIZE - 1U) / PAGE_SIZE);
+    if (page_count == 0) return;
+    if ((uint64_t)virt_addr + (uint64_t)page_count * PAGE_SIZE >
+        (uint64_t)USER_DATA_WINDOW_BASE + USER_DATA_WINDOW_SIZE) return;
+
+    first_slot = (virt_addr - USER_DATA_WINDOW_BASE) / PAGE_SIZE;
+    for (uint32_t i = 0; i < page_count; i++) {
+        uint32_t virt_page = virt_addr + i * PAGE_SIZE;
+        user_data_page_table[first_slot + i] = 0;
+        paging_invalidate_page((void*)virt_page);
+    }
+}
+
 void* paging_alloc_kernel_stack(size_t stack_pages, uint32_t* out_stack_top) {
     uint32_t total_slots;
     int start_slot;

@@ -18,6 +18,13 @@
 #define strlen user_strlen
 #define strncpy user_strncpy
 #define memset user_memset
+#define memcpy user_memcpy
+
+#define SHELL_MAX_ARGV 8
+#define SHELL_ARG_LEN 64
+#define SHELL_PIPE_LEFT_FD 14
+#define SHELL_PIPE_RIGHT_FD 15
+#define SHELL_PROCESS_SNAPSHOT_MAX 16
 
 static const char shell_help_lines[][72] USER_RODATA = {
     "NarcOs Shell",
@@ -32,6 +39,14 @@ static const char shell_help_lines[][72] USER_RODATA = {
     "  time    - Show current local time",
     "  ls      - List files",
     "  pwd     - Show current path",
+    "  ps      - List running processes",
+    "  procdump - Dump process table to serial log",
+    "  proc_test - Run waitpid/zombie self-test",
+    "  pipe_test - Run pipe scheduling self-test",
+    "  echo    - Print arguments",
+    "  spawn   - Launch an external process",
+    "  wait    - Wait for a child process",
+    "  kill    - Terminate a process",
     "  touch   - Create empty file (touch <file>)",
     "  cat     - Read file (cat <file>)",
     "  write   - Write to file (write <file> <text>)",
@@ -62,8 +77,6 @@ static const char shell_help_lines[][72] USER_RODATA = {
 };
 
 static const char msg_success[] USER_RODATA = "Success.";
-static const char msg_unknown_prefix[] USER_RODATA = "Error: Unknown command '";
-static const char msg_unknown_suffix[] USER_RODATA = "'";
 static const char msg_empty_response[] USER_RODATA = "(empty response)";
 static const char msg_http_truncated[] USER_RODATA = "warning: Response truncated to local buffer size.";
 static const char msg_http_partial[] USER_RODATA = "warning: Remote peer did not close cleanly before timeout.";
@@ -78,6 +91,12 @@ static const char msg_tls_test_header[] USER_RODATA = "TLS Self-Test";
 static const char msg_tls_test_case_prefix[] USER_RODATA = "[";
 static const char msg_tls_test_case_sep[] USER_RODATA = "] ";
 static const char msg_tls_test_dash[] USER_RODATA = " - ";
+static const char msg_process_kind_kernel[] USER_RODATA = "kernel";
+static const char msg_process_kind_user[] USER_RODATA = "user";
+static const char msg_process_state_unused[] USER_RODATA = "unused";
+static const char msg_process_state_runnable[] USER_RODATA = "runnable";
+static const char msg_process_state_running[] USER_RODATA = "running";
+static const char msg_process_state_zombie[] USER_RODATA = "zombie";
 
 static USER_CODE const char* shell_net_error_string(int status) {
     switch (status) {
@@ -97,8 +116,42 @@ static USER_CODE const char* shell_net_error_string(int status) {
     }
 }
 
+static USER_CODE const char* shell_process_kind_name(int kind) {
+    return kind == 1 ? msg_process_kind_user : msg_process_kind_kernel;
+}
+
+static USER_CODE const char* shell_process_state_name(int state) {
+    switch (state) {
+        case 0: return msg_process_state_unused;
+        case 1: return msg_process_state_runnable;
+        case 2: return msg_process_state_running;
+        case 3: return msg_process_state_zombie;
+        default: return "unknown";
+    }
+}
+
+static USER_CODE int shell_write_fd(int fd, const void* data, uint32_t len) {
+    const uint8_t* bytes = (const uint8_t*)data;
+    uint32_t written = 0;
+
+    while (written < len) {
+        int chunk = user_write(fd, bytes + written, len - written);
+        if (chunk <= 0) return -1;
+        written += (uint32_t)chunk;
+    }
+    return (int)written;
+}
+
 static USER_CODE void shell_println(const char* text) {
-    user_print(text ? text : "");
+    const char* msg = text ? text : "";
+
+    (void)shell_write_fd(1, msg, (uint32_t)strlen(msg));
+    (void)shell_write_fd(1, "\n", 1U);
+}
+
+static USER_CODE void shell_print_raw(const char* text) {
+    const char* msg = text ? text : "";
+    (void)shell_write_fd(1, msg, (uint32_t)strlen(msg));
 }
 
 static USER_CODE void shell_print_usage(const char* usage) {
@@ -112,8 +165,11 @@ static USER_CODE void shell_print_error(const char* message) {
     if (!message) message = "error";
     while (*message && off + 1 < (int)sizeof(line)) line[off++] = *message++;
     line[off] = '\0';
-    shell_println(line);
+    (void)shell_write_fd(2, line, (uint32_t)strlen(line));
+    (void)shell_write_fd(2, "\n", 1U);
 }
+
+static USER_CODE const char* shell_skip_spaces(const char* text);
 
 static USER_CODE int shell_append_text(char* dst, int dst_len, int* io_off, const char* src) {
     int off = *io_off;
@@ -125,6 +181,118 @@ static USER_CODE int shell_append_text(char* dst, int dst_len, int* io_off, cons
     }
     dst[off] = '\0';
     *io_off = off;
+    return 0;
+}
+
+static USER_CODE int shell_parse_int(const char* text, int* out_value) {
+    int sign = 1;
+    int value = 0;
+
+    if (!text || !out_value) return -1;
+    text = shell_skip_spaces(text);
+    if (*text == '-') {
+        sign = -1;
+        text++;
+    }
+    if (*text < '0' || *text > '9') return -1;
+    while (*text >= '0' && *text <= '9') {
+        value = value * 10 + (*text - '0');
+        text++;
+    }
+    text = shell_skip_spaces(text);
+    if (*text != '\0') return -1;
+    *out_value = value * sign;
+    return 0;
+}
+
+static USER_CODE int shell_has_slash(const char* text) {
+    if (!text) return 0;
+    while (*text) {
+        if (*text == '/') return 1;
+        text++;
+    }
+    return 0;
+}
+
+static USER_CODE int shell_split_pipe(const char* command, char* left, int left_len,
+                                      char* right, int right_len) {
+    int left_off = 0;
+    int right_off = 0;
+    int seen_pipe = 0;
+
+    if (!command || !left || !right || left_len <= 0 || right_len <= 0) return -1;
+    while (*command) {
+        if (*command == '|') {
+            if (seen_pipe != 0) return -1;
+            seen_pipe = 1;
+            command++;
+            continue;
+        }
+        if (seen_pipe == 0) {
+            if (left_off + 1 >= left_len) return -1;
+            left[left_off++] = *command++;
+        } else {
+            if (right_off + 1 >= right_len) return -1;
+            right[right_off++] = *command++;
+        }
+    }
+    left[left_off] = '\0';
+    right[right_off] = '\0';
+    if (seen_pipe == 0) return -1;
+    if (shell_skip_spaces(left)[0] == '\0' || shell_skip_spaces(right)[0] == '\0') return -1;
+    return 0;
+}
+
+static USER_CODE int shell_parse_segment_argv(const char* segment, char* command_out, int command_len,
+                                              char argv_storage[SHELL_MAX_ARGV][SHELL_ARG_LEN],
+                                              const char* argv_ptrs[SHELL_MAX_ARGV], int* out_argc) {
+    int argc = 0;
+    const char* cursor;
+
+    if (!segment || !command_out || command_len <= 0 || !argv_storage || !argv_ptrs || !out_argc) return -1;
+    cursor = shell_skip_spaces(segment);
+    command_out[0] = '\0';
+    while (*cursor) {
+        int off = 0;
+
+        if (argc >= SHELL_MAX_ARGV) return -1;
+        while (*cursor && *cursor != ' ') {
+            if (off + 1 >= SHELL_ARG_LEN) return -1;
+            argv_storage[argc][off++] = *cursor++;
+        }
+        argv_storage[argc][off] = '\0';
+        argv_ptrs[argc] = argv_storage[argc];
+        argc++;
+        cursor = shell_skip_spaces(cursor);
+    }
+    if (argc == 0) return -1;
+    strncpy(command_out, argv_storage[0], (size_t)command_len - 1U);
+    command_out[command_len - 1] = '\0';
+    *out_argc = argc;
+    return 0;
+}
+
+static USER_CODE int shell_resolve_external_path(const char* command, char* resolved, int resolved_len) {
+    disk_fs_node_t node;
+    int idx;
+    int off = 0;
+
+    if (!command || !resolved || resolved_len <= 1) return -1;
+    if (shell_has_slash(command)) {
+        idx = user_fs_find_node(command);
+        if (idx < 0 || user_fs_get_node_info(idx, &node) != 0 || node.flags != FS_NODE_FILE) return -1;
+        strncpy(resolved, command, (size_t)resolved_len - 1U);
+        resolved[resolved_len - 1] = '\0';
+        return 0;
+    }
+
+    resolved[0] = '\0';
+    if (shell_append_text(resolved, resolved_len, &off, "/bin/") != 0 ||
+        shell_append_text(resolved, resolved_len, &off, command) != 0) {
+        return -1;
+    }
+    idx = user_fs_find_node(resolved);
+    if (idx < 0 || user_fs_get_node_info(idx, &node) != 0 || node.flags != FS_NODE_FILE) return -1;
     return 0;
 }
 
@@ -423,16 +591,36 @@ static USER_CODE int shell_run_touch(const char* arg) {
 }
 
 static USER_CODE int shell_run_cat(user_shell_state_t* state, const char* arg) {
+    int status;
+
     if (!state) return -1;
     if (!arg || arg[0] == '\0') {
-        shell_print_usage("Usage: cat <file>");
-        return -1;
+        for (;;) {
+            status = user_read(0, state->scratch, sizeof(state->scratch));
+            if (status < 0) {
+                shell_print_error("error: stdin read failed.");
+                return -1;
+            }
+            if (status == 0) return 0;
+            if (shell_write_fd(1, state->scratch, (uint32_t)status) < 0) return -1;
+        }
     }
     if (user_fs_read(arg, state->scratch, sizeof(state->scratch)) != 0) {
         shell_print_error("error: File not found.");
         return -1;
     }
-    shell_println(state->scratch);
+    shell_print_raw(state->scratch);
+    if (state->scratch[0] != '\0' && state->scratch[strlen(state->scratch) - 1U] != '\n') {
+        shell_print_raw("\n");
+    }
+    return 0;
+}
+
+static USER_CODE int shell_run_echo(const char* arg) {
+    const char* text = (arg && arg[0] != '\0') ? arg : "";
+
+    if (shell_write_fd(1, text, (uint32_t)strlen(text)) < 0) return -1;
+    if (shell_write_fd(1, "\n", 1U) < 0) return -1;
     return 0;
 }
 
@@ -831,6 +1019,8 @@ static USER_CODE int shell_run_fetch(user_shell_state_t* state, const char* arg)
     int status;
     int use_https = 0;
     uint32_t body_offset;
+    uint32_t body_len;
+    const void* body_ptr;
     int off = 0;
 
     if (!state) return -1;
@@ -879,14 +1069,20 @@ static USER_CODE int shell_run_fetch(user_shell_state_t* state, const char* arg)
     }
 
     body_offset = user_http_find_body(state->scratch, state->http_result.response_len);
-    if (user_fs_write(output_path, state->scratch + body_offset) != 0) {
+    body_ptr = state->scratch;
+    body_len = state->http_result.response_len;
+    if (body_offset < body_len) {
+        body_ptr = state->scratch + body_offset;
+        body_len -= body_offset;
+    }
+    if (user_fs_write_raw(output_path, body_ptr, body_len) != (int)body_len) {
         shell_println(msg_fetch_write_err);
         return -1;
     }
 
     line[0] = '\0';
     (void)shell_append_text(line, sizeof(line), &off, "Saved ");
-    (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)strlen(state->scratch + body_offset));
+    (void)shell_append_uint(line, sizeof(line), &off, body_len);
     (void)shell_append_text(line, sizeof(line), &off, " bytes to ");
     (void)shell_append_text(line, sizeof(line), &off, output_path);
     shell_println(line);
@@ -972,20 +1168,316 @@ static USER_CODE int shell_run_privileged(int priv_cmd, const char* arg, const c
     return 0;
 }
 
-void USER_CODE user_shell_entry_c(user_shell_state_t* state) {
+static USER_CODE int shell_run_ps(void) {
+    process_snapshot_entry_t entries[SHELL_PROCESS_SNAPSHOT_MAX];
+    char line[320];
+    int count;
+
+    count = user_process_snapshot(entries, SHELL_PROCESS_SNAPSHOT_MAX);
+    if (count < 0) {
+        shell_print_error("error: Failed to read process table.");
+        return -1;
+    }
+
+    shell_println("PID PPID KIND    STATE     EXIT NAME             IMAGE");
+    shell_println("------------------------------------------------------------");
+    for (int i = 0; i < count; i++) {
+        int off = 0;
+
+        line[0] = '\0';
+        (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)entries[i].pid);
+        (void)shell_append_text(line, sizeof(line), &off, "   ");
+        (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)entries[i].parent_pid);
+        (void)shell_append_text(line, sizeof(line), &off, "   ");
+        (void)shell_append_text(line, sizeof(line), &off, shell_process_kind_name(entries[i].kind));
+        if (strlen(shell_process_kind_name(entries[i].kind)) < 6U) (void)shell_append_text(line, sizeof(line), &off, "    ");
+        else (void)shell_append_text(line, sizeof(line), &off, " ");
+        (void)shell_append_text(line, sizeof(line), &off, shell_process_state_name(entries[i].state));
+        if (strlen(shell_process_state_name(entries[i].state)) < 8U) (void)shell_append_text(line, sizeof(line), &off, "    ");
+        else (void)shell_append_text(line, sizeof(line), &off, " ");
+        if (entries[i].exit_code < 0) {
+            (void)shell_append_char(line, sizeof(line), &off, '-');
+            (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)(-entries[i].exit_code));
+        } else {
+            (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)entries[i].exit_code);
+        }
+        (void)shell_append_text(line, sizeof(line), &off, "   ");
+        (void)shell_append_text(line, sizeof(line), &off, entries[i].name);
+        if (entries[i].image_path[0] != '\0') {
+            (void)shell_append_text(line, sizeof(line), &off, "   ");
+            (void)shell_append_text(line, sizeof(line), &off, entries[i].image_path);
+        }
+        shell_println(line);
+    }
+    return 0;
+}
+
+static USER_CODE int shell_wait_for_child(int pid, int* out_status) {
+    int status = 0;
+    int wait_rc;
+
+    wait_rc = user_waitpid(pid, &status, 0U);
+    if (wait_rc < 0) {
+        shell_print_error("error: waitpid failed.");
+        return -1;
+    }
+    if (wait_rc == 0) {
+        shell_print_error("error: child still running.");
+        return -1;
+    }
+    if (out_status) *out_status = status;
+    return wait_rc;
+}
+
+static USER_CODE int shell_is_builtin_command(const char* command) {
+    return strcmp(command, "help") == 0 ||
+           strcmp(command, "clear") == 0 ||
+           strcmp(command, "mem") == 0 ||
+           strcmp(command, "snake") == 0 ||
+           strcmp(command, "settings") == 0 ||
+           strcmp(command, "ver") == 0 ||
+           strcmp(command, "uptime") == 0 ||
+           strcmp(command, "date") == 0 ||
+           strcmp(command, "time") == 0 ||
+           strcmp(command, "ls") == 0 ||
+           strcmp(command, "pwd") == 0 ||
+           strcmp(command, "ps") == 0 ||
+           strcmp(command, "procdump") == 0 ||
+           strcmp(command, "proc_test") == 0 ||
+           strcmp(command, "pipe_test") == 0 ||
+           strcmp(command, "echo") == 0 ||
+           strcmp(command, "spawn") == 0 ||
+           strcmp(command, "wait") == 0 ||
+           strcmp(command, "kill") == 0 ||
+           strcmp(command, "touch") == 0 ||
+           strcmp(command, "cat") == 0 ||
+           strcmp(command, "write") == 0 ||
+           strcmp(command, "edit") == 0 ||
+           strcmp(command, "mkdir") == 0 ||
+           strcmp(command, "cd") == 0 ||
+           strcmp(command, "rm") == 0 ||
+           strcmp(command, "mv") == 0 ||
+           strcmp(command, "ren") == 0 ||
+           strcmp(command, "net") == 0 ||
+           strcmp(command, "dhcp") == 0 ||
+           strcmp(command, "dns") == 0 ||
+           strcmp(command, "ping") == 0 ||
+           strcmp(command, "ntp") == 0 ||
+           strcmp(command, "http") == 0 ||
+           strcmp(command, "https") == 0 ||
+           strcmp(command, "netdemo") == 0 ||
+           strcmp(command, "fetch") == 0 ||
+           strcmp(command, "tls_test") == 0 ||
+           strcmp(command, "malloc_test") == 0 ||
+           strcmp(command, "usermode_test") == 0 ||
+           strcmp(command, "hwinfo") == 0 ||
+           strcmp(command, "pci") == 0 ||
+           strcmp(command, "storage") == 0 ||
+           strcmp(command, "log") == 0 ||
+           strcmp(command, "reboot") == 0 ||
+           strcmp(command, "poweroff") == 0;
+}
+
+static USER_CODE int shell_run_external_segment(const char* segment, int wait_for_exit,
+                                                int* out_pid, int* out_status) {
     char command[32];
-    const char* args;
+    char resolved[128];
+    char argv_storage[SHELL_MAX_ARGV][SHELL_ARG_LEN];
+    const char* argv_ptrs[SHELL_MAX_ARGV];
+    int argc = 0;
+    int pid;
     int status = 0;
 
-    if (!state) return;
-
-    command[0] = '\0';
-    if (shell_copy_token(state->command, command, sizeof(command)) != 0) {
-        state->exit_code = 0;
-        state->status = USER_APP_STATUS_OK;
-        return;
+    if (shell_parse_segment_argv(segment, command, sizeof(command), argv_storage, argv_ptrs, &argc) != 0) {
+        shell_print_error("error: invalid command line.");
+        return -1;
     }
-    args = shell_find_arg_tail(state->command);
+    if (shell_resolve_external_path(command, resolved, sizeof(resolved)) != 0) {
+        shell_print_error("error: executable not found.");
+        return -1;
+    }
+
+    strncpy(argv_storage[0], resolved, sizeof(argv_storage[0]) - 1U);
+    argv_storage[0][sizeof(argv_storage[0]) - 1U] = '\0';
+    argv_ptrs[0] = argv_storage[0];
+    pid = user_spawn(resolved, argv_ptrs, (uint32_t)argc);
+    if (pid < 0) {
+        shell_print_error("error: spawn failed.");
+        return -1;
+    }
+    if (out_pid) *out_pid = pid;
+    if (!wait_for_exit) return 0;
+
+    if (shell_wait_for_child(pid, &status) < 0) return -1;
+    if (out_status) *out_status = status;
+    return status;
+}
+
+static USER_CODE int shell_run_spawn_builtin(const char* args) {
+    char line[96];
+    int off = 0;
+    int pid = 0;
+
+    if (!args || shell_skip_spaces(args)[0] == '\0') {
+        shell_print_usage("Usage: spawn <path-or-command> [args]");
+        return -1;
+    }
+    if (shell_run_external_segment(args, 0, &pid, 0) != 0) return -1;
+
+    line[0] = '\0';
+    (void)shell_append_text(line, sizeof(line), &off, "Spawned pid ");
+    (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)pid);
+    shell_println(line);
+    return 0;
+}
+
+static USER_CODE int shell_run_wait_builtin(const char* args) {
+    char line[96];
+    int off = 0;
+    int pid;
+    int status = 0;
+
+    if (shell_parse_int(args, &pid) != 0 || pid <= 0) {
+        shell_print_usage("Usage: wait <pid>");
+        return -1;
+    }
+    if (shell_wait_for_child(pid, &status) < 0) return -1;
+
+    line[0] = '\0';
+    (void)shell_append_text(line, sizeof(line), &off, "pid ");
+    (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)pid);
+    (void)shell_append_text(line, sizeof(line), &off, " exited with ");
+    if (status < 0) {
+        (void)shell_append_char(line, sizeof(line), &off, '-');
+        (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)(-status));
+    } else {
+        (void)shell_append_uint(line, sizeof(line), &off, (uint32_t)status);
+    }
+    shell_println(line);
+    return status;
+}
+
+static USER_CODE int shell_run_kill_builtin(const char* args) {
+    int pid;
+
+    if (shell_parse_int(args, &pid) != 0 || pid <= 0) {
+        shell_print_usage("Usage: kill <pid>");
+        return -1;
+    }
+    if (user_kill(pid) != 0) {
+        shell_print_error("error: kill failed.");
+        return -1;
+    }
+    shell_println(msg_success);
+    return 0;
+}
+
+static USER_CODE int shell_execute_segment(user_shell_state_t* state, const char* segment, int allow_pipe);
+
+static USER_CODE int shell_run_sequential_pipeline(user_shell_state_t* state, const char* left, const char* right) {
+    int pipefd[2];
+    int left_status;
+    int right_status;
+
+    if (user_dup2(0, SHELL_PIPE_LEFT_FD) < 0 || user_dup2(1, SHELL_PIPE_RIGHT_FD) < 0) {
+        shell_print_error("error: failed to back up stdio.");
+        return -1;
+    }
+    if (user_pipe(pipefd) != 0) {
+        shell_print_error("error: pipe creation failed.");
+        (void)user_close(SHELL_PIPE_LEFT_FD);
+        (void)user_close(SHELL_PIPE_RIGHT_FD);
+        return -1;
+    }
+
+    left_status = -1;
+    right_status = -1;
+    if (user_dup2(pipefd[1], 1) >= 0) {
+        (void)user_close(pipefd[1]);
+        left_status = shell_execute_segment(state, left, 0);
+    }
+    (void)user_dup2(SHELL_PIPE_RIGHT_FD, 1);
+    (void)user_close(SHELL_PIPE_RIGHT_FD);
+    if (user_dup2(pipefd[0], 0) >= 0) {
+        (void)user_close(pipefd[0]);
+        right_status = shell_execute_segment(state, right, 0);
+    }
+    (void)user_dup2(SHELL_PIPE_LEFT_FD, 0);
+    (void)user_close(SHELL_PIPE_LEFT_FD);
+    return right_status != 0 ? right_status : left_status;
+}
+
+static USER_CODE int shell_run_concurrent_pipeline(const char* left, const char* right) {
+    int pipefd[2];
+    int left_pid = -1;
+    int right_pid = -1;
+    int left_status = -1;
+    int right_status = -1;
+
+    if (user_dup2(0, SHELL_PIPE_LEFT_FD) < 0 || user_dup2(1, SHELL_PIPE_RIGHT_FD) < 0) {
+        shell_print_error("error: failed to back up stdio.");
+        return -1;
+    }
+    if (user_pipe(pipefd) != 0) {
+        shell_print_error("error: pipe creation failed.");
+        (void)user_close(SHELL_PIPE_LEFT_FD);
+        (void)user_close(SHELL_PIPE_RIGHT_FD);
+        return -1;
+    }
+
+    if (user_dup2(pipefd[1], 1) < 0) goto restore;
+    (void)user_close(pipefd[1]);
+    if (shell_run_external_segment(left, 0, &left_pid, 0) != 0) goto restore;
+    (void)user_dup2(SHELL_PIPE_RIGHT_FD, 1);
+    (void)user_close(SHELL_PIPE_RIGHT_FD);
+
+    if (user_dup2(pipefd[0], 0) < 0) goto restore;
+    (void)user_close(pipefd[0]);
+    if (shell_run_external_segment(right, 0, &right_pid, 0) != 0) goto restore;
+    (void)user_dup2(SHELL_PIPE_LEFT_FD, 0);
+    (void)user_close(SHELL_PIPE_LEFT_FD);
+
+    if (shell_wait_for_child(left_pid, &left_status) < 0) return -1;
+    if (shell_wait_for_child(right_pid, &right_status) < 0) return -1;
+    return right_status != 0 ? right_status : left_status;
+
+restore:
+    (void)user_dup2(SHELL_PIPE_LEFT_FD, 0);
+    (void)user_dup2(SHELL_PIPE_RIGHT_FD, 1);
+    (void)user_close(SHELL_PIPE_LEFT_FD);
+    (void)user_close(SHELL_PIPE_RIGHT_FD);
+    if (left_pid > 0) {
+        (void)user_kill(left_pid);
+        (void)shell_wait_for_child(left_pid, &left_status);
+    }
+    if (right_pid > 0) {
+        (void)user_kill(right_pid);
+        (void)shell_wait_for_child(right_pid, &right_status);
+    }
+    return -1;
+}
+
+static USER_CODE int shell_run_pipeline(user_shell_state_t* state, const char* left, const char* right) {
+    char left_command[32];
+    char right_command[32];
+    char argv_storage[SHELL_MAX_ARGV][SHELL_ARG_LEN];
+    const char* argv_ptrs[SHELL_MAX_ARGV];
+    int argc;
+
+    if (shell_parse_segment_argv(left, left_command, sizeof(left_command), argv_storage, argv_ptrs, &argc) != 0 ||
+        shell_parse_segment_argv(right, right_command, sizeof(right_command), argv_storage, argv_ptrs, &argc) != 0) {
+        shell_print_error("error: invalid pipe syntax.");
+        return -1;
+    }
+    if (!shell_is_builtin_command(left_command) && !shell_is_builtin_command(right_command)) {
+        return shell_run_concurrent_pipeline(left, right);
+    }
+    return shell_run_sequential_pipeline(state, left, right);
+}
+
+static USER_CODE int shell_try_run_builtin(user_shell_state_t* state, const char* command,
+                                           const char* args, int* out_status) {
+    int status = 0;
 
     if (strcmp(command, "help") == 0) shell_run_help();
     else if (strcmp(command, "clear") == 0) user_clear_screen();
@@ -1004,6 +1496,14 @@ void USER_CODE user_shell_entry_c(user_shell_state_t* state) {
     else if (strcmp(command, "time") == 0) status = shell_run_local_date(state, 0);
     else if (strcmp(command, "ls") == 0) status = shell_run_ls(state);
     else if (strcmp(command, "pwd") == 0) status = shell_run_pwd(state);
+    else if (strcmp(command, "ps") == 0) status = shell_run_ps();
+    else if (strcmp(command, "procdump") == 0) status = shell_run_privileged(PRIV_CMD_PROC_DUMP, "", "error: Unable to dump process table.");
+    else if (strcmp(command, "proc_test") == 0) status = shell_run_privileged(PRIV_CMD_PROC_TEST, "", "error: proc_test failed.");
+    else if (strcmp(command, "pipe_test") == 0) status = shell_run_privileged(PRIV_CMD_PIPE_TEST, "", "error: pipe_test failed.");
+    else if (strcmp(command, "echo") == 0) status = shell_run_echo(args);
+    else if (strcmp(command, "spawn") == 0) status = shell_run_spawn_builtin(args);
+    else if (strcmp(command, "wait") == 0) status = shell_run_wait_builtin(args);
+    else if (strcmp(command, "kill") == 0) status = shell_run_kill_builtin(args);
     else if (strcmp(command, "touch") == 0) status = shell_run_touch(args);
     else if (strcmp(command, "cat") == 0) status = shell_run_cat(state, args);
     else if (strcmp(command, "write") == 0) status = shell_run_write(args);
@@ -1031,13 +1531,36 @@ void USER_CODE user_shell_entry_c(user_shell_state_t* state) {
     else if (strcmp(command, "log") == 0) status = shell_run_privileged(PRIV_CMD_LOG, "", "error: Unable to show kernel log.");
     else if (strcmp(command, "reboot") == 0) status = shell_run_privileged(PRIV_CMD_REBOOT, "", "error: Reboot failed.");
     else if (strcmp(command, "poweroff") == 0) status = shell_run_privileged(PRIV_CMD_POWEROFF, "", "error: Power off failed.");
-    else {
-        user_print_raw(msg_unknown_prefix);
-        user_print_raw(command);
-        shell_println(msg_unknown_suffix);
-        status = -1;
-    }
+    else return 0;
 
+    if (out_status) *out_status = status;
+    return 1;
+}
+
+static USER_CODE int shell_execute_segment(user_shell_state_t* state, const char* segment, int allow_pipe) {
+    char command[32];
+    char left[128];
+    char right[128];
+    const char* args;
+    int status = 0;
+
+    if (!state || !segment) return -1;
+    if (allow_pipe && shell_split_pipe(segment, left, sizeof(left), right, sizeof(right)) == 0) {
+        return shell_run_pipeline(state, left, right);
+    }
+    command[0] = '\0';
+    if (shell_copy_token(segment, command, sizeof(command)) != 0) return 0;
+    args = shell_find_arg_tail(segment);
+
+    if (shell_try_run_builtin(state, command, args, &status) != 0) return status;
+    return shell_run_external_segment(segment, 1, 0, &status);
+}
+
+void USER_CODE user_shell_entry_c(user_shell_state_t* state) {
+    int status;
+
+    if (!state) return;
+    status = shell_execute_segment(state, state->command, 1);
     state->exit_code = status;
     state->status = USER_APP_STATUS_OK;
 }

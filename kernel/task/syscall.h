@@ -1,8 +1,10 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 
+#include <stddef.h>
 #include <stdint.h>
 #include "gdt.h"
+#include "process_api.h"
 
 #define PRIV_CMD_SNAKE 1
 #define PRIV_CMD_SETTINGS 2
@@ -16,6 +18,9 @@
 #define PRIV_CMD_LOG 10
 #define PRIV_CMD_REBOOT 11
 #define PRIV_CMD_POWEROFF 12
+#define PRIV_CMD_PROC_DUMP 13
+#define PRIV_CMD_PROC_TEST 14
+#define PRIV_CMD_PIPE_TEST 15
 
 typedef struct {
     uint16_t year;
@@ -25,6 +30,8 @@ typedef struct {
     uint8_t minute;
     uint8_t second;
 } rtc_local_time_t;
+
+#define WAITPID_FLAG_NOHANG 0x1U
 
 #define SYS_EXIT    0
 #define SYS_PRINT   1
@@ -70,8 +77,25 @@ typedef struct {
 #define SYS_RTC_SAVE_TZ 41
 #define SYS_GUI_OPEN_NARCPAD_FILE 42
 #define SYS_GETRANDOM 43
+#define SYS_FS_READ_RAW 44
+#define SYS_FS_WRITE_RAW 45
+#define SYS_SPAWN 46
+#define SYS_EXEC 47
+#define SYS_WAITPID 48
+#define SYS_KILL 49
+#define SYS_GETPPID 50
+#define SYS_SLEEP 51
+#define SYS_READ 52
+#define SYS_WRITE 53
+#define SYS_CLOSE 54
+#define SYS_DUP2 55
+#define SYS_PIPE 56
+#define SYS_PROCESS_SNAPSHOT 57
 
 void init_syscalls();
 void syscall_handler(trap_frame_t* frame);
+int copy_from_user(void* dst, const void* user_src, uint32_t len);
+int copy_to_user(void* user_dst, const void* src, uint32_t len);
+int copy_string_from_user(char* dst, const char* user_src, size_t dst_size);
 
 #endif

@@ -38,6 +38,7 @@ extern user_kernel_ebx
 extern user_kernel_esi
 extern user_kernel_edi
 extern user_kernel_ebp
+extern user_kernel_return_mode
 extern user_current_task_frame_ptr
 SECTION .text.prologue
 _start:
@@ -330,6 +331,9 @@ isr_syscall:
     call syscall_handler
     add esp, 4
 
+    cmp dword [user_kernel_return_mode], 0
+    jne .return_to_kernel
+
     ; Restore segments
     pop eax
     mov gs, ax
@@ -343,6 +347,21 @@ isr_syscall:
     popa
     add esp, 4 ; remove dummy error code
     iret
+
+.return_to_kernel:
+    mov dword [user_kernel_return_mode], 0
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    mov esp, [user_kernel_resume_esp]
+    mov ebx, [user_kernel_ebx]
+    mov esi, [user_kernel_esi]
+    mov edi, [user_kernel_edi]
+    mov ebp, [user_kernel_ebp]
+    ret
 
 isr_user_yield:
     push dword 0

@@ -19,6 +19,7 @@ void free_physical_page(void* page);
 void* alloc_physical_pages(size_t count);
 void free_physical_pages(void* base, size_t count);
 int paging_map_user_region(uint32_t virt_addr, uint32_t phys_addr, size_t size, uint32_t flags);
+void paging_unmap_user_region(uint32_t virt_addr, size_t size);
 void* paging_alloc_kernel_stack(size_t stack_pages, uint32_t* out_stack_top);
 void* paging_map_physical(uint32_t phys_addr, size_t size, uint32_t flags);
 void paging_unmap_virtual(void* virt_addr, size_t size);

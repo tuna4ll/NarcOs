@@ -56,6 +56,13 @@ static inline void user_yield(void) {
     asm volatile("int $0x81" ::: "memory");
 }
 
+static inline void user_exit(int code) {
+    (void)user_syscall1(SYS_EXIT, (uint32_t)code);
+    for (;;) {
+        user_yield();
+    }
+}
+
 static inline void user_print(const char* text) {
     (void)user_syscall1(SYS_PRINT, (uint32_t)text);
 }
@@ -66,6 +73,58 @@ static inline void user_print_raw(const char* text) {
 
 static inline uint32_t user_uptime_ticks(void) {
     return (uint32_t)user_syscall0(SYS_UPTIME);
+}
+
+static inline int user_getpid(void) {
+    return user_syscall0(SYS_GETPID);
+}
+
+static inline int user_getppid(void) {
+    return user_syscall0(SYS_GETPPID);
+}
+
+static inline int user_spawn(const char* path, const char* const* argv, uint32_t argc) {
+    return user_syscall3(SYS_SPAWN, (uint32_t)(uintptr_t)path, (uint32_t)(uintptr_t)argv, argc);
+}
+
+static inline int user_exec(const char* path, const char* const* argv, uint32_t argc) {
+    return user_syscall3(SYS_EXEC, (uint32_t)(uintptr_t)path, (uint32_t)(uintptr_t)argv, argc);
+}
+
+static inline int user_waitpid(int pid, int* out_status, uint32_t flags) {
+    return user_syscall3(SYS_WAITPID, (uint32_t)pid, (uint32_t)(uintptr_t)out_status, flags);
+}
+
+static inline int user_kill(int pid) {
+    return user_syscall1(SYS_KILL, (uint32_t)pid);
+}
+
+static inline int user_sleep(uint32_t ticks) {
+    return user_syscall1(SYS_SLEEP, ticks);
+}
+
+static inline int user_read(int fd, void* buffer, uint32_t len) {
+    return user_syscall3(SYS_READ, (uint32_t)fd, (uint32_t)(uintptr_t)buffer, len);
+}
+
+static inline int user_write(int fd, const void* buffer, uint32_t len) {
+    return user_syscall3(SYS_WRITE, (uint32_t)fd, (uint32_t)(uintptr_t)buffer, len);
+}
+
+static inline int user_close(int fd) {
+    return user_syscall1(SYS_CLOSE, (uint32_t)fd);
+}
+
+static inline int user_dup2(int oldfd, int newfd) {
+    return user_syscall2(SYS_DUP2, (uint32_t)oldfd, (uint32_t)newfd);
+}
+
+static inline int user_pipe(int out_fds[2]) {
+    return user_syscall1(SYS_PIPE, (uint32_t)(uintptr_t)out_fds);
+}
+
+static inline int user_process_snapshot(process_snapshot_entry_t* entries, int max_entries) {
+    return user_syscall2(SYS_PROCESS_SNAPSHOT, (uint32_t)(uintptr_t)entries, (uint32_t)max_entries);
 }
 
 static inline void* user_malloc(size_t size) {
@@ -86,6 +145,14 @@ static inline int user_fs_read(const char* path, char* buffer, uint32_t max_len)
 
 static inline int user_fs_write(const char* path, const char* contents) {
     return user_syscall2(SYS_FS_WRITE, (uint32_t)path, (uint32_t)contents);
+}
+
+static inline int user_fs_read_raw(const char* path, void* buffer, uint32_t max_len, uint32_t offset) {
+    return user_syscall4(SYS_FS_READ_RAW, (uint32_t)path, (uint32_t)buffer, max_len, offset);
+}
+
+static inline int user_fs_write_raw(const char* path, const void* contents, uint32_t len) {
+    return user_syscall3(SYS_FS_WRITE_RAW, (uint32_t)path, (uint32_t)contents, len);
 }
 
 static inline int user_fs_list(disk_fs_node_t* entries, int max_entries) {

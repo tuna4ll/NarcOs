@@ -8,6 +8,7 @@
 extern uint8_t __user_region_start[];
 extern uint8_t __user_region_end[];
 extern volatile int gui_needs_redraw;
+extern volatile uint32_t timer_ticks;
 extern window_t windows[MAX_WINDOWS];
 extern int active_window_idx;
 extern int nwm_get_idx_by_type(window_type_t type);
@@ -32,8 +33,21 @@ typedef enum {
     USER_TASK_SHELL,
     USER_TASK_NARCPAD,
     USER_TASK_SETTINGS,
-    USER_TASK_EXPLORER
+    USER_TASK_EXPLORER,
+    USER_TASK_PROCESS
 } user_task_kind_t;
+
+typedef struct {
+    user_task_kind_t active_user_task;
+    process_t* active_external_process;
+    trap_frame_t* current_task_frame_ptr;
+    uint32_t kernel_resume_esp;
+    uint32_t kernel_ebx;
+    uint32_t kernel_esi;
+    uint32_t kernel_edi;
+    uint32_t kernel_ebp;
+    uint32_t kernel_return_mode;
+} user_runtime_state_t;
 
 static const char* user_https_stage_name(uint32_t stage) {
     switch (stage) {
@@ -52,6 +66,7 @@ static const char* user_task_kind_name(user_task_kind_t kind) {
         case USER_TASK_NARCPAD: return "narcpad";
         case USER_TASK_SETTINGS: return "settings";
         case USER_TASK_EXPLORER: return "explorer";
+        case USER_TASK_PROCESS: return "process";
         default: return "unknown";
     }
 }
@@ -70,6 +85,8 @@ static volatile int snake_running = 0;
 static volatile int narcpad_running = 0;
 static volatile int settings_running = 0;
 static volatile int explorer_running = 0;
+static uint32_t snake_last_dispatch_tick = 0U;
+static process_t* active_external_process = (process_t*)0;
 static int snake_last_head_x = -1;
 static int snake_last_head_y = -1;
 static int snake_last_len = -1;
@@ -80,6 +97,7 @@ static int snake_last_score = -1;
 static int snake_last_best = -1;
 
 #define USER_PAGE_SIZE              4096U
+#define USER_KERNEL_TRAP_STACK_PAGES 8U
 #define USER_SNAKE_STATE_PAGES      1U
 #define USER_SNAKE_STACK_PAGES      2U
 #define USER_NETDEMO_STATE_PAGES    1U
@@ -111,18 +129,25 @@ static int snake_last_best = -1;
 
 static uint8_t snake_state_region[USER_SNAKE_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t snake_stack_region[USER_SNAKE_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t snake_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t netdemo_state_region[USER_NETDEMO_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t netdemo_stack_region[USER_NETDEMO_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t netdemo_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t fetch_state_region[USER_FETCH_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t fetch_stack_region[USER_FETCH_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t fetch_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t shell_state_region[USER_SHELL_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t shell_stack_region[USER_SHELL_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t shell_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t narcpad_state_region[USER_NARCPAD_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t narcpad_stack_region[USER_NARCPAD_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t narcpad_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t settings_state_region[USER_SETTINGS_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t settings_stack_region[USER_SETTINGS_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t settings_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t explorer_state_region[USER_EXPLORER_STATE_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static uint8_t explorer_stack_region[USER_EXPLORER_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
+static uint8_t explorer_trap_stack_region[USER_KERNEL_TRAP_STACK_PAGES * USER_PAGE_SIZE] __attribute__((aligned(USER_PAGE_SIZE)));
 static int user_memory_ready = 0;
 trap_frame_t* user_current_task_frame_ptr = (trap_frame_t*)0;
 
@@ -138,6 +163,67 @@ uint32_t user_kernel_ebx = 0;
 uint32_t user_kernel_esi = 0;
 uint32_t user_kernel_edi = 0;
 uint32_t user_kernel_ebp = 0;
+uint32_t user_kernel_return_mode = USER_KERNEL_RETURN_NONE;
+
+static void save_user_runtime_state(user_runtime_state_t* state) {
+    if (!state) return;
+    state->active_user_task = active_user_task;
+    state->active_external_process = active_external_process;
+    state->current_task_frame_ptr = user_current_task_frame_ptr;
+    state->kernel_resume_esp = user_kernel_resume_esp;
+    state->kernel_ebx = user_kernel_ebx;
+    state->kernel_esi = user_kernel_esi;
+    state->kernel_edi = user_kernel_edi;
+    state->kernel_ebp = user_kernel_ebp;
+    state->kernel_return_mode = user_kernel_return_mode;
+}
+
+static void restore_user_runtime_state(const user_runtime_state_t* state) {
+    if (!state) return;
+    active_user_task = state->active_user_task;
+    active_external_process = state->active_external_process;
+    user_current_task_frame_ptr = state->current_task_frame_ptr;
+    user_kernel_resume_esp = state->kernel_resume_esp;
+    user_kernel_ebx = state->kernel_ebx;
+    user_kernel_esi = state->kernel_esi;
+    user_kernel_edi = state->kernel_edi;
+    user_kernel_ebp = state->kernel_ebp;
+    user_kernel_return_mode = state->kernel_return_mode;
+}
+
+static uint32_t trap_stack_region_top(uint8_t* region, uint32_t size) {
+    return region ? (uint32_t)region + size : KERNEL_BOOT_STACK_TOP;
+}
+
+static uint32_t user_task_trap_stack_top(user_task_kind_t kind) {
+    switch (kind) {
+        case USER_TASK_SNAKE:
+            return trap_stack_region_top(snake_trap_stack_region, sizeof(snake_trap_stack_region));
+        case USER_TASK_NETDEMO:
+            return trap_stack_region_top(netdemo_trap_stack_region, sizeof(netdemo_trap_stack_region));
+        case USER_TASK_FETCH:
+            return trap_stack_region_top(fetch_trap_stack_region, sizeof(fetch_trap_stack_region));
+        case USER_TASK_SHELL:
+            return trap_stack_region_top(shell_trap_stack_region, sizeof(shell_trap_stack_region));
+        case USER_TASK_NARCPAD:
+            return trap_stack_region_top(narcpad_trap_stack_region, sizeof(narcpad_trap_stack_region));
+        case USER_TASK_SETTINGS:
+            return trap_stack_region_top(settings_trap_stack_region, sizeof(settings_trap_stack_region));
+        case USER_TASK_EXPLORER:
+            return trap_stack_region_top(explorer_trap_stack_region, sizeof(explorer_trap_stack_region));
+        case USER_TASK_PROCESS:
+            if (active_external_process && active_external_process->user_trap_stack_top != 0U) {
+                return active_external_process->user_trap_stack_top;
+            }
+            return KERNEL_BOOT_STACK_TOP;
+        default:
+            return KERNEL_BOOT_STACK_TOP;
+    }
+}
+
+uint32_t usermode_active_trap_stack_top(void) {
+    return user_task_trap_stack_top(active_user_task);
+}
 
 static int user_context_in_user_code(uint32_t eip) {
     uint32_t start = (uint32_t)__user_region_start;
@@ -151,9 +237,20 @@ static int user_context_on_stack(uint32_t esp, uint32_t stack_base, uint32_t sta
 }
 
 static int validate_user_context(trap_frame_t* context, uint32_t stack_base, uint32_t stack_pages) {
-    (void)stack_base;
-    (void)stack_pages;
-    return context != 0;
+    if (!context) return 0;
+    if (!user_context_in_user_code(context->eip)) return 0;
+    if (!user_context_on_stack(context->user_esp, stack_base, stack_pages)) return 0;
+    return 1;
+}
+
+static int validate_process_context(process_t* proc) {
+    exec_image_t image;
+
+    if (!proc) return 0;
+    if (exec_query_image(&proc->user_space, &image) != EXEC_OK) return 0;
+    if (proc->user_frame.eip < image.image_base || proc->user_frame.eip >= image.image_limit) return 0;
+    if (proc->user_frame.user_esp < image.stack_base || proc->user_frame.user_esp > image.stack_top) return 0;
+    return 1;
 }
 
 static void invalidate_user_task(user_task_kind_t kind) {
@@ -242,6 +339,41 @@ static int queue_user_event(uint16_t* types, int32_t* args, int cap,
     return 0;
 }
 
+static int window_task_visible(window_type_t type) {
+    int idx = nwm_get_idx_by_type(type);
+
+    if (idx < 0 || idx >= MAX_WINDOWS) return 0;
+    return windows[idx].visible && !windows[idx].minimized;
+}
+
+static int user_queue_has_items(int head, int tail) {
+    return head != tail;
+}
+
+static int should_run_snake_task(void) {
+    return snake_running &&
+           window_task_visible(WIN_TYPE_SNAKE) &&
+           (snake_input_pending != -1 || timer_ticks != snake_last_dispatch_tick);
+}
+
+static int should_run_narcpad_task(void) {
+    return narcpad_running &&
+           window_task_visible(WIN_TYPE_NARCPAD) &&
+           user_queue_has_items(user_narcpad_state.event_head, user_narcpad_state.event_tail);
+}
+
+static int should_run_settings_task(void) {
+    return settings_running &&
+           window_task_visible(WIN_TYPE_SETTINGS) &&
+           user_queue_has_items(user_settings_state.event_head, user_settings_state.event_tail);
+}
+
+static int should_run_explorer_task(void) {
+    return explorer_running &&
+           window_task_visible(WIN_TYPE_EXPLORER) &&
+           user_queue_has_items(user_explorer_state.event_head, user_explorer_state.event_tail);
+}
+
 static int init_user_memory_layout() {
     if (user_memory_ready) return 0;
     if (paging_map_user_region(USER_SNAKE_STATE_VA, (uint32_t)snake_state_region,
@@ -289,6 +421,64 @@ static void init_user_context(trap_frame_t* context, uint32_t user_stack_base, u
     context->eflags = 0x202;
     context->user_esp = user_stack_base + user_stack_pages * USER_PAGE_SIZE - 16U;
     context->user_ss = USER_DATA_SEG;
+}
+
+static int build_process_initial_stack(process_t* proc, const exec_image_t* image) {
+    uint32_t arg_ptrs[PROCESS_MAX_ARGS];
+    uint32_t sp;
+    uint32_t argv_base;
+
+    if (!proc || !image) return -1;
+    if (proc->user_argc < 0 || proc->user_argc > PROCESS_MAX_ARGS) return -1;
+
+    sp = image->stack_top;
+    for (int i = proc->user_argc - 1; i >= 0; i--) {
+        uint32_t len = (uint32_t)strlen(proc->user_args[i]) + 1U;
+        if (len > PROCESS_MAX_ARG_LEN) return -1;
+        if (sp < image->stack_base + len) return -1;
+        sp -= len;
+        memcpy((void*)sp, proc->user_args[i], len);
+        arg_ptrs[i] = sp;
+    }
+
+    sp &= ~0x3U;
+    if (sp < image->stack_base + 4U) return -1;
+    sp -= 4U;
+    *(uint32_t*)sp = 0U;
+    for (int i = proc->user_argc - 1; i >= 0; i--) {
+        if (sp < image->stack_base + 4U) return -1;
+        sp -= 4U;
+        *(uint32_t*)sp = arg_ptrs[i];
+    }
+    argv_base = sp;
+    if (sp < image->stack_base + 4U) return -1;
+    sp -= 4U;
+    *(uint32_t*)sp = (uint32_t)proc->user_argc;
+    proc->user_frame.eax = (uint32_t)proc->user_argc;
+    proc->user_frame.ebx = argv_base;
+    proc->user_frame.user_esp = sp;
+    return 0;
+}
+
+int usermode_prepare_process_context(process_t* proc) {
+    exec_image_t image;
+
+    if (!proc) return -1;
+    if (exec_activate_address_space(&proc->user_space) != EXEC_OK) return -1;
+    if (exec_query_image(&proc->user_space, &image) != EXEC_OK) return -1;
+
+    memset(&proc->user_frame, 0, sizeof(proc->user_frame));
+    proc->user_frame.gs = USER_DATA_SEG;
+    proc->user_frame.fs = USER_DATA_SEG;
+    proc->user_frame.es = USER_DATA_SEG;
+    proc->user_frame.ds = USER_DATA_SEG;
+    proc->user_frame.eip = image.entry_point;
+    proc->user_frame.cs = USER_CODE_SEG;
+    proc->user_frame.eflags = 0x202U;
+    proc->user_frame.user_ss = USER_DATA_SEG;
+    proc->user_entry = image.entry_point;
+    proc->user_stack_top = image.stack_top;
+    return build_process_initial_stack(proc, &image);
 }
 
 static void sanitize_user_context(trap_frame_t* context) {
@@ -419,7 +609,9 @@ static int parse_fetch_args(const char* args, char* host, int host_len,
 
 static void dispatch_user_task(user_task_kind_t kind, trap_frame_t* context) {
     process_t* current = process_current();
+    user_runtime_state_t saved_state;
     uint32_t resume_stack_top = current ? current->kernel_stack_top : KERNEL_BOOT_STACK_TOP;
+    uint32_t trap_stack_top = user_task_trap_stack_top(kind);
     uint32_t stack_base = 0;
     uint32_t stack_pages = 0;
 
@@ -460,10 +652,11 @@ static void dispatch_user_task(user_task_kind_t kind, trap_frame_t* context) {
         return;
     }
 
+    save_user_runtime_state(&saved_state);
     active_user_task = kind;
     /* User traps must land on a clean kernel stack; otherwise INT frames overwrite
        the suspended process stack frame that run_user_task will later resume. */
-    set_tss_stack(KERNEL_BOOT_STACK_TOP);
+    set_tss_stack(trap_stack_top);
     serial_write("[user] dispatch kind=");
     serial_write_hex32((uint32_t)kind);
     serial_write(" eip=");
@@ -474,9 +667,41 @@ static void dispatch_user_task(user_task_kind_t kind, trap_frame_t* context) {
     sanitize_user_context(context);
     user_current_task_frame_ptr = context;
     run_user_task(context);
-    user_current_task_frame_ptr = (trap_frame_t*)0;
+    restore_user_runtime_state(&saved_state);
     set_tss_stack(resume_stack_top);
-    active_user_task = USER_TASK_NONE;
+}
+
+int usermode_run_external_process(process_t* proc) {
+    process_t* current = process_current();
+    user_runtime_state_t saved_state;
+    uint32_t resume_stack_top = current ? current->kernel_stack_top : KERNEL_BOOT_STACK_TOP;
+    uint32_t trap_stack_top;
+
+    if (!proc) return -1;
+    if (exec_activate_address_space(&proc->user_space) != EXEC_OK) return -1;
+    if (!validate_process_context(proc)) {
+        serial_write("[user] invalid process context pid=");
+        serial_write_hex32((uint32_t)proc->pid);
+        serial_write(" eip=");
+        serial_write_hex32(proc->user_frame.eip);
+        serial_write(" esp=");
+        serial_write_hex32(proc->user_frame.user_esp);
+        serial_write_char('\n');
+        return -1;
+    }
+
+    save_user_runtime_state(&saved_state);
+    active_user_task = USER_TASK_PROCESS;
+    active_external_process = proc;
+    user_kernel_return_mode = USER_KERNEL_RETURN_NONE;
+    trap_stack_top = user_task_trap_stack_top(USER_TASK_PROCESS);
+    set_tss_stack(trap_stack_top);
+    sanitize_user_context(&proc->user_frame);
+    user_current_task_frame_ptr = &proc->user_frame;
+    run_user_task(&proc->user_frame);
+    restore_user_runtime_state(&saved_state);
+    set_tss_stack(resume_stack_top);
+    return 0;
 }
 
 static int run_sync_user_app(user_task_kind_t kind, trap_frame_t* context, int* status_ptr) {
@@ -535,6 +760,7 @@ void launch_user_snake() {
 
     snake_input_pending = -1;
     snake_running = 1;
+    snake_last_dispatch_tick = 0U;
     gui_needs_redraw = 1;
 }
 
@@ -594,16 +820,17 @@ void launch_user_explorer(int initial_dir) {
 }
 
 void run_user_tasks() {
-    if (snake_running) {
+    if (should_run_snake_task()) {
         dispatch_user_task(USER_TASK_SNAKE, &snake_context);
+        snake_last_dispatch_tick = timer_ticks;
     }
-    if (explorer_running) {
+    if (should_run_explorer_task()) {
         dispatch_user_task(USER_TASK_EXPLORER, &explorer_context);
     }
-    if (settings_running) {
+    if (should_run_settings_task()) {
         dispatch_user_task(USER_TASK_SETTINGS, &settings_context);
     }
-    if (narcpad_running) {
+    if (should_run_narcpad_task()) {
         dispatch_user_task(USER_TASK_NARCPAD, &narcpad_context);
     }
 }
@@ -751,6 +978,7 @@ void stop_user_snake() {
     }
     snake_running = 0;
     snake_input_pending = -1;
+    snake_last_dispatch_tick = 0U;
     if (sidx != -1) {
         windows[sidx].visible = 0;
         windows[sidx].minimized = 0;
@@ -830,6 +1058,49 @@ void queue_user_explorer_event(int type, int value) {
                            &user_explorer_state.event_tail, type, value);
 }
 
+int usermode_exit_current_task(int exit_code) {
+    switch (active_user_task) {
+        case USER_TASK_SNAKE:
+            stop_user_snake();
+            return 0;
+        case USER_TASK_NETDEMO:
+            user_netdemo_state.status = exit_code == 0 ? USER_APP_STATUS_OK : exit_code;
+            return 0;
+        case USER_TASK_FETCH:
+            user_fetch_state.status = exit_code == 0 ? USER_APP_STATUS_OK : exit_code;
+            return 0;
+        case USER_TASK_SHELL:
+            user_shell_state.exit_code = exit_code;
+            user_shell_state.status = USER_APP_STATUS_OK;
+            return 0;
+        case USER_TASK_NARCPAD:
+            user_narcpad_state.status = USER_APP_STATUS_OK;
+            narcpad_running = 0;
+            gui_needs_redraw = 1;
+            return 0;
+        case USER_TASK_SETTINGS:
+            user_settings_state.status = USER_APP_STATUS_OK;
+            settings_running = 0;
+            gui_needs_redraw = 1;
+            return 0;
+        case USER_TASK_EXPLORER:
+            user_explorer_state.status = USER_APP_STATUS_OK;
+            explorer_running = 0;
+            gui_needs_redraw = 1;
+            return 0;
+        default:
+            return -1;
+    }
+}
+
+int usermode_schedule_current_process_exit(int exit_code) {
+    if (active_user_task != USER_TASK_PROCESS || !active_external_process) return -1;
+    active_external_process->exit_code = exit_code;
+    active_external_process->flags |= PROCESS_FLAG_USER_EXIT_PENDING;
+    user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
+    return 0;
+}
+
 void user_yield_handler(trap_frame_t* frame) {
     if (active_user_task == USER_TASK_SNAKE) {
         int sidx = nwm_get_idx_by_type(WIN_TYPE_SNAKE);
@@ -867,5 +1138,7 @@ void user_yield_handler(trap_frame_t* frame) {
             user_explorer_state.dirty = 0;
             if (idx != -1 && windows[idx].visible && !windows[idx].minimized) gui_needs_redraw = 1;
         }
+    } else if (active_user_task == USER_TASK_PROCESS) {
+        if (active_external_process) active_external_process->user_frame = *frame;
     }
 }

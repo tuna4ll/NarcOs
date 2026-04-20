@@ -6,6 +6,7 @@
 #include "memory_alloc.h"
 #include "paging.h"
 #include "process.h"
+#include "fd.h"
 #include "cpu.h"
 #include "pci.h"
 #include "storage.h"
@@ -43,6 +44,19 @@ idtr_t idtr;
 
 volatile uint32_t timer_ticks = 0;
 static volatile int kernel_graphics_ready = 0;
+static volatile int kernel_waitpid_test_release = 0;
+
+typedef struct {
+    volatile int writer_status;
+    volatile int reader_status;
+    volatile uint32_t bytes_written;
+    volatile uint32_t bytes_read;
+    uint32_t target_bytes;
+    int read_fd;
+    int write_fd;
+} kernel_pipe_test_state_t;
+
+static kernel_pipe_test_state_t kernel_pipe_test_state;
 
 window_t windows[MAX_WINDOWS];
 int window_count = 0;
@@ -448,6 +462,34 @@ static void panic_serial_hex(const char* label, uint32_t value) {
     serial_write_char('\n');
 }
 
+static void panic_log_current_process() {
+    process_t* current = process_current();
+
+    if (!current) {
+        serial_write_line("[panic] active pid=<none>");
+        return;
+    }
+
+    serial_write("[panic] active pid=");
+    serial_write_hex32((uint32_t)current->pid);
+    serial_write(" ppid=");
+    serial_write_hex32((uint32_t)current->parent_pid);
+    serial_write(" kind=");
+    serial_write(current->kind == PROCESS_KIND_USER ? "user" : "kernel");
+    serial_write(" state=");
+    if (current->state == PROC_RUNNABLE) serial_write("runnable");
+    else if (current->state == PROC_RUNNING) serial_write("running");
+    else if (current->state == PROC_ZOMBIE) serial_write("zombie");
+    else serial_write("unused");
+    serial_write(" name=");
+    serial_write(current->name);
+    if (current->image_path[0] != '\0') {
+        serial_write(" image=");
+        serial_write(current->image_path);
+    }
+    serial_write_char('\n');
+}
+
 static void panic_halt() {
     for (;;) {
         asm volatile("cli");
@@ -591,6 +633,7 @@ static void panic_simple_exception(const char* tag, const char* title, uint32_t 
     panic_serial_hex("cs", frame->cs);
     panic_serial_hex("user_esp", frame->user_esp);
     panic_serial_hex("user_ss", frame->user_ss);
+    panic_log_current_process();
 
     if (!kernel_graphics_ready) {
         panic_text_exception(title, aux_label, aux_value, frame);
@@ -861,6 +904,8 @@ void gpf_handler(trap_frame_t* frame) {
     panic_serial_hex("cs", frame->cs);
     panic_serial_hex("user_esp", frame->user_esp);
     panic_serial_hex("user_ss", frame->user_ss);
+    panic_log_current_process();
+    process_debug_dump("gpf");
 
     if (!kernel_graphics_ready) {
         panic_text_exception("!!! NARC-OS GPF (RING 3 CRASH) !!!", 0, 0, frame);
@@ -906,6 +951,8 @@ void gpf_handler(trap_frame_t* frame) {
 }
 
 void page_fault_handler(trap_frame_t* frame) {
+    panic_log_current_process();
+    process_debug_dump("page-fault");
     panic_simple_exception("page fault", "!!! NARC-OS PAGE FAULT !!!", 0x1A0000,
                            "Fault Addr:", read_cr2(), frame);
 }
@@ -975,6 +1022,169 @@ static int run_usermode_test_command(void) {
     return 0;
 }
 
+static int kernel_snapshot_contains_pid(int pid) {
+    process_snapshot_entry_t entries[16];
+    int count = process_snapshot(entries, (int)(sizeof(entries) / sizeof(entries[0])));
+
+    if (count < 0) return 0;
+    for (int i = 0; i < count; i++) {
+        if (entries[i].pid == pid) return 1;
+    }
+    return 0;
+}
+
+static void kernel_waitpid_test_child(void* arg) {
+    (void)arg;
+    while (!kernel_waitpid_test_release) process_yield();
+}
+
+static void kernel_pipe_test_writer(void* arg) {
+    process_t* current = process_current();
+    int write_fd = (int)(uintptr_t)arg;
+    uint8_t buffer[128];
+    uint32_t remaining = kernel_pipe_test_state.target_bytes;
+
+    kernel_pipe_test_state.writer_status = -1;
+    if (!current) return;
+    memset(buffer, 'P', sizeof(buffer));
+    (void)fd_close(current, kernel_pipe_test_state.read_fd);
+
+    while (remaining != 0U) {
+        uint32_t chunk_len = remaining;
+        int rc;
+
+        if (chunk_len > sizeof(buffer)) chunk_len = sizeof(buffer);
+        rc = fd_write(current, write_fd, buffer, chunk_len);
+        if (rc <= 0) {
+            kernel_pipe_test_state.writer_status = -2;
+            return;
+        }
+        kernel_pipe_test_state.bytes_written += (uint32_t)rc;
+        remaining -= (uint32_t)rc;
+        process_yield();
+    }
+
+    kernel_pipe_test_state.writer_status = fd_close(current, write_fd) == 0 ? 0 : -3;
+}
+
+static void kernel_pipe_test_reader(void* arg) {
+    process_t* current = process_current();
+    int read_fd = (int)(uintptr_t)arg;
+    uint8_t buffer[96];
+
+    kernel_pipe_test_state.reader_status = -1;
+    if (!current) return;
+    (void)fd_close(current, kernel_pipe_test_state.write_fd);
+
+    for (;;) {
+        int rc = fd_read(current, read_fd, buffer, sizeof(buffer));
+
+        if (rc < 0) {
+            kernel_pipe_test_state.reader_status = -2;
+            return;
+        }
+        if (rc == 0) break;
+        kernel_pipe_test_state.bytes_read += (uint32_t)rc;
+        process_yield();
+    }
+
+    kernel_pipe_test_state.reader_status = fd_close(current, read_fd) == 0 ? 0 : -3;
+}
+
+static int run_process_model_selftest(void) {
+    int pid;
+    int status = -1;
+    int wait_rc;
+
+    kernel_waitpid_test_release = 0;
+    pid = process_create_kernel("waitpid-test", kernel_waitpid_test_child, 0);
+    if (pid < 0) {
+        vga_println("proc_test: spawn failed.");
+        return -1;
+    }
+
+    wait_rc = process_waitpid_sync_current(pid, WAITPID_FLAG_NOHANG, &status);
+    if (wait_rc != 0) {
+        kernel_waitpid_test_release = 1;
+        (void)process_waitpid_sync_current(pid, 0U, 0);
+        vga_println("proc_test: WAITPID_FLAG_NOHANG failed.");
+        return -1;
+    }
+
+    kernel_waitpid_test_release = 1;
+    wait_rc = process_waitpid_sync_current(pid, 0U, &status);
+    if (wait_rc != pid || status != 0) {
+        vga_println("proc_test: waitpid returned wrong result.");
+        return -1;
+    }
+
+    wait_rc = process_waitpid_sync_current(pid, WAITPID_FLAG_NOHANG, &status);
+    if (wait_rc != -1) {
+        vga_println("proc_test: reaped child was still waitable.");
+        return -1;
+    }
+
+    if (kernel_snapshot_contains_pid(pid)) {
+        vga_println("proc_test: zombie cleanup failed.");
+        return -1;
+    }
+
+    vga_println("proc_test: ok");
+    return 0;
+}
+
+static int run_pipe_selftest(void) {
+    process_t* current = process_current();
+    int pipefd[2] = { -1, -1 };
+    int reader_pid = -1;
+    int writer_pid = -1;
+    int wait_status = 0;
+
+    if (!current) {
+        vga_println("pipe_test: no current process.");
+        return -1;
+    }
+
+    memset(&kernel_pipe_test_state, 0, sizeof(kernel_pipe_test_state));
+    kernel_pipe_test_state.target_bytes = PIPE_BUFFER_SIZE * 3U + 73U;
+
+    if (fd_pipe(current, pipefd) != 0) {
+        vga_println("pipe_test: pipe creation failed.");
+        return -1;
+    }
+
+    kernel_pipe_test_state.read_fd = pipefd[0];
+    kernel_pipe_test_state.write_fd = pipefd[1];
+    reader_pid = process_create_kernel("pipe-reader", kernel_pipe_test_reader, (void*)(uintptr_t)pipefd[0]);
+    if (reader_pid < 0) goto fail;
+    writer_pid = process_create_kernel("pipe-writer", kernel_pipe_test_writer, (void*)(uintptr_t)pipefd[1]);
+    if (writer_pid < 0) goto fail;
+
+    (void)fd_close(current, pipefd[0]);
+    pipefd[0] = -1;
+    (void)fd_close(current, pipefd[1]);
+    pipefd[1] = -1;
+
+    if (process_waitpid_sync_current(writer_pid, 0U, &wait_status) != writer_pid) goto fail;
+    if (process_waitpid_sync_current(reader_pid, 0U, &wait_status) != reader_pid) goto fail;
+
+    if (kernel_pipe_test_state.writer_status != 0 || kernel_pipe_test_state.reader_status != 0) goto fail;
+    if (kernel_pipe_test_state.bytes_written != kernel_pipe_test_state.target_bytes) goto fail;
+    if (kernel_pipe_test_state.bytes_read != kernel_pipe_test_state.target_bytes) goto fail;
+    if (kernel_pipe_test_state.bytes_read != kernel_pipe_test_state.bytes_written) goto fail;
+
+    vga_println("pipe_test: ok");
+    return 0;
+
+fail:
+    if (pipefd[0] >= 0) (void)fd_close(current, pipefd[0]);
+    if (pipefd[1] >= 0) (void)fd_close(current, pipefd[1]);
+    if (writer_pid > 0) (void)process_waitpid_sync_current(writer_pid, 0U, 0);
+    if (reader_pid > 0) (void)process_waitpid_sync_current(reader_pid, 0U, 0);
+    vga_println("pipe_test: failed.");
+    return -1;
+}
+
 int kernel_run_privileged_command(int cmd, const char* arg) {
     const char* value = arg ? arg : "";
     int graphics_mode = screen_is_graphics_enabled();
@@ -1023,6 +1233,14 @@ int kernel_run_privileged_command(int cmd, const char* arg) {
         case PRIV_CMD_POWEROFF:
             poweroff_system();
             return 0;
+        case PRIV_CMD_PROC_DUMP:
+            process_debug_dump(value[0] != '\0' ? value : "manual");
+            vga_println("process dump written to serial.");
+            return 0;
+        case PRIV_CMD_PROC_TEST:
+            return run_process_model_selftest();
+        case PRIV_CMD_PIPE_TEST:
+            return run_pipe_selftest();
         default:
             return -1;
     }
@@ -1501,6 +1719,7 @@ static void desktop_process_main(void) {
         if (timer_ticks - last_clock_tick >= 100) {
             read_rtc(); last_clock_tick = timer_ticks; gui_needs_redraw = 1;
         }
+        run_user_tasks();
         if (gui_needs_redraw || lp != last_lp || rp != last_rp || cmd_ready) {
             vbe_compose_scene(windows, window_count, active_window_idx, start_menu_visible, desk_dir_idx, drag_file_idx, mx, my, ctx_visible, ctx_x, ctx_y, ctx_items, ctx_count, ctx_selected);
             vbe_prepare_frame_from_composition();
@@ -1544,7 +1763,6 @@ static void service_process_main(void* arg) {
     (void)arg;
     for (;;) {
         net_poll();
-        stop_all_background_user_tasks();
         process_poll();
         asm volatile("hlt");
         process_poll();

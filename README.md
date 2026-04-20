@@ -30,12 +30,21 @@ Build the image:
 make all
 ```
 
+Build only the packaged user executables:
+
+```bash
+make user-programs
+```
+
 This produces:
 
 - `kernel.bin`
 - `boot/boot.bin`
 - `boot/stage2.bin`
 - `minios.img`
+- `obj/user/bin/{hello,ps,cat,echo,kill}`
+
+The user executables are embedded into the kernel image at build time and synced into `/bin` when the NarcOs filesystem initializes.
 
 Clean generated files:
 

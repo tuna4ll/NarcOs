@@ -7,10 +7,15 @@ extern void    vga_putchar(char c);
 extern void    vga_backspace();
 extern void    vga_newline();
 #define INPUT_BUF_SIZE 128
+#define CONSOLE_INPUT_QUEUE_SIZE 512
 char input_buf[INPUT_BUF_SIZE];
 int  input_pos  = 0;
 volatile int cmd_ready = 0;
 char cmd_to_execute[INPUT_BUF_SIZE];
+static char console_input_queue[CONSOLE_INPUT_QUEUE_SIZE];
+static volatile uint32_t console_input_head = 0;
+static volatile uint32_t console_input_tail = 0;
+static volatile uint32_t console_input_count = 0;
 #define HISTORY_MAX 10
 char history[HISTORY_MAX][INPUT_BUF_SIZE];
 int history_count = 0;
@@ -43,11 +48,53 @@ const char scancode_map_shift[128] = {
     0,   0,   '7', '8', '9', '-', '4', '5', '6', '+',
     '1', '2', '3', '0', '.', 0,   0,   0,   0,   0
 };
+
+static uint32_t irq_save(void) {
+    uint32_t flags;
+
+    asm volatile(
+        "pushfl\n\t"
+        "popl %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "cc", "memory");
+    return flags;
+}
+
+static void irq_restore(uint32_t flags) {
+    asm volatile(
+        "pushl %0\n\t"
+        "popfl"
+        :
+        : "r"(flags)
+        : "cc", "memory");
+}
+
+static void console_input_enqueue_char(char c) {
+    if (console_input_count >= CONSOLE_INPUT_QUEUE_SIZE) return;
+    console_input_queue[console_input_tail] = c;
+    console_input_tail = (console_input_tail + 1U) % CONSOLE_INPUT_QUEUE_SIZE;
+    console_input_count++;
+}
+
+static void console_input_enqueue_line(const char* text) {
+    if (!text) return;
+    while (*text) {
+        console_input_enqueue_char(*text++);
+    }
+    console_input_enqueue_char('\n');
+}
+
 void init_keyboard()
 {
     input_pos = 0;
     for (int i = 0; i < INPUT_BUF_SIZE; i++) input_buf[i] = 0;
+    console_input_head = 0;
+    console_input_tail = 0;
+    console_input_count = 0;
 }
+
 #include "vbe.h"
 #include "usermode.h"
 extern window_t windows[MAX_WINDOWS];
@@ -71,7 +118,7 @@ extern void vga_scrollback_follow_live(void);
 
 static const char* shell_commands[] = {
     "help", "clear", "mem", "snake", "settings", "ver", "uptime", "date", "time",
-    "ls", "pwd", "touch", "cat", "write", "edit", "mkdir", "cd",
+    "ls", "pwd", "ps", "echo", "spawn", "wait", "kill", "touch", "cat", "write", "edit", "mkdir", "cd",
     "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "https", "netdemo", "fetch",
     "tls_test", "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"
 };
@@ -132,6 +179,23 @@ static void autocomplete_input_line() {
         completed[i] = '\0';
         set_input_line(completed);
     }
+}
+
+int console_input_read(char* buffer, uint32_t max_len) {
+    uint32_t flags;
+    uint32_t copied = 0;
+
+    if (!buffer && max_len != 0U) return -1;
+    if (max_len == 0U) return 0;
+
+    flags = irq_save();
+    while (copied < max_len && console_input_count != 0U) {
+        buffer[copied++] = console_input_queue[console_input_head];
+        console_input_head = (console_input_head + 1U) % CONSOLE_INPUT_QUEUE_SIZE;
+        console_input_count--;
+    }
+    irq_restore(flags);
+    return (int)copied;
 }
 
 void handle_keyboard()
@@ -291,6 +355,7 @@ void handle_keyboard()
         vga_scrollback_follow_live();
         vga_newline();
         input_buf[input_pos] = '\0';
+        console_input_enqueue_line(input_buf);
         if (input_pos > 0) {
             int last_idx = (history_write_idx + HISTORY_MAX - 1) % HISTORY_MAX;
             int is_same = 0;
