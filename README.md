@@ -1,3 +1,6 @@
+
+<img width="842" height="245" alt="narcos-final_main" src="https://github.com/user-attachments/assets/4102a490-aec2-40c0-9429-bd1ede27c000" />
+
 # NarcOs
 
 NarcOs is a hobby operating system for `x86` and `x86_64`.
