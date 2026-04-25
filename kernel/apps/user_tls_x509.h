@@ -11,13 +11,22 @@ typedef struct {
     uint32_t len;
 } user_tls_x509_span_t;
 
+typedef enum {
+    USER_TLS_X509_KEY_UNKNOWN = 0,
+    USER_TLS_X509_KEY_RSA = 1,
+    USER_TLS_X509_KEY_EC_P256 = 2
+} user_tls_x509_key_type_t;
+
 typedef struct {
     const uint8_t* der;
     uint32_t der_len;
     user_tls_x509_span_t tbs_certificate;
     user_tls_x509_span_t subject_public_key_info;
+    user_tls_x509_key_type_t key_type;
     user_tls_x509_span_t rsa_modulus;
     uint32_t rsa_exponent;
+    user_tls_x509_span_t ec_public_x;
+    user_tls_x509_span_t ec_public_y;
     uint64_t not_before_unix;
     uint64_t not_after_unix;
     uint32_t dns_name_count;

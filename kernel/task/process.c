@@ -1,8 +1,9 @@
 #include "process.h"
 #include "fd.h"
-#include "gdt.h"
+#include "memory_alloc.h"
 #include "paging.h"
 #include "serial.h"
+#include "syscall.h"
 #include "string.h"
 #include "usermode.h"
 
@@ -13,17 +14,17 @@
 
 static process_t process_table[MAX_PROCESSES];
 static int current_process_idx = -1;
-static uint32_t bootstrap_esp = 0;
+static uintptr_t bootstrap_sp = 0;
 
 volatile int scheduler_pending = 0;
 
-static void process_bootstrap();
+void process_bootstrap_entry(void);
 static void idle_process(void* arg);
 static void user_process_entry(void* arg);
 static process_t* find_process_by_pid(int pid);
 static process_t* process_reserve_slot(process_kind_t kind, const char* name, int parent_pid);
 static void release_recycled_process_metadata(process_t* proc);
-static void process_set_name_from_path(char* dst, uint32_t dst_size, const char* path);
+static void process_set_name_from_path(char* dst, size_t dst_size, const char* path);
 static void process_link_parent(process_t* proc);
 static void process_log_created(const process_t* proc);
 static void process_abandon_reserved_slot(process_t* proc);
@@ -38,7 +39,19 @@ static void process_reset_unused(process_t* proc);
 static const char* process_state_name(process_state_t state);
 static const char* process_kind_name(process_kind_t kind);
 
+#if UINTPTR_MAX > 0xFFFFFFFFU
+extern void x64_process_bootstrap_trampoline(void);
+#endif
+
 extern volatile uint32_t timer_ticks;
+
+static void process_log_hex_uintptr(uintptr_t value) {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    serial_write_hex64((uint64_t)value);
+#else
+    serial_write_hex32((uint32_t)value);
+#endif
+}
 
 static int next_runnable_from(int start) {
     for (int offset = 1; offset <= MAX_PROCESSES; offset++) {
@@ -53,21 +66,21 @@ static void context_switch_to(int next_idx) {
 
     process_t* next = &process_table[next_idx];
     process_t* prev = process_current();
-    uint32_t* old_esp_ptr = prev ? &prev->esp : &bootstrap_esp;
+    uintptr_t* old_sp_ptr = prev ? &prev->arch.kernel_sp : &bootstrap_sp;
 
     if (prev && prev->state == PROC_RUNNING) prev->state = PROC_RUNNABLE;
     next->state = PROC_RUNNING;
     current_process_idx = next_idx;
     scheduler_pending = 0;
-    set_tss_stack(next->kernel_stack_top);
+    arch_set_kernel_stack(next->arch.kernel_stack_top);
 
-    process_switch(old_esp_ptr, next->esp);
+    arch_switch_task(old_sp_ptr, next->arch.kernel_sp);
 }
 
 void process_init() {
     memset(process_table, 0, sizeof(process_table));
     current_process_idx = -1;
-    bootstrap_esp = 0;
+    bootstrap_sp = 0;
     scheduler_pending = 0;
     process_create_kernel("idle", idle_process, 0);
 }
@@ -110,7 +123,6 @@ int process_create_user(const char* path, const char* const* argv, int argc, uin
         process_abandon_reserved_slot(proc);
         return -1;
     }
-    fd_close_from(proc, 3);
     if (process_copy_args(proc, argv, argc) != 0) {
         process_abandon_reserved_slot(proc);
         return -1;
@@ -120,7 +132,7 @@ int process_create_user(const char* path, const char* const* argv, int argc, uin
     proc->image_path[sizeof(proc->image_path) - 1U] = '\0';
     proc->flags = flags & ~PROCESS_FLAG_USER_EXIT_PENDING;
 
-    status = exec_load_elf32_file(path, &proc->user_space);
+    status = exec_load_file(path, &proc->user_space);
     if (status != EXEC_OK) {
         serial_write("[sched] user load failed ");
         serial_write(path);
@@ -171,7 +183,7 @@ int process_request_exec_current(const char* path, const char* const* argv, int 
     return 0;
 }
 
-int process_request_wait_current(int pid, uint32_t status_user_ptr, uint32_t flags) {
+int process_request_wait_current(int pid, uintptr_t status_user_ptr, uint32_t flags) {
     process_t* current = process_current();
 
     if (!current || current->kind != PROCESS_KIND_USER) return -1;
@@ -197,6 +209,38 @@ int process_request_sleep_current(uint32_t ticks) {
     return 0;
 }
 
+int process_request_read_current(int fd, uintptr_t buffer_user_ptr, uint32_t len) {
+    process_t* current = process_current();
+
+    if (!current || current->kind != PROCESS_KIND_USER || fd < 0) return -1;
+    current->pending_request = PROCESS_USER_REQ_READ;
+    current->pending_io_fd = fd;
+    current->pending_io_user_ptr = buffer_user_ptr;
+    current->pending_io_len = len;
+    current->pending_wait_pid = 0;
+    current->pending_wait_flags = 0U;
+    current->pending_wait_status_ptr = 0U;
+    current->pending_sleep_until = 0U;
+    current->pending_exec_path[0] = '\0';
+    return 0;
+}
+
+int process_request_write_current(int fd, uintptr_t buffer_user_ptr, uint32_t len) {
+    process_t* current = process_current();
+
+    if (!current || current->kind != PROCESS_KIND_USER || fd < 0) return -1;
+    current->pending_request = PROCESS_USER_REQ_WRITE;
+    current->pending_io_fd = fd;
+    current->pending_io_user_ptr = buffer_user_ptr;
+    current->pending_io_len = len;
+    current->pending_wait_pid = 0;
+    current->pending_wait_flags = 0U;
+    current->pending_wait_status_ptr = 0U;
+    current->pending_sleep_until = 0U;
+    current->pending_exec_path[0] = '\0';
+    return 0;
+}
+
 int process_kill_pid(int pid) {
     process_t* target = find_process_by_pid(pid);
 
@@ -210,12 +254,12 @@ int process_kill_pid(int pid) {
 
 static process_t* process_reserve_slot(process_kind_t kind, const char* name, int parent_pid) {
     int slot = -1;
-    uint32_t stack_top_addr = 0;
-    uint32_t trap_stack_top_addr = 0;
+    uintptr_t stack_top_addr = 0;
+    uintptr_t trap_stack_top_addr = 0;
     void* stack_base = 0;
     void* trap_stack_base = 0;
     process_t* proc;
-    uint32_t* stack_top;
+    uintptr_t* stack_top;
 
     for (int i = 0; i < MAX_PROCESSES; i++) {
         if (process_table[i].state == PROC_UNUSED ||
@@ -230,11 +274,11 @@ static process_t* process_reserve_slot(process_kind_t kind, const char* name, in
     }
 
     if ((process_table[slot].state == PROC_ZOMBIE || process_table[slot].state == PROC_UNUSED) &&
-        process_table[slot].stack_base != 0 &&
-        process_table[slot].stack_pages == PROCESS_STACK_PAGES &&
-        process_table[slot].kernel_stack_top != 0U) {
-        stack_base = process_table[slot].stack_base;
-        stack_top_addr = process_table[slot].kernel_stack_top;
+        process_table[slot].arch.kernel_stack_base != 0 &&
+        process_table[slot].arch.kernel_stack_pages == PROCESS_STACK_PAGES &&
+        process_table[slot].arch.kernel_stack_top != 0U) {
+        stack_base = process_table[slot].arch.kernel_stack_base;
+        stack_top_addr = process_table[slot].arch.kernel_stack_top;
     } else {
         stack_base = paging_alloc_kernel_stack(PROCESS_STACK_PAGES, &stack_top_addr);
         if (!stack_base) {
@@ -245,11 +289,11 @@ static process_t* process_reserve_slot(process_kind_t kind, const char* name, in
         }
     }
 
-    if (process_table[slot].user_trap_stack_base != 0 &&
-        process_table[slot].user_trap_stack_pages == PROCESS_USER_TRAP_STACK_PAGES &&
-        process_table[slot].user_trap_stack_top != 0U) {
-        trap_stack_base = process_table[slot].user_trap_stack_base;
-        trap_stack_top_addr = process_table[slot].user_trap_stack_top;
+    if (process_table[slot].arch.user_trap_stack_base != 0 &&
+        process_table[slot].arch.user_trap_stack_pages == PROCESS_USER_TRAP_STACK_PAGES &&
+        process_table[slot].arch.user_trap_stack_top != 0U) {
+        trap_stack_base = process_table[slot].arch.user_trap_stack_base;
+        trap_stack_top_addr = process_table[slot].arch.user_trap_stack_top;
     } else if (kind == PROCESS_KIND_USER) {
         trap_stack_base = paging_alloc_kernel_stack(PROCESS_USER_TRAP_STACK_PAGES, &trap_stack_top_addr);
         if (!trap_stack_base) {
@@ -269,28 +313,38 @@ static process_t* process_reserve_slot(process_kind_t kind, const char* name, in
     proc->kind = kind;
     proc->exit_code = 0;
     proc->waitable = parent_pid != 0 ? 1U : 0U;
-    proc->cr3 = 0;
+    proc->arch.address_space_root = 0;
     proc->cwd_node = -1;
     proc->user_entry = 0;
     proc->user_stack_top = 0;
     process_clear_args(proc);
     process_clear_pending_request(proc);
-    proc->stack_base = stack_base;
-    proc->stack_pages = PROCESS_STACK_PAGES;
-    proc->kernel_stack_top = stack_top_addr;
-    proc->user_trap_stack_base = trap_stack_base;
-    proc->user_trap_stack_pages = trap_stack_base ? PROCESS_USER_TRAP_STACK_PAGES : 0U;
-    proc->user_trap_stack_top = trap_stack_top_addr;
+    proc->arch.kernel_stack_base = stack_base;
+    proc->arch.kernel_stack_pages = PROCESS_STACK_PAGES;
+    proc->arch.kernel_stack_top = stack_top_addr;
+    proc->arch.user_trap_stack_base = trap_stack_base;
+    proc->arch.user_trap_stack_pages = trap_stack_base ? PROCESS_USER_TRAP_STACK_PAGES : 0U;
+    proc->arch.user_trap_stack_top = trap_stack_top_addr;
     strncpy(proc->name, name ? name : "task", sizeof(proc->name) - 1);
     proc->name[sizeof(proc->name) - 1] = '\0';
 
-    stack_top = (uint32_t*)stack_top_addr;
-    *--stack_top = (uint32_t)process_bootstrap;
+    stack_top = (uintptr_t*)stack_top_addr;
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    *--stack_top = (uintptr_t)x64_process_bootstrap_trampoline;
     *--stack_top = 0;
     *--stack_top = 0;
     *--stack_top = 0;
     *--stack_top = 0;
-    proc->esp = (uint32_t)stack_top;
+    *--stack_top = 0;
+    *--stack_top = 0;
+#else
+    *--stack_top = (uintptr_t)process_bootstrap_entry;
+    *--stack_top = 0;
+    *--stack_top = 0;
+    *--stack_top = 0;
+    *--stack_top = 0;
+#endif
+    proc->arch.kernel_sp = (uintptr_t)stack_top;
     return proc;
 }
 
@@ -313,9 +367,9 @@ static void process_log_created(const process_t* proc) {
     serial_write(" ppid=");
     serial_write_hex32((uint32_t)proc->parent_pid);
     serial_write(" stack_base=");
-    serial_write_hex32((uint32_t)proc->stack_base);
+    process_log_hex_uintptr((uintptr_t)proc->arch.kernel_stack_base);
     serial_write(" stack_top=");
-    serial_write_hex32(proc->kernel_stack_top);
+    process_log_hex_uintptr(proc->arch.kernel_stack_top);
     if (proc->kind == PROCESS_KIND_USER && proc->image_path[0] != '\0') {
         serial_write(" image=");
         serial_write(proc->image_path);
@@ -327,13 +381,13 @@ static void process_abandon_reserved_slot(process_t* proc) {
     if (!proc) return;
     fd_cleanup_process(proc);
     exec_release_address_space(&proc->user_space);
-    memset(&proc->user_frame, 0, sizeof(proc->user_frame));
+    memset(&proc->arch.user_frame, 0, sizeof(proc->arch.user_frame));
     process_reset_unused(proc);
 }
 
-static void process_set_name_from_path(char* dst, uint32_t dst_size, const char* path) {
+static void process_set_name_from_path(char* dst, size_t dst_size, const char* path) {
     const char* leaf = path;
-    uint32_t i;
+    size_t i;
 
     if (!dst || dst_size == 0U) return;
     dst[0] = '\0';
@@ -499,6 +553,10 @@ void process_debug_dump(const char* tag) {
         serial_write_hex32(proc->zombie_children);
         serial_write(" flags=");
         serial_write_hex32(proc->flags);
+        serial_write(" ksp=");
+        process_log_hex_uintptr(proc->arch.kernel_sp);
+        serial_write(" stack_top=");
+        process_log_hex_uintptr(proc->arch.kernel_stack_top);
         serial_write(" name=");
         serial_write(proc->name);
         if (proc->image_path[0] != '\0') {
@@ -509,7 +567,7 @@ void process_debug_dump(const char* tag) {
     }
 }
 
-static void process_bootstrap() {
+void process_bootstrap_entry(void) {
     process_t* current = process_current();
     if (!current || !current->entry) process_exit_current(0);
     current->entry(current->arg);
@@ -577,25 +635,25 @@ static void process_reset_unused(process_t* proc) {
     void* stack_base;
     void* trap_stack_base;
     uint32_t stack_pages;
-    uint32_t kernel_stack_top;
+    uintptr_t kernel_stack_top;
     uint32_t trap_stack_pages;
-    uint32_t trap_stack_top;
+    uintptr_t trap_stack_top;
 
     if (!proc) return;
-    stack_base = proc->stack_base;
-    trap_stack_base = proc->user_trap_stack_base;
-    stack_pages = proc->stack_pages;
-    kernel_stack_top = proc->kernel_stack_top;
-    trap_stack_pages = proc->user_trap_stack_pages;
-    trap_stack_top = proc->user_trap_stack_top;
+    stack_base = proc->arch.kernel_stack_base;
+    trap_stack_base = proc->arch.user_trap_stack_base;
+    stack_pages = proc->arch.kernel_stack_pages;
+    kernel_stack_top = proc->arch.kernel_stack_top;
+    trap_stack_pages = proc->arch.user_trap_stack_pages;
+    trap_stack_top = proc->arch.user_trap_stack_top;
     memset(proc, 0, sizeof(*proc));
     proc->state = PROC_UNUSED;
-    proc->stack_base = stack_base;
-    proc->stack_pages = stack_pages;
-    proc->kernel_stack_top = kernel_stack_top;
-    proc->user_trap_stack_base = trap_stack_base;
-    proc->user_trap_stack_pages = trap_stack_pages;
-    proc->user_trap_stack_top = trap_stack_top;
+    proc->arch.kernel_stack_base = stack_base;
+    proc->arch.kernel_stack_pages = stack_pages;
+    proc->arch.kernel_stack_top = kernel_stack_top;
+    proc->arch.user_trap_stack_base = trap_stack_base;
+    proc->arch.user_trap_stack_pages = trap_stack_pages;
+    proc->arch.user_trap_stack_top = trap_stack_top;
 }
 
 static const char* process_state_name(process_state_t state) {
@@ -619,6 +677,9 @@ static void process_clear_pending_request(process_t* proc) {
     proc->pending_wait_flags = 0U;
     proc->pending_wait_status_ptr = 0U;
     proc->pending_sleep_until = 0U;
+    proc->pending_io_fd = -1;
+    proc->pending_io_user_ptr = 0U;
+    proc->pending_io_len = 0U;
     proc->pending_exec_path[0] = '\0';
 }
 
@@ -687,7 +748,7 @@ static int process_exec_replace_current(process_t* proc) {
 
     if (!proc || proc->pending_exec_path[0] == '\0') return -1;
     memset(&new_space, 0, sizeof(new_space));
-    status = exec_load_elf32_file(proc->pending_exec_path, &new_space);
+    status = exec_load_file(proc->pending_exec_path, &new_space);
     if (status != EXEC_OK) {
         serial_write("[sched] exec failed pid=");
         serial_write_hex32((uint32_t)proc->pid);
@@ -723,7 +784,7 @@ static int process_service_user_request(process_t* proc) {
             status = process_exec_replace_current(proc);
             if (status != 0) {
                 process_clear_pending_request(proc);
-                proc->user_frame.eax = (uint32_t)-1;
+                arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)-1);
             }
             return 0;
         case PROCESS_USER_REQ_WAITPID:
@@ -738,7 +799,7 @@ static int process_service_user_request(process_t* proc) {
                 status = -1;
             }
             process_clear_pending_request(proc);
-            proc->user_frame.eax = (uint32_t)status;
+            arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)status);
             return 0;
         case PROCESS_USER_REQ_SLEEP:
             if ((int32_t)(timer_ticks - proc->pending_sleep_until) < 0) {
@@ -746,8 +807,60 @@ static int process_service_user_request(process_t* proc) {
                 return 1;
             }
             process_clear_pending_request(proc);
-            proc->user_frame.eax = 0U;
+            arch_frame_set_return_value(&proc->arch.user_frame, 0U);
             return 0;
+        case PROCESS_USER_REQ_READ: {
+            void* buffer;
+
+            if (proc->pending_io_len == 0U) {
+                process_clear_pending_request(proc);
+                arch_frame_set_return_value(&proc->arch.user_frame, 0U);
+                return 0;
+            }
+            buffer = malloc((size_t)proc->pending_io_len);
+            if (!buffer) {
+                process_clear_pending_request(proc);
+                arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)-1);
+                return 0;
+            }
+            status = fd_read(proc, proc->pending_io_fd, buffer, proc->pending_io_len);
+            if (status > 0 && exec_activate_address_space(&proc->user_space) != EXEC_OK) status = -1;
+            if (status > 0 &&
+                copy_to_user((void*)proc->pending_io_user_ptr, buffer, (uint32_t)status) != 0) {
+                status = -1;
+            }
+            free(buffer);
+            process_clear_pending_request(proc);
+            arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)status);
+            return 0;
+        }
+        case PROCESS_USER_REQ_WRITE: {
+            void* buffer;
+
+            if (proc->pending_io_len == 0U) {
+                process_clear_pending_request(proc);
+                arch_frame_set_return_value(&proc->arch.user_frame, 0U);
+                return 0;
+            }
+            buffer = malloc((size_t)proc->pending_io_len);
+            if (!buffer) {
+                process_clear_pending_request(proc);
+                arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)-1);
+                return 0;
+            }
+            if (exec_activate_address_space(&proc->user_space) != EXEC_OK ||
+                copy_from_user(buffer, (const void*)proc->pending_io_user_ptr, proc->pending_io_len) != 0) {
+                free(buffer);
+                process_clear_pending_request(proc);
+                arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)-1);
+                return 0;
+            }
+            status = fd_write(proc, proc->pending_io_fd, buffer, proc->pending_io_len);
+            free(buffer);
+            process_clear_pending_request(proc);
+            arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)status);
+            return 0;
+        }
         default:
             process_clear_pending_request(proc);
             return -1;

@@ -73,6 +73,19 @@ void serial_write_hex32(uint32_t value) {
     serial_write(buf);
 }
 
+void serial_write_hex64(uint64_t value) {
+    static const char hex[] = "0123456789ABCDEF";
+    char buf[19];
+
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++) {
+        buf[17 - i] = hex[(uint8_t)((value >> (i * 4)) & 0x0FU)];
+    }
+    buf[18] = '\0';
+    serial_write(buf);
+}
+
 int serial_copy_ring_buffer(char* out, int max_len) {
     uint32_t start;
     uint32_t count;

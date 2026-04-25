@@ -362,6 +362,37 @@ static const uint8_t user_tls_rsapss_message[] USER_RODATA = {
     'S', 'S', ' ', 's', 'e', 'l', 'f', 't', 'e', 's', 't'
 };
 
+static const uint8_t user_tls_ecdsa_p256_public_x[32] USER_RODATA = {
+    0xb3, 0xa9, 0xd0, 0x0e, 0x7c, 0x21, 0x16, 0x80,
+    0x86, 0x8f, 0x7d, 0x5e, 0x80, 0x7e, 0xaf, 0x1b,
+    0x5b, 0x71, 0xe4, 0x6c, 0x7f, 0x96, 0x76, 0x2a,
+    0xd4, 0xee, 0x62, 0x39, 0xf2, 0x54, 0x58, 0x66
+};
+
+static const uint8_t user_tls_ecdsa_p256_public_y[32] USER_RODATA = {
+    0x62, 0x6f, 0xe0, 0x7b, 0xa7, 0x80, 0x61, 0x85,
+    0xae, 0xfc, 0x35, 0xc2, 0x74, 0xb3, 0xc0, 0xcd,
+    0x23, 0xbb, 0x34, 0x5c, 0xa8, 0x9d, 0x67, 0x62,
+    0xb7, 0x40, 0x9e, 0x8c, 0xd4, 0x9b, 0x7b, 0x43
+};
+
+static const uint8_t user_tls_ecdsa_p256_signature[] USER_RODATA = {
+    0x30, 0x44, 0x02, 0x20, 0x33, 0x84, 0x28, 0xbb,
+    0x4a, 0xc9, 0xe5, 0x30, 0xe8, 0x50, 0x35, 0x13,
+    0xae, 0xd9, 0xc8, 0xea, 0x45, 0x9e, 0x91, 0xfe,
+    0x63, 0x4b, 0xd9, 0x4f, 0x65, 0xf6, 0xda, 0xbe,
+    0x43, 0x07, 0xac, 0xd5, 0x02, 0x20, 0x07, 0x7c,
+    0xb9, 0x65, 0xf3, 0xa5, 0x49, 0xb3, 0x83, 0x79,
+    0x55, 0x82, 0x0e, 0xc4, 0x39, 0x42, 0x57, 0x0e,
+    0xfd, 0xbf, 0xc4, 0x8c, 0x6a, 0x86, 0xe2, 0xe4,
+    0x80, 0x17, 0xda, 0xe2, 0xd9, 0xc8
+};
+
+static const uint8_t user_tls_ecdsa_p256_message[] USER_RODATA = {
+    'N', 'a', 'r', 'c', 'O', 's', ' ', 'E', 'C', 'D', 'S', 'A', ' ', 's', 'e', 'l',
+    'f', 't', 'e', 's', 't', '\n'
+};
+
 static const char user_tls_expand_label_name[] USER_RODATA = "test";
 
 static const char user_tls_selftest_ok[] USER_RODATA = "sha256+hmac+hkdf+transcript ok";
@@ -392,6 +423,9 @@ static const char user_tls_selftest_rsapss_ok[] USER_RODATA = "bigint+rsa-pss ok
 static const char user_tls_selftest_rsapss_bigint_fail[] USER_RODATA = "bigint selftest";
 static const char user_tls_selftest_rsapss_verify_fail[] USER_RODATA = "rsa-pss verify";
 static const char user_tls_selftest_rsapss_reject_fail[] USER_RODATA = "rsa-pss reject tamper";
+static const char user_tls_selftest_ecdsa_p256_ok[] USER_RODATA = "ecdsa-p256 verify ok";
+static const char user_tls_selftest_ecdsa_p256_verify_fail[] USER_RODATA = "ecdsa-p256 verify";
+static const char user_tls_selftest_ecdsa_p256_reject_fail[] USER_RODATA = "ecdsa-p256 reject tamper";
 
 static USER_CODE uint32_t user_tls_rotr32(uint32_t value, uint32_t shift) {
     return (value >> shift) | (value << (32U - shift));
@@ -1216,6 +1250,710 @@ static USER_CODE uint32_t user_tls_modulus_bitlen(const uint8_t* modulus, uint32
     return (modulus_len - index) * 8U - user_tls_count_leading_zero_bits_u8(modulus[index]);
 }
 
+#define USER_TLS_P256_LIMBS 8U
+#define USER_TLS_P256_WIDE_LIMBS 16U
+
+typedef struct {
+    uint32_t limbs[USER_TLS_P256_LIMBS];
+} user_tls_p256_int_t;
+
+typedef struct {
+    uint32_t limbs[USER_TLS_P256_WIDE_LIMBS];
+} user_tls_p256_wide_t;
+
+typedef struct {
+    uint32_t limbs[USER_TLS_P256_LIMBS + 1U];
+} user_tls_p256_rem_t;
+
+typedef struct {
+    user_tls_p256_int_t x;
+    user_tls_p256_int_t y;
+    user_tls_p256_int_t z;
+    int infinity;
+} user_tls_p256_point_t;
+
+static const uint8_t user_tls_p256_prime[32] USER_RODATA = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
+static const uint8_t user_tls_p256_prime_minus_two[32] USER_RODATA = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd
+};
+
+static const uint8_t user_tls_p256_order[32] USER_RODATA = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
+    0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51
+};
+
+static const uint8_t user_tls_p256_order_minus_two[32] USER_RODATA = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84,
+    0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x4f
+};
+
+static const uint8_t user_tls_p256_a[32] USER_RODATA = {
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc
+};
+
+static const uint8_t user_tls_p256_b[32] USER_RODATA = {
+    0x5a, 0xc6, 0x35, 0xd8, 0xaa, 0x3a, 0x93, 0xe7,
+    0xb3, 0xeb, 0xbd, 0x55, 0x76, 0x98, 0x86, 0xbc,
+    0x65, 0x1d, 0x06, 0xb0, 0xcc, 0x53, 0xb0, 0xf6,
+    0x3b, 0xce, 0x3c, 0x3e, 0x27, 0xd2, 0x60, 0x4b
+};
+
+static const uint8_t user_tls_p256_generator_x[32] USER_RODATA = {
+    0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47,
+    0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40, 0xf2,
+    0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0,
+    0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2, 0x96
+};
+
+static const uint8_t user_tls_p256_generator_y[32] USER_RODATA = {
+    0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b,
+    0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e, 0x16,
+    0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce,
+    0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51, 0xf5
+};
+
+static USER_CODE void user_tls_p256_zero(user_tls_p256_int_t* value) {
+    if (!value) return;
+    memset(value->limbs, 0, sizeof(value->limbs));
+}
+
+static USER_CODE void user_tls_p256_set_u32(user_tls_p256_int_t* value, uint32_t word) {
+    if (!value) return;
+    user_tls_p256_zero(value);
+    value->limbs[0] = word;
+}
+
+static USER_CODE void user_tls_p256_copy(user_tls_p256_int_t* dst, const user_tls_p256_int_t* src) {
+    if (!dst || !src) return;
+    memcpy(dst->limbs, src->limbs, sizeof(dst->limbs));
+}
+
+static USER_CODE int user_tls_p256_is_zero(const user_tls_p256_int_t* value) {
+    if (!value) return 1;
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) {
+        if (value->limbs[i] != 0U) return 0;
+    }
+    return 1;
+}
+
+static USER_CODE int user_tls_p256_compare(const user_tls_p256_int_t* a, const user_tls_p256_int_t* b) {
+    if (!a || !b) return 0;
+    for (int32_t i = (int32_t)USER_TLS_P256_LIMBS - 1; i >= 0; i--) {
+        if (a->limbs[i] > b->limbs[i]) return 1;
+        if (a->limbs[i] < b->limbs[i]) return -1;
+    }
+    return 0;
+}
+
+static USER_CODE void user_tls_p256_from_be_bytes(user_tls_p256_int_t* out,
+                                                  const uint8_t* bytes, uint32_t byte_len) {
+    if (!out || (!bytes && byte_len != 0U) || byte_len > 32U) return;
+    user_tls_p256_zero(out);
+
+    for (uint32_t i = 0; i < byte_len; i++) {
+        uint32_t limb = i >> 2;
+        uint32_t shift = (i & 3U) * 8U;
+        out->limbs[limb] |= (uint32_t)bytes[byte_len - 1U - i] << shift;
+    }
+}
+
+static USER_CODE uint32_t user_tls_p256_add_raw(user_tls_p256_int_t* out,
+                                                 const user_tls_p256_int_t* a,
+                                                 const user_tls_p256_int_t* b) {
+    uint64_t carry = 0U;
+
+    if (!out || !a || !b) return 0U;
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) {
+        uint64_t sum = (uint64_t)a->limbs[i] + (uint64_t)b->limbs[i] + carry;
+        out->limbs[i] = (uint32_t)sum;
+        carry = sum >> 32;
+    }
+    return (uint32_t)carry;
+}
+
+static USER_CODE uint32_t user_tls_p256_sub_raw(user_tls_p256_int_t* out,
+                                                 const user_tls_p256_int_t* a,
+                                                 const user_tls_p256_int_t* b) {
+    uint64_t borrow = 0U;
+
+    if (!out || !a || !b) return 0U;
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) {
+        uint64_t av = (uint64_t)a->limbs[i];
+        uint64_t bv = (uint64_t)b->limbs[i] + borrow;
+
+        if (av >= bv) {
+            out->limbs[i] = (uint32_t)(av - bv);
+            borrow = 0U;
+        } else {
+            out->limbs[i] = (uint32_t)(((uint64_t)1 << 32) + av - bv);
+            borrow = 1U;
+        }
+    }
+    return (uint32_t)borrow;
+}
+
+static USER_CODE uint32_t user_tls_p256_get_bit(const user_tls_p256_int_t* value, uint32_t bit_index) {
+    uint32_t limb = bit_index >> 5;
+    uint32_t shift = bit_index & 31U;
+
+    if (!value || limb >= USER_TLS_P256_LIMBS) return 0U;
+    return (value->limbs[limb] >> shift) & 1U;
+}
+
+static USER_CODE void user_tls_p256_reduce_once(user_tls_p256_int_t* value,
+                                                const user_tls_p256_int_t* modulus) {
+    if (!value || !modulus) return;
+    while (user_tls_p256_compare(value, modulus) >= 0) {
+        (void)user_tls_p256_sub_raw(value, value, modulus);
+    }
+}
+
+static USER_CODE void user_tls_p256_mod_add(user_tls_p256_int_t* out,
+                                            const user_tls_p256_int_t* a,
+                                            const user_tls_p256_int_t* b,
+                                            const user_tls_p256_int_t* modulus) {
+    user_tls_p256_int_t tmp;
+    uint32_t carry;
+
+    carry = user_tls_p256_add_raw(&tmp, a, b);
+    if (carry != 0U || user_tls_p256_compare(&tmp, modulus) >= 0) {
+        (void)user_tls_p256_sub_raw(&tmp, &tmp, modulus);
+    }
+    user_tls_p256_copy(out, &tmp);
+}
+
+static USER_CODE void user_tls_p256_mod_sub(user_tls_p256_int_t* out,
+                                            const user_tls_p256_int_t* a,
+                                            const user_tls_p256_int_t* b,
+                                            const user_tls_p256_int_t* modulus) {
+    user_tls_p256_int_t diff;
+
+    if (user_tls_p256_sub_raw(&diff, a, b) == 0U) {
+        user_tls_p256_copy(out, &diff);
+        return;
+    }
+
+    (void)user_tls_p256_sub_raw(&diff, b, a);
+    (void)user_tls_p256_sub_raw(&diff, modulus, &diff);
+    user_tls_p256_copy(out, &diff);
+}
+
+static USER_CODE void user_tls_p256_mod_double(user_tls_p256_int_t* out,
+                                               const user_tls_p256_int_t* a,
+                                               const user_tls_p256_int_t* modulus) {
+    user_tls_p256_mod_add(out, a, a, modulus);
+}
+
+static USER_CODE void user_tls_p256_mod_mul_small(user_tls_p256_int_t* out,
+                                                  const user_tls_p256_int_t* a,
+                                                  uint32_t multiplier,
+                                                  const user_tls_p256_int_t* modulus) {
+    user_tls_p256_int_t acc;
+    user_tls_p256_int_t term;
+
+    user_tls_p256_zero(&acc);
+    user_tls_p256_copy(&term, a);
+    while (multiplier != 0U) {
+        if ((multiplier & 1U) != 0U) user_tls_p256_mod_add(&acc, &acc, &term, modulus);
+        multiplier >>= 1U;
+        if (multiplier != 0U) user_tls_p256_mod_double(&term, &term, modulus);
+    }
+    user_tls_p256_copy(out, &acc);
+}
+
+static USER_CODE void user_tls_p256_wide_zero(user_tls_p256_wide_t* value) {
+    if (!value) return;
+    memset(value->limbs, 0, sizeof(value->limbs));
+}
+
+static USER_CODE void user_tls_p256_wide_mul(user_tls_p256_wide_t* out,
+                                             const user_tls_p256_int_t* a,
+                                             const user_tls_p256_int_t* b) {
+    if (!out || !a || !b) return;
+    user_tls_p256_wide_zero(out);
+
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) {
+        uint64_t carry = 0U;
+
+        for (uint32_t j = 0; j < USER_TLS_P256_LIMBS; j++) {
+            uint64_t accum = (uint64_t)out->limbs[i + j] +
+                             (uint64_t)a->limbs[i] * (uint64_t)b->limbs[j] + carry;
+            out->limbs[i + j] = (uint32_t)accum;
+            carry = accum >> 32;
+        }
+
+        for (uint32_t k = i + USER_TLS_P256_LIMBS; carry != 0U && k < USER_TLS_P256_WIDE_LIMBS; k++) {
+            uint64_t accum = (uint64_t)out->limbs[k] + carry;
+            out->limbs[k] = (uint32_t)accum;
+            carry = accum >> 32;
+        }
+    }
+}
+
+static USER_CODE uint32_t user_tls_p256_wide_get_bit(const user_tls_p256_wide_t* value, uint32_t bit_index) {
+    uint32_t limb = bit_index >> 5;
+    uint32_t shift = bit_index & 31U;
+
+    if (!value || limb >= USER_TLS_P256_WIDE_LIMBS) return 0U;
+    return (value->limbs[limb] >> shift) & 1U;
+}
+
+static USER_CODE void user_tls_p256_rem_zero(user_tls_p256_rem_t* value) {
+    if (!value) return;
+    memset(value->limbs, 0, sizeof(value->limbs));
+}
+
+static USER_CODE void user_tls_p256_rem_shift_left1(user_tls_p256_rem_t* value) {
+    uint32_t carry = 0U;
+
+    if (!value) return;
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS + 1U; i++) {
+        uint32_t next = value->limbs[i] >> 31;
+        value->limbs[i] = (value->limbs[i] << 1) | carry;
+        carry = next;
+    }
+}
+
+static USER_CODE int user_tls_p256_rem_ge_mod(const user_tls_p256_rem_t* rem,
+                                              const user_tls_p256_int_t* modulus) {
+    if (!rem || !modulus) return 0;
+    if (rem->limbs[USER_TLS_P256_LIMBS] != 0U) return 1;
+    for (int32_t i = (int32_t)USER_TLS_P256_LIMBS - 1; i >= 0; i--) {
+        if (rem->limbs[i] > modulus->limbs[i]) return 1;
+        if (rem->limbs[i] < modulus->limbs[i]) return 0;
+    }
+    return 1;
+}
+
+static USER_CODE void user_tls_p256_rem_sub_mod(user_tls_p256_rem_t* rem,
+                                                const user_tls_p256_int_t* modulus) {
+    uint64_t borrow = 0U;
+
+    if (!rem || !modulus) return;
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) {
+        uint64_t rv = (uint64_t)rem->limbs[i];
+        uint64_t mv = (uint64_t)modulus->limbs[i] + borrow;
+
+        if (rv >= mv) {
+            rem->limbs[i] = (uint32_t)(rv - mv);
+            borrow = 0U;
+        } else {
+            rem->limbs[i] = (uint32_t)(((uint64_t)1 << 32) + rv - mv);
+            borrow = 1U;
+        }
+    }
+    rem->limbs[USER_TLS_P256_LIMBS] = (uint32_t)((uint64_t)rem->limbs[USER_TLS_P256_LIMBS] - borrow);
+}
+
+static USER_CODE void user_tls_p256_mod_reduce_wide(user_tls_p256_int_t* out,
+                                                    const user_tls_p256_wide_t* value,
+                                                    const user_tls_p256_int_t* modulus) {
+    user_tls_p256_rem_t rem;
+
+    if (!out || !value || !modulus) return;
+    user_tls_p256_rem_zero(&rem);
+    for (int32_t bit = 511; bit >= 0; bit--) {
+        user_tls_p256_rem_shift_left1(&rem);
+        rem.limbs[0] |= user_tls_p256_wide_get_bit(value, (uint32_t)bit);
+        if (user_tls_p256_rem_ge_mod(&rem, modulus)) user_tls_p256_rem_sub_mod(&rem, modulus);
+    }
+    for (uint32_t i = 0; i < USER_TLS_P256_LIMBS; i++) out->limbs[i] = rem.limbs[i];
+}
+
+static USER_CODE void user_tls_p256_mod_mul(user_tls_p256_int_t* out,
+                                            const user_tls_p256_int_t* a,
+                                            const user_tls_p256_int_t* b,
+                                            const user_tls_p256_int_t* modulus) {
+    user_tls_p256_wide_t product;
+
+    user_tls_p256_wide_mul(&product, a, b);
+    user_tls_p256_mod_reduce_wide(out, &product, modulus);
+}
+
+static USER_CODE void user_tls_p256_mod_square(user_tls_p256_int_t* out,
+                                               const user_tls_p256_int_t* a,
+                                               const user_tls_p256_int_t* modulus) {
+    user_tls_p256_mod_mul(out, a, a, modulus);
+}
+
+static USER_CODE void user_tls_p256_mod_pow_be(user_tls_p256_int_t* out,
+                                               const user_tls_p256_int_t* base,
+                                               const uint8_t* exponent,
+                                               uint32_t exponent_len,
+                                               const user_tls_p256_int_t* modulus) {
+    user_tls_p256_int_t acc;
+    user_tls_p256_int_t result;
+
+    if (!out || !base || (!exponent && exponent_len != 0U) || !modulus) return;
+    user_tls_p256_copy(&acc, base);
+    user_tls_p256_reduce_once(&acc, modulus);
+    user_tls_p256_set_u32(&result, 1U);
+
+    for (uint32_t i = 0; i < exponent_len; i++) {
+        uint8_t byte = exponent[i];
+
+        for (int32_t bit = 7; bit >= 0; bit--) {
+            user_tls_p256_mod_square(&result, &result, modulus);
+            if (((byte >> bit) & 1U) != 0U) user_tls_p256_mod_mul(&result, &result, &acc, modulus);
+        }
+    }
+    user_tls_p256_copy(out, &result);
+}
+
+static USER_CODE void user_tls_p256_load_prime(user_tls_p256_int_t* out) {
+    user_tls_p256_from_be_bytes(out, user_tls_p256_prime, sizeof(user_tls_p256_prime));
+}
+
+static USER_CODE void user_tls_p256_load_order(user_tls_p256_int_t* out) {
+    user_tls_p256_from_be_bytes(out, user_tls_p256_order, sizeof(user_tls_p256_order));
+}
+
+static USER_CODE void user_tls_p256_point_set_infinity(user_tls_p256_point_t* point) {
+    if (!point) return;
+    user_tls_p256_zero(&point->x);
+    user_tls_p256_zero(&point->y);
+    user_tls_p256_zero(&point->z);
+    point->infinity = 1;
+}
+
+static USER_CODE void user_tls_p256_point_copy(user_tls_p256_point_t* dst,
+                                               const user_tls_p256_point_t* src) {
+    if (!dst || !src) return;
+    memcpy(dst, src, sizeof(*dst));
+}
+
+static USER_CODE void user_tls_p256_point_from_affine(user_tls_p256_point_t* point,
+                                                      const user_tls_p256_int_t* x,
+                                                      const user_tls_p256_int_t* y) {
+    if (!point || !x || !y) return;
+    user_tls_p256_copy(&point->x, x);
+    user_tls_p256_copy(&point->y, y);
+    user_tls_p256_set_u32(&point->z, 1U);
+    point->infinity = 0;
+}
+
+static USER_CODE void user_tls_p256_point_double(user_tls_p256_point_t* out,
+                                                 const user_tls_p256_point_t* in,
+                                                 const user_tls_p256_int_t* prime) {
+    user_tls_p256_int_t delta;
+    user_tls_p256_int_t gamma;
+    user_tls_p256_int_t beta;
+    user_tls_p256_int_t alpha;
+    user_tls_p256_int_t tmp0;
+    user_tls_p256_int_t tmp1;
+    user_tls_p256_int_t tmp2;
+
+    if (!out || !in || !prime) return;
+    if (in->infinity || user_tls_p256_is_zero(&in->y)) {
+        user_tls_p256_point_set_infinity(out);
+        return;
+    }
+
+    user_tls_p256_mod_square(&delta, &in->z, prime);
+    user_tls_p256_mod_square(&gamma, &in->y, prime);
+    user_tls_p256_mod_mul(&beta, &in->x, &gamma, prime);
+
+    user_tls_p256_mod_sub(&tmp0, &in->x, &delta, prime);
+    user_tls_p256_mod_add(&tmp1, &in->x, &delta, prime);
+    user_tls_p256_mod_mul(&alpha, &tmp0, &tmp1, prime);
+    user_tls_p256_mod_mul_small(&alpha, &alpha, 3U, prime);
+
+    user_tls_p256_mod_square(&tmp0, &alpha, prime);
+    user_tls_p256_mod_mul_small(&tmp1, &beta, 8U, prime);
+    user_tls_p256_mod_sub(&out->x, &tmp0, &tmp1, prime);
+
+    user_tls_p256_mod_add(&tmp0, &in->y, &in->z, prime);
+    user_tls_p256_mod_square(&tmp0, &tmp0, prime);
+    user_tls_p256_mod_sub(&tmp0, &tmp0, &gamma, prime);
+    user_tls_p256_mod_sub(&out->z, &tmp0, &delta, prime);
+
+    user_tls_p256_mod_mul_small(&tmp0, &beta, 4U, prime);
+    user_tls_p256_mod_sub(&tmp0, &tmp0, &out->x, prime);
+    user_tls_p256_mod_mul(&tmp0, &alpha, &tmp0, prime);
+    user_tls_p256_mod_square(&tmp1, &gamma, prime);
+    user_tls_p256_mod_mul_small(&tmp2, &tmp1, 8U, prime);
+    user_tls_p256_mod_sub(&out->y, &tmp0, &tmp2, prime);
+    out->infinity = 0;
+}
+
+static USER_CODE void user_tls_p256_point_add(user_tls_p256_point_t* out,
+                                              const user_tls_p256_point_t* p,
+                                              const user_tls_p256_point_t* q,
+                                              const user_tls_p256_int_t* prime) {
+    user_tls_p256_int_t z1z1;
+    user_tls_p256_int_t z2z2;
+    user_tls_p256_int_t u1;
+    user_tls_p256_int_t u2;
+    user_tls_p256_int_t s1;
+    user_tls_p256_int_t s2;
+    user_tls_p256_int_t h;
+    user_tls_p256_int_t i;
+    user_tls_p256_int_t j;
+    user_tls_p256_int_t r;
+    user_tls_p256_int_t v;
+    user_tls_p256_int_t tmp0;
+    user_tls_p256_int_t tmp1;
+    user_tls_p256_int_t tmp2;
+
+    if (!out || !p || !q || !prime) return;
+    if (p->infinity) {
+        user_tls_p256_point_copy(out, q);
+        return;
+    }
+    if (q->infinity) {
+        user_tls_p256_point_copy(out, p);
+        return;
+    }
+
+    user_tls_p256_mod_square(&z1z1, &p->z, prime);
+    user_tls_p256_mod_square(&z2z2, &q->z, prime);
+    user_tls_p256_mod_mul(&u1, &p->x, &z2z2, prime);
+    user_tls_p256_mod_mul(&u2, &q->x, &z1z1, prime);
+
+    user_tls_p256_mod_mul(&tmp0, &q->z, &z2z2, prime);
+    user_tls_p256_mod_mul(&s1, &p->y, &tmp0, prime);
+    user_tls_p256_mod_mul(&tmp0, &p->z, &z1z1, prime);
+    user_tls_p256_mod_mul(&s2, &q->y, &tmp0, prime);
+
+    if (user_tls_p256_compare(&u1, &u2) == 0) {
+        if (user_tls_p256_compare(&s1, &s2) != 0) {
+            user_tls_p256_point_set_infinity(out);
+            return;
+        }
+        user_tls_p256_point_double(out, p, prime);
+        return;
+    }
+
+    user_tls_p256_mod_sub(&h, &u2, &u1, prime);
+    user_tls_p256_mod_double(&tmp0, &h, prime);
+    user_tls_p256_mod_square(&i, &tmp0, prime);
+    user_tls_p256_mod_mul(&j, &h, &i, prime);
+    user_tls_p256_mod_sub(&tmp0, &s2, &s1, prime);
+    user_tls_p256_mod_double(&r, &tmp0, prime);
+    user_tls_p256_mod_mul(&v, &u1, &i, prime);
+
+    user_tls_p256_mod_square(&tmp0, &r, prime);
+    user_tls_p256_mod_sub(&tmp0, &tmp0, &j, prime);
+    user_tls_p256_mod_double(&tmp1, &v, prime);
+    user_tls_p256_mod_sub(&out->x, &tmp0, &tmp1, prime);
+
+    user_tls_p256_mod_sub(&tmp0, &v, &out->x, prime);
+    user_tls_p256_mod_mul(&tmp0, &r, &tmp0, prime);
+    user_tls_p256_mod_mul(&tmp1, &s1, &j, prime);
+    user_tls_p256_mod_double(&tmp2, &tmp1, prime);
+    user_tls_p256_mod_sub(&out->y, &tmp0, &tmp2, prime);
+
+    user_tls_p256_mod_add(&tmp0, &p->z, &q->z, prime);
+    user_tls_p256_mod_square(&tmp0, &tmp0, prime);
+    user_tls_p256_mod_sub(&tmp0, &tmp0, &z1z1, prime);
+    user_tls_p256_mod_sub(&tmp0, &tmp0, &z2z2, prime);
+    user_tls_p256_mod_mul(&out->z, &tmp0, &h, prime);
+    out->infinity = 0;
+}
+
+static USER_CODE void user_tls_p256_point_scalar_mul(user_tls_p256_point_t* out,
+                                                     const user_tls_p256_int_t* scalar,
+                                                     const user_tls_p256_int_t* x,
+                                                     const user_tls_p256_int_t* y,
+                                                     const user_tls_p256_int_t* prime) {
+    user_tls_p256_point_t addend;
+    user_tls_p256_point_t acc;
+
+    if (!out || !scalar || !x || !y || !prime) return;
+    user_tls_p256_point_from_affine(&addend, x, y);
+    user_tls_p256_point_set_infinity(&acc);
+
+    for (int32_t bit = 255; bit >= 0; bit--) {
+        user_tls_p256_point_double(&acc, &acc, prime);
+        if (user_tls_p256_get_bit(scalar, (uint32_t)bit) != 0U) {
+            user_tls_p256_point_add(&acc, &acc, &addend, prime);
+        }
+    }
+    user_tls_p256_point_copy(out, &acc);
+}
+
+static USER_CODE int user_tls_p256_point_to_affine(user_tls_p256_int_t* out_x,
+                                                   user_tls_p256_int_t* out_y,
+                                                   const user_tls_p256_point_t* point,
+                                                   const user_tls_p256_int_t* prime) {
+    user_tls_p256_int_t z_inv;
+    user_tls_p256_int_t z_inv2;
+    user_tls_p256_int_t z_inv3;
+
+    if (!out_x || !out_y || !point || !prime || point->infinity) return -1;
+    if (user_tls_p256_is_zero(&point->z)) return -1;
+
+    user_tls_p256_mod_pow_be(&z_inv, &point->z, user_tls_p256_prime_minus_two,
+                             sizeof(user_tls_p256_prime_minus_two), prime);
+    user_tls_p256_mod_square(&z_inv2, &z_inv, prime);
+    user_tls_p256_mod_mul(&z_inv3, &z_inv2, &z_inv, prime);
+    user_tls_p256_mod_mul(out_x, &point->x, &z_inv2, prime);
+    user_tls_p256_mod_mul(out_y, &point->y, &z_inv3, prime);
+    return 0;
+}
+
+static USER_CODE int user_tls_p256_public_key_valid(const user_tls_p256_int_t* x,
+                                                    const user_tls_p256_int_t* y,
+                                                    const user_tls_p256_int_t* prime) {
+    user_tls_p256_int_t a;
+    user_tls_p256_int_t b;
+    user_tls_p256_int_t lhs;
+    user_tls_p256_int_t rhs;
+    user_tls_p256_int_t tmp;
+
+    if (!x || !y || !prime) return 0;
+    if (user_tls_p256_is_zero(x) || user_tls_p256_is_zero(y)) return 0;
+    if (user_tls_p256_compare(x, prime) >= 0 || user_tls_p256_compare(y, prime) >= 0) return 0;
+
+    user_tls_p256_from_be_bytes(&a, user_tls_p256_a, sizeof(user_tls_p256_a));
+    user_tls_p256_from_be_bytes(&b, user_tls_p256_b, sizeof(user_tls_p256_b));
+    user_tls_p256_mod_square(&lhs, y, prime);
+    user_tls_p256_mod_square(&rhs, x, prime);
+    user_tls_p256_mod_mul(&rhs, &rhs, x, prime);
+    user_tls_p256_mod_mul(&tmp, &a, x, prime);
+    user_tls_p256_mod_add(&rhs, &rhs, &tmp, prime);
+    user_tls_p256_mod_add(&rhs, &rhs, &b, prime);
+    return user_tls_p256_compare(&lhs, &rhs) == 0;
+}
+
+static USER_CODE int user_tls_ecdsa_read_der_length(const uint8_t* der, uint32_t der_len,
+                                                    uint32_t* io_off, uint32_t* out_len) {
+    uint8_t first;
+    uint32_t len = 0U;
+    uint32_t octets;
+
+    if (!der || !io_off || !out_len || *io_off >= der_len) return -1;
+    first = der[(*io_off)++];
+    if ((first & 0x80U) == 0U) {
+        len = (uint32_t)first;
+    } else {
+        octets = (uint32_t)(first & 0x7FU);
+        if (octets == 0U || octets > 2U || *io_off + octets > der_len) return -1;
+        while (octets-- != 0U) {
+            len = (len << 8) | der[(*io_off)++];
+        }
+        if (len < 128U) return -1;
+    }
+    if (*io_off + len > der_len) return -1;
+    *out_len = len;
+    return 0;
+}
+
+static USER_CODE int user_tls_ecdsa_read_der_integer(user_tls_p256_int_t* out,
+                                                     const uint8_t* der, uint32_t der_len,
+                                                     uint32_t* io_off) {
+    uint32_t len = 0U;
+    const uint8_t* value;
+
+    if (!out || !der || !io_off || *io_off >= der_len || der[*io_off] != 0x02U) return -1;
+    (*io_off)++;
+    if (user_tls_ecdsa_read_der_length(der, der_len, io_off, &len) != 0 || len == 0U) return -1;
+    value = der + *io_off;
+    *io_off += len;
+
+    if ((value[0] & 0x80U) != 0U) return -1;
+    if (len > 1U && value[0] == 0x00U) {
+        value++;
+        len--;
+        if (len == 0U || (value[0] & 0x80U) == 0U) return -1;
+    }
+    if (len > 32U) return -1;
+
+    user_tls_p256_from_be_bytes(out, value, len);
+    return user_tls_p256_is_zero(out) ? -1 : 0;
+}
+
+static USER_CODE int user_tls_ecdsa_parse_der_signature(user_tls_p256_int_t* out_r,
+                                                        user_tls_p256_int_t* out_s,
+                                                        const uint8_t* signature_der,
+                                                        uint32_t signature_len) {
+    uint32_t off = 0U;
+    uint32_t seq_len = 0U;
+
+    if (!out_r || !out_s || !signature_der || signature_len == 0U) return -1;
+    if (signature_der[off++] != 0x30U) return -1;
+    if (user_tls_ecdsa_read_der_length(signature_der, signature_len, &off, &seq_len) != 0 ||
+        off + seq_len != signature_len) {
+        return -1;
+    }
+    if (user_tls_ecdsa_read_der_integer(out_r, signature_der, signature_len, &off) != 0 ||
+        user_tls_ecdsa_read_der_integer(out_s, signature_der, signature_len, &off) != 0 ||
+        off != signature_len) {
+        return -1;
+    }
+    return 0;
+}
+
+int USER_CODE user_tls_ecdsa_p256_sha256_verify(const uint8_t public_x[32], const uint8_t public_y[32],
+                                                const uint8_t* signature_der, uint32_t signature_len,
+                                                const void* message, uint32_t message_len) {
+    user_tls_p256_int_t prime;
+    user_tls_p256_int_t order;
+    user_tls_p256_int_t generator_x;
+    user_tls_p256_int_t generator_y;
+    user_tls_p256_int_t qx;
+    user_tls_p256_int_t qy;
+    user_tls_p256_int_t r;
+    user_tls_p256_int_t s;
+    user_tls_p256_int_t hash;
+    user_tls_p256_int_t s_inv;
+    user_tls_p256_int_t u1;
+    user_tls_p256_int_t u2;
+    user_tls_p256_int_t v;
+    user_tls_p256_int_t affine_x;
+    user_tls_p256_int_t affine_y;
+    user_tls_p256_point_t p1;
+    user_tls_p256_point_t p2;
+    user_tls_p256_point_t sum;
+    uint8_t digest[USER_TLS_SHA256_DIGEST_SIZE];
+
+    if (!public_x || !public_y || !signature_der || !message) return -1;
+
+    user_tls_p256_load_prime(&prime);
+    user_tls_p256_load_order(&order);
+    user_tls_p256_from_be_bytes(&generator_x, user_tls_p256_generator_x, sizeof(user_tls_p256_generator_x));
+    user_tls_p256_from_be_bytes(&generator_y, user_tls_p256_generator_y, sizeof(user_tls_p256_generator_y));
+    user_tls_p256_from_be_bytes(&qx, public_x, 32U);
+    user_tls_p256_from_be_bytes(&qy, public_y, 32U);
+
+    if (!user_tls_p256_public_key_valid(&qx, &qy, &prime)) return -1;
+    if (user_tls_ecdsa_parse_der_signature(&r, &s, signature_der, signature_len) != 0) return -1;
+    if (user_tls_p256_compare(&r, &order) >= 0 || user_tls_p256_compare(&s, &order) >= 0) return -1;
+
+    user_tls_sha256(message, message_len, digest);
+    user_tls_p256_from_be_bytes(&hash, digest, sizeof(digest));
+    user_tls_p256_mod_pow_be(&s_inv, &s, user_tls_p256_order_minus_two,
+                             sizeof(user_tls_p256_order_minus_two), &order);
+    user_tls_p256_mod_mul(&u1, &hash, &s_inv, &order);
+    user_tls_p256_mod_mul(&u2, &r, &s_inv, &order);
+
+    user_tls_p256_point_scalar_mul(&p1, &u1, &generator_x, &generator_y, &prime);
+    user_tls_p256_point_scalar_mul(&p2, &u2, &qx, &qy, &prime);
+    user_tls_p256_point_add(&sum, &p1, &p2, &prime);
+    if (sum.infinity || user_tls_p256_point_to_affine(&affine_x, &affine_y, &sum, &prime) != 0) return -1;
+    (void)affine_y;
+
+    user_tls_p256_copy(&v, &affine_x);
+    user_tls_p256_reduce_once(&v, &order);
+    return user_tls_p256_compare(&v, &r) == 0 ? 0 : -1;
+}
+
 int USER_CODE user_tls_rsa_pss_sha256_verify(const uint8_t* modulus, uint32_t modulus_len,
                                              uint32_t exponent,
                                              const uint8_t* signature, uint32_t signature_len,
@@ -1547,5 +2285,31 @@ int USER_CODE user_tls_crypto_selftest_rsa_pss(char* detail, uint32_t detail_len
     }
 
     user_tls_copy_detail(detail, detail_len, user_tls_selftest_rsapss_ok);
+    return 0;
+}
+
+int USER_CODE user_tls_crypto_selftest_ecdsa_p256(char* detail, uint32_t detail_len) {
+    uint8_t tampered_sig[sizeof(user_tls_ecdsa_p256_signature)];
+
+    if (!detail || detail_len == 0U) return -1;
+    detail[0] = '\0';
+
+    if (user_tls_ecdsa_p256_sha256_verify(user_tls_ecdsa_p256_public_x, user_tls_ecdsa_p256_public_y,
+                                          user_tls_ecdsa_p256_signature, sizeof(user_tls_ecdsa_p256_signature),
+                                          user_tls_ecdsa_p256_message, sizeof(user_tls_ecdsa_p256_message)) != 0) {
+        user_tls_copy_detail(detail, detail_len, user_tls_selftest_ecdsa_p256_verify_fail);
+        return -1;
+    }
+
+    memcpy(tampered_sig, user_tls_ecdsa_p256_signature, sizeof(tampered_sig));
+    tampered_sig[sizeof(tampered_sig) - 1U] ^= 0x01U;
+    if (user_tls_ecdsa_p256_sha256_verify(user_tls_ecdsa_p256_public_x, user_tls_ecdsa_p256_public_y,
+                                          tampered_sig, sizeof(tampered_sig),
+                                          user_tls_ecdsa_p256_message, sizeof(user_tls_ecdsa_p256_message)) == 0) {
+        user_tls_copy_detail(detail, detail_len, user_tls_selftest_ecdsa_p256_reject_fail);
+        return -1;
+    }
+
+    user_tls_copy_detail(detail, detail_len, user_tls_selftest_ecdsa_p256_ok);
     return 0;
 }

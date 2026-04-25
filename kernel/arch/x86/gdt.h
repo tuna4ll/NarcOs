@@ -54,13 +54,6 @@ typedef struct {
 } __attribute__((packed)) tss_entry_t;
 
 typedef struct {
-    uint32_t gs, fs, es, ds;
-    uint32_t edi, esi, ebp, esp_unused, ebx, edx, ecx, eax;
-    uint32_t error_code;
-    uint32_t eip, cs, eflags, user_esp, user_ss;
-} trap_frame_t;
-
-typedef struct {
     uint16_t isr_low;
     uint16_t kernel_cs;
     uint8_t  reserved;
@@ -75,6 +68,5 @@ typedef struct {
 
 void init_gdt();
 void set_tss_stack(uint32_t stack);
-void vga_print_int_hex(uint32_t n, char* buf);
 
 #endif

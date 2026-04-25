@@ -3,7 +3,6 @@
 #include "ata.h"
 #include "fs.h"
 #include "serial.h"
-#include "gdt.h"
 #include "string.h"
 
 extern void vga_print(const char* str);
@@ -88,6 +87,14 @@ static int storage_bytes_equal(const uint8_t* a, const uint8_t* b, uint32_t len)
         if (a[i] != b[i]) return 0;
     }
     return 1;
+}
+
+static uint32_t storage_effective_volume_base(void) {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    return 0U;
+#else
+    return storage_volume_base;
+#endif
 }
 
 static void storage_print_hex16(uint16_t value) {
@@ -332,7 +339,7 @@ static void storage_log_backend_selection(void) {
     serial_write("[storage] backend=");
     serial_write(storage_backend == STORAGE_BACKEND_AHCI ? "ahci" : "ata-pio");
     serial_write(" volume_base=");
-    serial_write_hex32(storage_volume_base);
+    serial_write_hex32(storage_effective_volume_base());
     serial_write(" scheme=");
     serial_write(storage_partition_scheme_name(storage_active_scheme));
     serial_write_char('\n');
@@ -351,7 +358,7 @@ storage_backend_t storage_get_backend(void) {
 }
 
 uint32_t storage_volume_base_lba(void) {
-    return storage_volume_base;
+    return storage_effective_volume_base();
 }
 
 storage_partition_scheme_t storage_volume_scheme(void) {
@@ -370,6 +377,18 @@ int storage_get_partition_info(int index, storage_partition_info_t* out_info) {
 
 void storage_init(void) {
     serial_write_line("[storage] init");
+
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    /* The current x86_64 boot path always uses the raw disk image layout.
+       Skip partition probing until the long-mode storage path is stabilized. */
+    storage_backend = STORAGE_BACKEND_ATA_PIO;
+    storage_clear_partitions();
+    storage_active_scheme = STORAGE_PARTITION_SCHEME_NONE;
+    storage_volume_base = 0;
+    serial_write_line("[storage] x86_64 raw ATA mode");
+    storage_log_backend_selection();
+    return;
+#endif
 
     storage_backend = STORAGE_BACKEND_ATA_PIO;
     (void)storage_select_volume_for_backend(STORAGE_BACKEND_ATA_PIO);
@@ -391,12 +410,12 @@ void storage_init(void) {
 
 int storage_read_sector(uint32_t lba, uint8_t* buffer) {
     if (!buffer) return -1;
-    return storage_backend_read_sector(storage_backend, storage_volume_base + lba, buffer);
+    return storage_backend_read_sector(storage_backend, storage_effective_volume_base() + lba, buffer);
 }
 
 int storage_write_sector(uint32_t lba, const uint8_t* buffer) {
     if (!buffer) return -1;
-    return storage_backend_write_sector(storage_backend, storage_volume_base + lba, buffer);
+    return storage_backend_write_sector(storage_backend, storage_effective_volume_base() + lba, buffer);
 }
 
 void storage_print_status(void) {
@@ -405,10 +424,10 @@ void storage_print_status(void) {
     vga_print("Active Storage : ");
     vga_println(storage_backend_name());
     vga_print("  Volume Base  : ");
-    vga_print_int((int)storage_volume_base);
+    vga_print_int((int)storage_effective_volume_base());
     vga_print(" (");
     vga_print(storage_partition_scheme_name(storage_active_scheme));
-    vga_println(storage_volume_base != 0U ? " partition)" : " disk)");
+    vga_println(storage_effective_volume_base() != 0U ? " partition)" : " disk)");
     vga_print("  Partitions   : ");
     vga_print_int(storage_partition_total);
     vga_println("");

@@ -65,6 +65,9 @@ int user_tls_rsa_pss_sha256_verify(const uint8_t* modulus, uint32_t modulus_len,
                                    uint32_t exponent,
                                    const uint8_t* signature, uint32_t signature_len,
                                    const void* message, uint32_t message_len);
+int user_tls_ecdsa_p256_sha256_verify(const uint8_t public_x[32], const uint8_t public_y[32],
+                                      const uint8_t* signature_der, uint32_t signature_len,
+                                      const void* message, uint32_t message_len);
 
 void user_tls_transcript_init(user_tls_transcript_hash_t* ctx);
 void user_tls_transcript_update(user_tls_transcript_hash_t* ctx, const void* data, uint32_t len);
@@ -75,5 +78,6 @@ int user_tls_crypto_selftest_hash_kdf(char* detail, uint32_t detail_len);
 int user_tls_crypto_selftest_aes_gcm(char* detail, uint32_t detail_len);
 int user_tls_crypto_selftest_x25519(char* detail, uint32_t detail_len);
 int user_tls_crypto_selftest_rsa_pss(char* detail, uint32_t detail_len);
+int user_tls_crypto_selftest_ecdsa_p256(char* detail, uint32_t detail_len);
 
 #endif

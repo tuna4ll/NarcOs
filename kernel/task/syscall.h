@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "gdt.h"
+#include "arch.h"
 #include "process_api.h"
 
 #define PRIV_CMD_SNAKE 1
@@ -92,8 +92,7 @@ typedef struct {
 #define SYS_PIPE 56
 #define SYS_PROCESS_SNAPSHOT 57
 
-void init_syscalls();
-void syscall_handler(trap_frame_t* frame);
+void syscall_handler(arch_trap_frame_t* frame);
 int copy_from_user(void* dst, const void* user_src, uint32_t len);
 int copy_to_user(void* user_dst, const void* src, uint32_t len);
 int copy_string_from_user(char* dst, const char* user_src, size_t dst_size);

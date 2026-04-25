@@ -1,50 +1,38 @@
 # NarcOs
 
-A small 32-bit x86 hobby operating system built from scratch.
+NarcOs is a hobby operating system for `x86` and `x86_64`.
+It boots from BIOS, has its own bootloader, scheduler, filesystem, GUI, and basic network stack.
 
-NarcOs boots through a BIOS stage1/stage2 loader, switches into protected mode, brings up paging, and runs a compact desktop-style environment with its own storage, process, graphics, and networking layers.
-
-![NarcOs desktop](https://cdn.discordapp.com/attachments/1038164986217893920/1487600519177310470/image.png?ex=69c9bb72&is=69c869f2&hm=fe4ab70f7f492ddf4d9f296d434b9104b60a1adfefec4e356149bcbd6bac8615&)
-
-## Highlights
-
-- BIOS MBR bootloader with stage2 loader
-- 32-bit protected mode kernel with GDT, IDT, paging, syscalls, and timer-driven scheduling
-- VBE graphics path with a desktop shell, windows, terminal, explorer, editor, and snake
-- ATA PIO and AHCI storage support with a custom filesystem
-- RTL8139 networking with ARP, IPv4, UDP, ICMP, DHCP, DNS, basic TCP, HTTP, and NTP
-- VGA text fallback when framebuffer init is unavailable
-
-## Build
-
-Requirements:
+## Requirements
 
 - `gcc` with 32-bit output support
 - `ld`
 - `nasm`
+- `objcopy`
 - `qemu-system-i386`
+- `qemu-system-x86_64`
 
-Build the image:
+## Build
+
+Default i386 build with exported compatibility artifacts:
 
 ```bash
 make all
 ```
 
-Build only the packaged user executables:
+Architecture-specific builds:
+
+```bash
+make all-i386
+make all-x86_64
+```
+
+Only build packaged user programs:
 
 ```bash
 make user-programs
+make user-programs-x86_64
 ```
-
-This produces:
-
-- `kernel.bin`
-- `boot/boot.bin`
-- `boot/stage2.bin`
-- `minios.img`
-- `obj/user/bin/{hello,ps,cat,echo,kill}`
-
-The user executables are embedded into the kernel image at build time and synced into `/bin` when the NarcOs filesystem initializes.
 
 Clean generated files:
 
@@ -54,20 +42,31 @@ make clean
 
 ## Run
 
-Basic QEMU boot:
-
 ```bash
-qemu-system-i386 -m 128M -drive format=raw,file=minios.img
+make run-i386
+make run-net-i386
+make run-x86_64
+make run-x86_64-gui
+make run-x86_64-net
 ```
 
-Network-enabled QEMU boot:
+`make run-net` is an alias for `make run-x86_64-net`.
 
-```bash
-make run-net
-```
+## Output
 
-## Status
+Main build artifacts are written under:
 
-NarcOs is experimental and actively changing. BIOS boot, GUI, custom storage, and basic networking are working in QEMU. Real hardware coverage, UEFI boot, and broader driver support are still in progress.
+- `obj/i386/`
+- `obj/x86_64/`
 
-For the current target list and remaining work, see `roadmap.txt`.
+The default `make all` target also exports:
+
+- `kernel.bin`
+- `boot/boot.bin`
+- `boot/stage2.bin`
+- `minios.img`
+
+## Userspace
+
+- `i386` kernel builds and runs `ELF32` userspace
+- `x86_64` kernel builds and runs `ELF64` userspace

@@ -50,8 +50,17 @@ const char scancode_map_shift[128] = {
 };
 
 static uint32_t irq_save(void) {
-    uint32_t flags;
+    uintptr_t flags;
 
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    asm volatile(
+        "pushfq\n\t"
+        "popq %0\n\t"
+        "cli"
+        : "=r"(flags)
+        :
+        : "cc", "memory");
+#else
     asm volatile(
         "pushfl\n\t"
         "popl %0\n\t"
@@ -59,16 +68,28 @@ static uint32_t irq_save(void) {
         : "=r"(flags)
         :
         : "cc", "memory");
-    return flags;
+#endif
+    return (uint32_t)flags;
 }
 
 static void irq_restore(uint32_t flags) {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    uintptr_t wide_flags = (uintptr_t)flags;
+
+    asm volatile(
+        "pushq %0\n\t"
+        "popfq"
+        :
+        : "r"(wide_flags)
+        : "cc", "memory");
+#else
     asm volatile(
         "pushl %0\n\t"
         "popfl"
         :
         : "r"(flags)
         : "cc", "memory");
+#endif
 }
 
 static void console_input_enqueue_char(char c) {

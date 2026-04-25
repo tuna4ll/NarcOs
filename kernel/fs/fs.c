@@ -2,6 +2,7 @@
 #include "string.h"
 #include "storage.h"
 #include "memory_alloc.h"
+#include "serial.h"
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
@@ -16,16 +17,37 @@ disk_fs_node_t dir_cache[MAX_FILES];
 uint8_t sector_buffer[512];
 int current_dir_index = -1;
 
-extern const uint8_t _binary_obj_user_bin_hello_start[];
-extern const uint8_t _binary_obj_user_bin_hello_end[];
-extern const uint8_t _binary_obj_user_bin_ps_start[];
-extern const uint8_t _binary_obj_user_bin_ps_end[];
-extern const uint8_t _binary_obj_user_bin_cat_start[];
-extern const uint8_t _binary_obj_user_bin_cat_end[];
-extern const uint8_t _binary_obj_user_bin_echo_start[];
-extern const uint8_t _binary_obj_user_bin_echo_end[];
-extern const uint8_t _binary_obj_user_bin_kill_start[];
-extern const uint8_t _binary_obj_user_bin_kill_end[];
+#if UINTPTR_MAX > 0xFFFFFFFFU
+extern const uint8_t _binary_obj_x86_64_user_bin_hello_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_hello_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_ps_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_ps_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_cat_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_cat_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_echo_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_echo_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_kill_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_kill_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_proc_test_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_proc_test_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_pipe_test_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_pipe_test_end[];
+#else
+extern const uint8_t _binary_obj_i386_user_bin_hello_start[];
+extern const uint8_t _binary_obj_i386_user_bin_hello_end[];
+extern const uint8_t _binary_obj_i386_user_bin_ps_start[];
+extern const uint8_t _binary_obj_i386_user_bin_ps_end[];
+extern const uint8_t _binary_obj_i386_user_bin_cat_start[];
+extern const uint8_t _binary_obj_i386_user_bin_cat_end[];
+extern const uint8_t _binary_obj_i386_user_bin_echo_start[];
+extern const uint8_t _binary_obj_i386_user_bin_echo_end[];
+extern const uint8_t _binary_obj_i386_user_bin_kill_start[];
+extern const uint8_t _binary_obj_i386_user_bin_kill_end[];
+extern const uint8_t _binary_obj_i386_user_bin_proc_test_start[];
+extern const uint8_t _binary_obj_i386_user_bin_proc_test_end[];
+extern const uint8_t _binary_obj_i386_user_bin_pipe_test_start[];
+extern const uint8_t _binary_obj_i386_user_bin_pipe_test_end[];
+#endif
 
 typedef struct {
     const char* path;
@@ -34,11 +56,23 @@ typedef struct {
 } fs_packaged_binary_t;
 
 static const fs_packaged_binary_t fs_packaged_binaries[] = {
-    { "/bin/hello", _binary_obj_user_bin_hello_start, _binary_obj_user_bin_hello_end },
-    { "/bin/ps", _binary_obj_user_bin_ps_start, _binary_obj_user_bin_ps_end },
-    { "/bin/cat", _binary_obj_user_bin_cat_start, _binary_obj_user_bin_cat_end },
-    { "/bin/echo", _binary_obj_user_bin_echo_start, _binary_obj_user_bin_echo_end },
-    { "/bin/kill", _binary_obj_user_bin_kill_start, _binary_obj_user_bin_kill_end }
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    { "/bin/hello", _binary_obj_x86_64_user_bin_hello_start, _binary_obj_x86_64_user_bin_hello_end },
+    { "/bin/ps", _binary_obj_x86_64_user_bin_ps_start, _binary_obj_x86_64_user_bin_ps_end },
+    { "/bin/cat", _binary_obj_x86_64_user_bin_cat_start, _binary_obj_x86_64_user_bin_cat_end },
+    { "/bin/echo", _binary_obj_x86_64_user_bin_echo_start, _binary_obj_x86_64_user_bin_echo_end },
+    { "/bin/kill", _binary_obj_x86_64_user_bin_kill_start, _binary_obj_x86_64_user_bin_kill_end },
+    { "/bin/proc_test", _binary_obj_x86_64_user_bin_proc_test_start, _binary_obj_x86_64_user_bin_proc_test_end },
+    { "/bin/pipe_test", _binary_obj_x86_64_user_bin_pipe_test_start, _binary_obj_x86_64_user_bin_pipe_test_end }
+#else
+    { "/bin/hello", _binary_obj_i386_user_bin_hello_start, _binary_obj_i386_user_bin_hello_end },
+    { "/bin/ps", _binary_obj_i386_user_bin_ps_start, _binary_obj_i386_user_bin_ps_end },
+    { "/bin/cat", _binary_obj_i386_user_bin_cat_start, _binary_obj_i386_user_bin_cat_end },
+    { "/bin/echo", _binary_obj_i386_user_bin_echo_start, _binary_obj_i386_user_bin_echo_end },
+    { "/bin/kill", _binary_obj_i386_user_bin_kill_start, _binary_obj_i386_user_bin_kill_end },
+    { "/bin/proc_test", _binary_obj_i386_user_bin_proc_test_start, _binary_obj_i386_user_bin_proc_test_end },
+    { "/bin/pipe_test", _binary_obj_i386_user_bin_pipe_test_start, _binary_obj_i386_user_bin_pipe_test_end }
+#endif
 };
 
 static uint32_t node_sector_count(const disk_fs_node_t* node) {
@@ -80,10 +114,20 @@ static void fs_sync_packaged_binaries() {
     for (size_t i = 0; i < count; i++) {
         const fs_packaged_binary_t* entry = &fs_packaged_binaries[i];
         size_t len = (size_t)(entry->end - entry->start);
+        int status;
 
         if (len == 0U) continue;
         if (fs_blob_matches_file(entry->path, entry->start, len)) continue;
-        (void)fs_write_file_raw(entry->path, entry->start, len);
+        status = fs_write_file_raw(entry->path, entry->start, len);
+        if (status < 0) {
+            serial_write("[fs] packaged sync failed path=");
+            serial_write(entry->path);
+            serial_write(" len=");
+            serial_write_hex32((uint32_t)len);
+            serial_write(" status=");
+            serial_write_hex32((uint32_t)status);
+            serial_write_char('\n');
+        }
     }
 }
 
@@ -254,6 +298,21 @@ static void load_dir_cache() {
     }
 }
 void init_fs() {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    memset(dir_cache, 0, sizeof(dir_cache));
+    current_dir_index = FS_ROOT_INDEX;
+    fs_format();
+    serial_write("[fs] post-format /bin=");
+    serial_write_hex32((uint32_t)fs_find_node("/bin"));
+    serial_write(" /home=");
+    serial_write_hex32((uint32_t)fs_find_node("/home"));
+    serial_write(" /home/user/Desktop=");
+    serial_write_hex32((uint32_t)fs_find_node("/home/user/Desktop"));
+    serial_write_char('\n');
+    fs_sync_packaged_binaries();
+    return;
+#endif
+
     load_dir_cache();
     current_dir_index = FS_ROOT_INDEX;
     if (!fs_validate()) fs_format();
@@ -261,9 +320,28 @@ void init_fs() {
 }
 int fs_create_file(const char* name) {
     char leaf[32];
+    leaf[0] = '\0';
     int parent = fs_walk_path(name, 1, leaf);
-    if (parent == FS_INVALID_INDEX || leaf[0] == '\0' || !fs_is_valid_name(leaf)) return -1;
-    if (fs_find_child(parent, leaf, 0) != -1) return -1;
+    if (parent == FS_INVALID_INDEX || leaf[0] == '\0' || !fs_is_valid_name(leaf)) {
+        serial_write("[fs] create_file invalid path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" parent=");
+        serial_write_hex32((uint32_t)parent);
+        serial_write(" leaf=");
+        serial_write(leaf);
+        serial_write_char('\n');
+        return -1;
+    }
+    if (fs_find_child(parent, leaf, 0) != -1) {
+        serial_write("[fs] create_file exists path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" parent=");
+        serial_write_hex32((uint32_t)parent);
+        serial_write(" leaf=");
+        serial_write(leaf);
+        serial_write_char('\n');
+        return -1;
+    }
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags == 0) {
             strncpy(dir_cache[i].name, leaf, 31);
@@ -277,13 +355,35 @@ int fs_create_file(const char* name) {
             return 0;
         }
     }
+    serial_write("[fs] create_file full path=");
+    serial_write(name ? name : "<null>");
+    serial_write_char('\n');
     return -1;
 }
 int fs_create_dir(const char* name) {
     char leaf[32];
+    leaf[0] = '\0';
     int parent = fs_walk_path(name, 1, leaf);
-    if (parent == FS_INVALID_INDEX || leaf[0] == '\0' || !fs_is_valid_name(leaf)) return -1;
-    if (fs_find_child(parent, leaf, 0) != -1) return -1;
+    if (parent == FS_INVALID_INDEX || leaf[0] == '\0' || !fs_is_valid_name(leaf)) {
+        serial_write("[fs] create_dir invalid path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" parent=");
+        serial_write_hex32((uint32_t)parent);
+        serial_write(" leaf=");
+        serial_write(leaf);
+        serial_write_char('\n');
+        return -1;
+    }
+    if (fs_find_child(parent, leaf, 0) != -1) {
+        serial_write("[fs] create_dir exists path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" parent=");
+        serial_write_hex32((uint32_t)parent);
+        serial_write(" leaf=");
+        serial_write(leaf);
+        serial_write_char('\n');
+        return -1;
+    }
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags == 0) {
             strncpy(dir_cache[i].name, leaf, 31);
@@ -297,6 +397,9 @@ int fs_create_dir(const char* name) {
             return 0;
         }
     }
+    serial_write("[fs] create_dir full path=");
+    serial_write(name ? name : "<null>");
+    serial_write_char('\n');
     return -1;
 }
 int fs_change_dir(const char* name) {
@@ -445,13 +548,38 @@ int fs_read_file_by_idx(int idx, char* buffer, size_t max_len) {
 }
 int fs_write_file_raw(const char* name, const void* data, size_t len) {
     int idx = fs_find_node(name);
+    int status;
 
     if (idx == -1) {
-        if (fs_create_file(name) == -1) return -1;
+        if (fs_create_file(name) == -1) {
+            serial_write("[fs] write_raw create failed path=");
+            serial_write(name ? name : "<null>");
+            serial_write_char('\n');
+            return -1;
+        }
         idx = fs_find_node(name);
     }
-    if (idx == -1 || dir_cache[idx].flags != FS_NODE_FILE) return -1;
-    return fs_write_file_raw_by_idx(idx, data, len);
+    if (idx == -1 || dir_cache[idx].flags != FS_NODE_FILE) {
+        serial_write("[fs] write_raw lookup failed path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" idx=");
+        serial_write_hex32((uint32_t)idx);
+        serial_write(" flags=");
+        serial_write_hex32((uint32_t)(idx >= 0 ? dir_cache[idx].flags : 0));
+        serial_write_char('\n');
+        return -1;
+    }
+    status = fs_write_file_raw_by_idx(idx, data, len);
+    if (status < 0) {
+        serial_write("[fs] write_raw body failed path=");
+        serial_write(name ? name : "<null>");
+        serial_write(" idx=");
+        serial_write_hex32((uint32_t)idx);
+        serial_write(" len=");
+        serial_write_hex32((uint32_t)len);
+        serial_write_char('\n');
+    }
+    return status;
 }
 int fs_write_file_raw_at(const char* name, const void* data, size_t offset, size_t len) {
     int idx = fs_find_node(name);

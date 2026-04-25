@@ -4,6 +4,7 @@
 #include "rtc.h"
 #include "editor.h"
 #include "memory_alloc.h"
+#include "arch.h"
 #include "paging.h"
 #include "process.h"
 #include "fd.h"
@@ -12,7 +13,6 @@
 #include "storage.h"
 #include "vbe.h"
 #include "mouse.h"
-#include "gdt.h"
 #include "serial.h"
 #include "syscall.h"
 #include "usermode.h"
@@ -33,18 +33,26 @@ extern disk_fs_node_t dir_cache[MAX_FILES];
 
 extern void print_memory_info();
 
+#if UINTPTR_MAX > 0xFFFFFFFFU
+extern void x64_expect_fault(uint64_t vector, uint64_t resume_rip, uint64_t fault_addr, int test_kind);
+extern int x64_last_fault_test_passed(void);
+extern void x64_test_page_fault(void);
+extern void x64_test_page_fault_resume(void);
+#endif
+
 void vga_print_int_hex(uint32_t n, char* buf);
 
 // Global variables for usermode jump
 volatile uint32_t usermode_jump_eip;
 volatile uint32_t usermode_jump_esp;
 
-idt_entry_t idt[256];
-idtr_t idtr;
-
 volatile uint32_t timer_ticks = 0;
 static volatile int kernel_graphics_ready = 0;
 static volatile int kernel_waitpid_test_release = 0;
+
+#define SMOKE_CAPTURE_TMP_STDIN  11
+#define SMOKE_CAPTURE_TMP_STDOUT 12
+#define SMOKE_CAPTURE_TMP_STDERR 13
 
 typedef struct {
     volatile int writer_status;
@@ -365,64 +373,6 @@ static int explorer_move_selected_to(int target_dir) {
     return 0;
 }
 
-extern void isr_default();
-extern void irq0_timer();
-extern void irq1_keyboard();
-extern void irq12_mouse();
-extern void isr_invalid_opcode();
-extern void isr_stack_fault();
-extern void isr_page_fault();
-
-void set_idt_gate(int n, uint32_t handler, uint8_t attributes) {
-    idt[n].isr_low = (uint16_t)(handler & 0xFFFF);
-    idt[n].kernel_cs = 0x08;
-    idt[n].reserved = 0;
-    idt[n].attributes = attributes;
-    idt[n].isr_high = (uint16_t)((handler >> 16) & 0xFFFF);
-}
-
-void init_pic() {
-    outb(0x20, 0x11);
-    outb(0xA0, 0x11);
-    outb(0x21, 0x20);
-    outb(0xA1, 0x28);
-    outb(0x21, 0x04);
-    outb(0xA1, 0x02);
-    outb(0x21, 0x01);
-    outb(0xA1, 0x01);
-    outb(0x21, 0xF8);
-    outb(0xA1, 0xEF);
-}
-
-void init_pit() {
-    uint32_t freq = 100; 
-    uint32_t divisor = 1193180 / freq;
-    outb(0x43, 0x36); 
-    outb(0x40, (uint8_t)(divisor & 0xFF));
-    outb(0x40, (uint8_t)((divisor >> 8) & 0xFF));
-}
-
-extern void isr_gpf();
-extern void isr_double_fault();
-
-void load_idt() {
-    idtr.base = (uint32_t)&idt;
-    idtr.limit = 256 * sizeof(idt_entry_t) - 1;
-    for (int i = 0; i < 256; i++) {
-        set_idt_gate(i, (uint32_t)isr_default, 0x8E);
-    }
-    set_idt_gate(6, (uint32_t)isr_invalid_opcode, 0x8E);
-    set_idt_gate(8, (uint32_t)isr_double_fault, 0x8E);
-    set_idt_gate(12, (uint32_t)isr_stack_fault, 0x8E);
-    set_idt_gate(13, (uint32_t)isr_gpf, 0x8E);
-    set_idt_gate(14, (uint32_t)isr_page_fault, 0x8E);
-    set_idt_gate(32, (uint32_t)irq0_timer, 0x8E);
-    set_idt_gate(33, (uint32_t)irq1_keyboard, 0x8E);
-    set_idt_gate(44, (uint32_t)irq12_mouse, 0x8E);
-    asm volatile("lidt %0" : : "m"(idtr));
-    asm volatile("sti");
-}
-
 void handle_timer() {
     timer_ticks++;
     process_on_timer_tick();
@@ -448,18 +398,30 @@ void vga_print_int_hex(uint32_t n, char* buf) {
     buf[10] = '\0';
 }
 
-static uint32_t read_cr2() {
-    uint32_t value;
-    asm volatile("mov %%cr2, %0" : "=r"(value));
-    return value;
-}
-
+#if UINTPTR_MAX <= 0xFFFFFFFFU
 static void panic_serial_hex(const char* label, uint32_t value) {
     serial_write("[panic] ");
     serial_write(label);
     serial_write("=");
     serial_write_hex32(value);
     serial_write_char('\n');
+}
+#endif
+
+static void panic_serial_hex_u64(const char* label, uint64_t value) {
+    serial_write("[panic] ");
+    serial_write(label);
+    serial_write("=");
+    serial_write_hex64(value);
+    serial_write_char('\n');
+}
+
+static void panic_serial_hex_uintptr(const char* label, uintptr_t value) {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    panic_serial_hex_u64(label, (uint64_t)value);
+#else
+    panic_serial_hex(label, (uint32_t)value);
+#endif
 }
 
 static void panic_log_current_process() {
@@ -537,16 +499,16 @@ static void boot_text_write_hex_line(int row, const char* label, uint32_t value,
     boot_text_write_line(row, line, color);
 }
 
-static void panic_text_exception(const char* title, const char* aux_label, uint32_t aux_value, trap_frame_t* frame) {
+static void panic_text_exception(const char* title, const char* aux_label, uintptr_t aux_value, arch_trap_frame_t* frame) {
     boot_text_clear(0x1F);
     if (title) boot_text_write_line(0, title, 0x4F);
-    if (aux_label) boot_text_write_hex_line(2, aux_label, aux_value, 0x1F);
+    if (aux_label) boot_text_write_hex_line(2, aux_label, (uint32_t)aux_value, 0x1F);
     if (frame) {
-        boot_text_write_hex_line(4, "Error: ", frame->error_code, 0x1F);
-        boot_text_write_hex_line(5, "EIP:   ", frame->eip, 0x1F);
-        boot_text_write_hex_line(6, "CS:    ", frame->cs, 0x1F);
-        boot_text_write_hex_line(7, "ESP:   ", frame->user_esp, 0x1F);
-        boot_text_write_hex_line(8, "SS:    ", frame->user_ss, 0x1F);
+        boot_text_write_hex_line(4, "Error: ", (uint32_t)frame->error_code, 0x1F);
+        boot_text_write_hex_line(5, "IP:    ", (uint32_t)arch_frame_user_ip(frame), 0x1F);
+        boot_text_write_hex_line(6, "CS:    ", (uint32_t)frame->cs, 0x1F);
+        boot_text_write_hex_line(7, "SP:    ", (uint32_t)arch_frame_user_sp(frame), 0x1F);
+        boot_text_write_hex_line(8, "SS:    ", (uint32_t)frame->user_ss, 0x1F);
     }
     boot_text_write_line(10, "See serial log for more details.", 0x1E);
 }
@@ -594,7 +556,7 @@ static void paging_probe_kernel_vm() {
                    "Could not allocate a physical page for paging API validation.");
     }
 
-    mapped = (uint32_t*)paging_map_physical((uint32_t)phys_page, 4096U, PAGING_FLAG_WRITE);
+    mapped = (uint32_t*)paging_map_physical((uintptr_t)phys_page, 4096U, PAGING_FLAG_WRITE);
     if (!mapped) {
         free_physical_page(phys_page);
         boot_fatal("Kernel VM probe failed.",
@@ -621,18 +583,18 @@ static void paging_probe_kernel_vm() {
 }
 
 static void panic_simple_exception(const char* tag, const char* title, uint32_t bg_color,
-                                   const char* aux_label, uint32_t aux_value, trap_frame_t* frame) {
+                                   const char* aux_label, uintptr_t aux_value, arch_trap_frame_t* frame) {
     char buf[64];
 
     serial_write_line("");
     serial_write("[panic] ");
     serial_write_line(tag);
-    if (aux_label) panic_serial_hex(aux_label, aux_value);
-    panic_serial_hex("error", frame->error_code);
-    panic_serial_hex("eip", frame->eip);
-    panic_serial_hex("cs", frame->cs);
-    panic_serial_hex("user_esp", frame->user_esp);
-    panic_serial_hex("user_ss", frame->user_ss);
+    if (aux_label) panic_serial_hex_uintptr(aux_label, aux_value);
+    panic_serial_hex_u64("error", (uint64_t)frame->error_code);
+    panic_serial_hex_uintptr("ip", arch_frame_user_ip(frame));
+    panic_serial_hex_u64("cs", (uint64_t)frame->cs);
+    panic_serial_hex_uintptr("sp", arch_frame_user_sp(frame));
+    panic_serial_hex_u64("ss", (uint64_t)frame->user_ss);
     panic_log_current_process();
 
     if (!kernel_graphics_ready) {
@@ -642,20 +604,20 @@ static void panic_simple_exception(const char* tag, const char* title, uint32_t 
         vbe_draw_string(20, 20, title, 0xFFFFFF);
         if (aux_label) {
             vbe_draw_string(20, 50, aux_label, 0xFFFFFF);
-            vga_print_int_hex(aux_value, buf);
+            vga_print_int_hex((uint32_t)aux_value, buf);
             vbe_draw_string(130, 50, buf, 0xFFD27F);
         }
         vbe_draw_string(20, 68, "Error:", 0xFFFFFF);
-        vga_print_int_hex(frame->error_code, buf);
+        vga_print_int_hex((uint32_t)frame->error_code, buf);
         vbe_draw_string(130, 68, buf, 0xFFD27F);
-        vbe_draw_string(20, 86, "EIP:", 0xFFFFFF);
-        vga_print_int_hex(frame->eip, buf);
+        vbe_draw_string(20, 86, "IP:", 0xFFFFFF);
+        vga_print_int_hex((uint32_t)arch_frame_user_ip(frame), buf);
         vbe_draw_string(130, 86, buf, 0xFFD27F);
         vbe_draw_string(20, 104, "CS:", 0xFFFFFF);
-        vga_print_int_hex(frame->cs, buf);
+        vga_print_int_hex((uint32_t)frame->cs, buf);
         vbe_draw_string(130, 104, buf, 0xFFD27F);
-        vbe_draw_string(20, 122, "USER ESP:", 0xFFFFFF);
-        vga_print_int_hex(frame->user_esp, buf);
+        vbe_draw_string(20, 122, "SP:", 0xFFFFFF);
+        vga_print_int_hex((uint32_t)arch_frame_user_sp(frame), buf);
         vbe_draw_string(130, 122, buf, 0xFFD27F);
         vbe_update();
     }
@@ -896,14 +858,14 @@ static void print_hardware_info() {
     vga_println(buf);
 }
 
-void gpf_handler(trap_frame_t* frame) {
+void gpf_handler(arch_trap_frame_t* frame) {
     serial_write_line("");
     serial_write_line("[panic] general protection fault");
-    panic_serial_hex("error", frame->error_code);
-    panic_serial_hex("eip", frame->eip);
-    panic_serial_hex("cs", frame->cs);
-    panic_serial_hex("user_esp", frame->user_esp);
-    panic_serial_hex("user_ss", frame->user_ss);
+    panic_serial_hex_u64("error", (uint64_t)frame->error_code);
+    panic_serial_hex_uintptr("ip", arch_frame_user_ip(frame));
+    panic_serial_hex_u64("cs", (uint64_t)frame->cs);
+    panic_serial_hex_uintptr("sp", arch_frame_user_sp(frame));
+    panic_serial_hex_u64("ss", (uint64_t)frame->user_ss);
     panic_log_current_process();
     process_debug_dump("gpf");
 
@@ -916,6 +878,15 @@ void gpf_handler(trap_frame_t* frame) {
     vbe_draw_string(20, 20, "!!! NARC-OS GPF (RING 3 CRASH) !!!", 0xFFFFFF);
     
     char buf[64];
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    vbe_draw_string(20, 50, "IP:", 0xFFFFFF);
+    vga_print_int_hex((uint32_t)arch_frame_user_ip(frame), buf);
+    vbe_draw_string(100, 50, buf, 0xFFFF00);
+    vbe_draw_string(20, 68, "SP:", 0xFFFFFF);
+    vga_print_int_hex((uint32_t)arch_frame_user_sp(frame), buf);
+    vbe_draw_string(100, 68, buf, 0xFFFF00);
+    vbe_draw_string(20, 86, "See serial log for full 64-bit trap state.", 0xFFFFFF);
+#else
     // GS, FS, ES, DS, EDI, ESI, EBP, ESP?, EBX, EDX, ECX, EAX
     const char* reg_names[] = {"GS", "FS", "ES", "DS", "EDI", "ESI", "EBP", "ESP_U", "EBX", "EDX", "ECX", "EAX"};
     uint32_t* raw = (uint32_t*)frame;
@@ -945,24 +916,25 @@ void gpf_handler(trap_frame_t* frame) {
     vbe_draw_string(250, 110, "HW-SS:", 0xFFFFFF);
     vga_print_int_hex(frame->user_ss, buf);
     vbe_draw_string(350, 110, buf, 0xFFFF00);
+#endif
 
     vbe_update();
     panic_halt();
 }
 
-void page_fault_handler(trap_frame_t* frame) {
+void page_fault_handler(arch_trap_frame_t* frame) {
     panic_log_current_process();
     process_debug_dump("page-fault");
     panic_simple_exception("page fault", "!!! NARC-OS PAGE FAULT !!!", 0x1A0000,
-                           "Fault Addr:", read_cr2(), frame);
+                           "Fault Addr:", arch_read_fault_address(), frame);
 }
 
-void invalid_opcode_handler(trap_frame_t* frame) {
+void invalid_opcode_handler(arch_trap_frame_t* frame) {
     panic_simple_exception("invalid opcode", "!!! NARC-OS INVALID OPCODE !!!", 0x341400,
                            0, 0, frame);
 }
 
-void stack_fault_handler(trap_frame_t* frame) {
+void stack_fault_handler(arch_trap_frame_t* frame) {
     panic_simple_exception("stack fault", "!!! NARC-OS STACK FAULT !!!", 0x301400,
                            0, 0, frame);
 }
@@ -995,6 +967,10 @@ void vbe_compose_scene_basic() {
 }
 
 static int run_usermode_test_command(void) {
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    vga_println("usermode_test is only available on the legacy i386 path.");
+    return -1;
+#else
     extern void jump_to_usermode_v9(uint32_t eip, uint32_t esp, uint32_t lfb);
     extern void usermode_entry_gate();
     uint32_t user_esp = 0x90000;
@@ -1017,9 +993,10 @@ static int run_usermode_test_command(void) {
     vga_println("Verification: If the heartbeat pixel is rotating and the");
     vga_println("mouse is responsive, the transition was successful!");
 
-    set_tss_stack(KERNEL_BOOT_STACK_TOP);
+    arch_set_kernel_stack(KERNEL_BOOT_STACK_TOP);
     jump_to_usermode_v9(target_eip, user_esp, lfb_addr);
     return 0;
+#endif
 }
 
 static int kernel_snapshot_contains_pid(int pid) {
@@ -1183,6 +1160,301 @@ fail:
     if (reader_pid > 0) (void)process_waitpid_sync_current(reader_pid, 0U, 0);
     vga_println("pipe_test: failed.");
     return -1;
+}
+
+static int smoke_text_contains(const char* text, const char* needle) {
+    size_t text_len;
+    size_t needle_len;
+
+    if (!text || !needle) return 0;
+    needle_len = strlen(needle);
+    if (needle_len == 0U) return 1;
+    text_len = strlen(text);
+    if (needle_len > text_len) return 0;
+    for (size_t i = 0; i + needle_len <= text_len; i++) {
+        if (memcmp(text + i, needle, needle_len) == 0) return 1;
+    }
+    return 0;
+}
+
+static int smoke_capture_pipe_output(process_t* current, int read_fd, char* out, size_t out_size) {
+    char discard[128];
+    size_t used = 0;
+
+    if (!current || read_fd < 0 || !out || out_size == 0U) return -1;
+    out[0] = '\0';
+    for (;;) {
+        char* target = discard;
+        uint32_t want = sizeof(discard);
+        int rc;
+
+        if (used + 1U < out_size) {
+            target = out + used;
+            want = (uint32_t)(out_size - used - 1U);
+        }
+        rc = fd_read(current, read_fd, target, want);
+        if (rc < 0) return -1;
+        if (rc == 0) break;
+        if (target == out + used) {
+            used += (size_t)rc;
+            out[used] = '\0';
+        }
+    }
+    return 0;
+}
+
+static int smoke_capture_shell_output(const char* command, char* out, size_t out_size, int* out_status) {
+    process_t* current = process_current();
+    int pipefd[2] = { -1, -1 };
+    int status = -1;
+    int capture_status = 0;
+
+    if (!current || !command || !out || out_size == 0U) return -1;
+    out[0] = '\0';
+    if (fd_dup2(current, 1, SMOKE_CAPTURE_TMP_STDOUT) < 0) return -1;
+    if (fd_dup2(current, 2, SMOKE_CAPTURE_TMP_STDERR) < 0) {
+        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDOUT);
+        return -1;
+    }
+    if (fd_pipe(current, pipefd) != 0) {
+        capture_status = -1;
+        goto done;
+    }
+    if (fd_dup2(current, pipefd[1], 1) < 0 || fd_dup2(current, pipefd[1], 2) < 0) {
+        capture_status = -1;
+        goto done;
+    }
+    (void)fd_close(current, pipefd[1]);
+    pipefd[1] = -1;
+
+    status = run_user_shell_command(command);
+
+done:
+    if (current->fd_table[SMOKE_CAPTURE_TMP_STDOUT]) {
+        (void)fd_dup2(current, SMOKE_CAPTURE_TMP_STDOUT, 1);
+        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDOUT);
+    }
+    if (current->fd_table[SMOKE_CAPTURE_TMP_STDERR]) {
+        (void)fd_dup2(current, SMOKE_CAPTURE_TMP_STDERR, 2);
+        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDERR);
+    }
+    if (pipefd[1] >= 0) (void)fd_close(current, pipefd[1]);
+    if (pipefd[0] >= 0) {
+        if (smoke_capture_pipe_output(current, pipefd[0], out, out_size) != 0) capture_status = -1;
+        (void)fd_close(current, pipefd[0]);
+    }
+    if (out_status) *out_status = status;
+    return capture_status;
+}
+
+static void smoke_log_result(const char* label, int passed) {
+    serial_write("[smoke] ");
+    serial_write(label ? label : "test");
+    serial_write(passed ? " OK" : " FAIL");
+    serial_write_char('\n');
+}
+
+static void smoke_log_command_failure(const char* command, int status, const char* output) {
+    serial_write("[smoke] command=");
+    serial_write(command ? command : "<null>");
+    serial_write(" status=");
+    serial_write_hex32((uint32_t)status);
+    serial_write(" output=\"");
+    if (output) {
+        size_t limit = strlen(output);
+        if (limit > 160U) limit = 160U;
+        for (size_t i = 0; i < limit; i++) {
+            char ch = output[i];
+            if (ch == '\n') serial_write("\\n");
+            else if (ch == '\r') serial_write("\\r");
+            else serial_write_char(ch);
+        }
+        if (strlen(output) > limit) serial_write("...");
+    }
+    serial_write("\"\n");
+}
+
+static int smoke_expect_exact_output(const char* command, const char* expected_output) {
+    char output[1024];
+    int status = -1;
+
+    if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0) {
+        smoke_log_command_failure(command, status, output);
+        return -1;
+    }
+    if (status != 0 || strcmp(output, expected_output) != 0) {
+        smoke_log_command_failure(command, status, output);
+        return -1;
+    }
+    return 0;
+}
+
+static int smoke_expect_output_contains(const char* command, const char* needle0, const char* needle1) {
+    char output[4096];
+    int status = -1;
+
+    if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0) {
+        smoke_log_command_failure(command, status, output);
+        return -1;
+    }
+    if (status != 0 ||
+        (needle0 && !smoke_text_contains(output, needle0)) ||
+        (needle1 && !smoke_text_contains(output, needle1))) {
+        smoke_log_command_failure(command, status, output);
+        return -1;
+    }
+    return 0;
+}
+
+static int smoke_expect_repeated_output(const char* command, const char* expected_output, int iterations) {
+    char output[1024];
+    int status = -1;
+
+    for (int i = 0; i < iterations; i++) {
+        if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0 ||
+            status != 0 || strcmp(output, expected_output) != 0) {
+            smoke_log_command_failure(command, status, output);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int smoke_expect_repeated_contains(const char* command, const char* needle, int iterations) {
+    char output[4096];
+    int status = -1;
+
+    for (int i = 0; i < iterations; i++) {
+        if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0 ||
+            status != 0 || !smoke_text_contains(output, needle)) {
+            smoke_log_command_failure(command, status, output);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int smoke_test_invalid_exec_rejected(void) {
+    static const char* argv[] = { "/home/user/Desktop/readme.txt", 0 };
+    int pid = process_create_user("/home/user/Desktop/readme.txt", argv, 1, 0U);
+
+    if (pid >= 0) {
+        int status = 0;
+
+        (void)process_waitpid_sync_current(pid, 0U, &status);
+        return -1;
+    }
+    return 0;
+}
+
+#if UINTPTR_MAX > 0xFFFFFFFFU
+static int smoke_test_page_fault_reporting(void) {
+    x64_expect_fault(14U, (uint64_t)(uintptr_t)x64_test_page_fault_resume,
+                     0xFFFF800010000000ULL, 2);
+    x64_test_page_fault();
+    return x64_last_fault_test_passed() ? 0 : -1;
+}
+#endif
+
+static void smoke_process_main(void* arg) {
+    int failed = 0;
+    int hello_idx = fs_find_node("/bin/hello");
+
+    (void)arg;
+    vga_println("Running headless smoke suite...");
+    serial_write_line("[smoke] suite start");
+    serial_write("[smoke] kernel /bin/hello idx=");
+    serial_write_hex32((uint32_t)hello_idx);
+    serial_write_char('\n');
+
+    if (smoke_expect_exact_output("/bin/hello", "hello from /bin/hello v2\n") != 0) {
+        failed = 1;
+        smoke_log_result("hello", 0);
+    } else smoke_log_result("hello", 1);
+
+    if (smoke_expect_output_contains("/bin/ps",
+                                     "PID\tPPID\tSTATE\tKIND\tNAME\tIMAGE\n",
+                                     "/bin/ps") != 0) {
+        failed = 1;
+        smoke_log_result("ps", 0);
+    } else smoke_log_result("ps", 1);
+
+    if (smoke_expect_exact_output("/bin/echo smoke-echo", "smoke-echo\n") != 0) {
+        failed = 1;
+        smoke_log_result("echo", 0);
+    } else smoke_log_result("echo", 1);
+
+    if (smoke_expect_output_contains("/bin/cat /home/user/Desktop/readme.txt",
+                                     "Welcome to NarcOs Professional Desktop!",
+                                     "Files here appear on your desktop icons.") != 0) {
+        failed = 1;
+        smoke_log_result("cat", 0);
+    } else smoke_log_result("cat", 1);
+
+    if (smoke_expect_exact_output("/bin/proc_test", "proc_test: ok\n") != 0) {
+        failed = 1;
+        smoke_log_result("proc_test", 0);
+    } else smoke_log_result("proc_test", 1);
+
+    if (smoke_expect_exact_output("/bin/pipe_test", "pipe_test: ok\n") != 0) {
+        failed = 1;
+        smoke_log_result("pipe_test", 0);
+    } else smoke_log_result("pipe_test", 1);
+
+    if (smoke_expect_output_contains("tls_test",
+                                     "Failed         : 0\n",
+                                     "[PASS] ecdsa_p256") != 0) {
+        failed = 1;
+        smoke_log_result("tls-selftest", 0);
+    } else smoke_log_result("tls-selftest", 1);
+
+    if (net_is_available()) {
+        if (smoke_expect_output_contains("https https://www.python.com/",
+                                         "HTTP GET        : https://www.python.com/\n",
+                                         "HTTP/") != 0) {
+            failed = 1;
+            smoke_log_result("https-live", 0);
+        } else smoke_log_result("https-live", 1);
+    }
+
+    if (smoke_expect_exact_output("/bin/echo smoke-pipe | /bin/cat", "smoke-pipe\n") != 0) {
+        failed = 1;
+        smoke_log_result("dup2-pipeline", 0);
+    } else smoke_log_result("dup2-pipeline", 1);
+
+    if (smoke_expect_repeated_output("/bin/hello", "hello from /bin/hello v2\n", 4) != 0) {
+        failed = 1;
+        smoke_log_result("repeat-hello", 0);
+    } else smoke_log_result("repeat-hello", 1);
+
+    if (smoke_expect_repeated_contains("/bin/ps", "PID\tPPID\tSTATE\tKIND\tNAME\tIMAGE\n", 3) != 0) {
+        failed = 1;
+        smoke_log_result("repeat-ps", 0);
+    } else smoke_log_result("repeat-ps", 1);
+
+    if (smoke_test_invalid_exec_rejected() != 0) {
+        failed = 1;
+        smoke_log_result("invalid-exec", 0);
+    } else smoke_log_result("invalid-exec", 1);
+
+#if UINTPTR_MAX > 0xFFFFFFFFU
+    if (smoke_test_page_fault_reporting() != 0) {
+        failed = 1;
+        smoke_log_result("page-fault", 0);
+    } else smoke_log_result("page-fault", 1);
+#endif
+
+    if (failed) {
+        vga_println("Headless smoke suite failed.");
+        serial_write_line("[smoke] suite failed");
+    } else {
+        vga_println("Headless smoke suite passed.");
+        serial_write_line("[smoke] suite ok");
+    }
+}
+
+static void smoke_process_entry(void* arg) {
+    smoke_process_main(arg);
 }
 
 int kernel_run_privileged_command(int cmd, const char* arg) {
@@ -1773,28 +2045,24 @@ void kmain() {
     const cpu_info_t* cpu;
     int console_pid;
     int desktop_pid;
+    int smoke_pid;
     int service_pid;
 
     serial_init();
     serial_write_line("[boot] kmain");
-    cpu_init();
+    arch_init_cpu();
     cpu = cpu_get_info();
     if (!cpu->cpuid_supported || !cpu->pse_supported) {
         boot_fatal("Unsupported CPU detected.",
                    "Current kernel requires CPUID and 4 MB page support (PSE).");
     }
     serial_write_line("[boot] init_pic");
-    init_pic();
+    arch_init_legacy_pic();
     serial_write_line("[boot] init_pit");
-    init_pit();
-    serial_write_line("[boot] init_gdt");
-    init_gdt();
-    serial_write_line("[boot] load_idt");
-    load_idt();
-    serial_write_line("[boot] init_syscalls");
-    init_syscalls();
+    arch_init_timer(100U);
+    arch_init_interrupts();
     serial_write_line("[boot] init_paging");
-    init_paging();
+    arch_init_memory();
     serial_write("[boot] paging total_frames=");
     serial_write_hex32(paging_total_frames());
     serial_write(" used_frames=");
@@ -1849,14 +2117,16 @@ void kmain() {
     usermode_debug_dump("post-procinit");
     console_pid = -1;
     desktop_pid = -1;
+    smoke_pid = -1;
     if (screen_is_graphics_enabled()) {
         desktop_pid = process_create_kernel("desktop", desktop_process_entry, 0);
     } else {
         console_pid = process_create_kernel("console", console_process_entry, 0);
+        smoke_pid = process_create_kernel("smoke", smoke_process_entry, 0);
     }
     service_pid = process_create_kernel("service", service_process_main, 0);
     if ((screen_is_graphics_enabled() && desktop_pid < 0) ||
-        (!screen_is_graphics_enabled() && console_pid < 0) ||
+        (!screen_is_graphics_enabled() && (console_pid < 0 || smoke_pid < 0)) ||
         service_pid < 0) {
         boot_fatal("Scheduler bootstrap failed.",
                    "Kernel tasks could not be created with the current memory map.");

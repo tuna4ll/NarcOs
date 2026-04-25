@@ -22,6 +22,14 @@ static const uint8_t user_tls_x509_oid_rsa_encryption[] USER_RODATA = {
     0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01
 };
 
+static const uint8_t user_tls_x509_oid_ec_public_key[] USER_RODATA = {
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01
+};
+
+static const uint8_t user_tls_x509_oid_prime256v1[] USER_RODATA = {
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07
+};
+
 static const uint8_t user_tls_x509_oid_subject_alt_name[] USER_RODATA = {
     0x55, 0x1d, 0x11
 };
@@ -395,6 +403,7 @@ static USER_CODE int user_tls_x509_parse_spki(user_tls_x509_cert_t* cert, const 
     user_tls_x509_tlv_t alg_tlv;
     user_tls_x509_tlv_t key_tlv;
     user_tls_x509_tlv_t oid_tlv;
+    user_tls_x509_tlv_t curve_tlv;
     user_tls_x509_tlv_t null_tlv;
     user_tls_x509_tlv_t rsa_seq;
     user_tls_x509_tlv_t modulus_tlv;
@@ -412,44 +421,65 @@ static USER_CODE int user_tls_x509_parse_spki(user_tls_x509_cert_t* cert, const 
     }
 
     if (user_tls_x509_read_tlv(alg_tlv.value, alg_tlv.len, &alg_off, &oid_tlv) != 0 || oid_tlv.tag != 0x06U) return -1;
-    if (!user_tls_x509_mem_equals(oid_tlv.value, oid_tlv.len,
-                                  user_tls_x509_oid_rsa_encryption,
-                                  (uint32_t)sizeof(user_tls_x509_oid_rsa_encryption))) {
-        return -1;
-    }
-    if (alg_off < alg_tlv.len) {
-        if (user_tls_x509_read_tlv(alg_tlv.value, alg_tlv.len, &alg_off, &null_tlv) != 0 ||
-            null_tlv.tag != 0x05U || null_tlv.len != 0U) {
+    if (user_tls_x509_mem_equals(oid_tlv.value, oid_tlv.len,
+                                 user_tls_x509_oid_rsa_encryption,
+                                 (uint32_t)sizeof(user_tls_x509_oid_rsa_encryption))) {
+        cert->key_type = USER_TLS_X509_KEY_RSA;
+        if (alg_off < alg_tlv.len) {
+            if (user_tls_x509_read_tlv(alg_tlv.value, alg_tlv.len, &alg_off, &null_tlv) != 0 ||
+                null_tlv.tag != 0x05U || null_tlv.len != 0U) {
+                return -1;
+            }
+        }
+        if (alg_off != alg_tlv.len) return -1;
+
+        if (key_tlv.len < 1U || key_tlv.value[0] != 0x00U) return -1;
+        if (user_tls_x509_read_tlv(key_tlv.value + 1U, key_tlv.len - 1U, &key_off, &rsa_seq) != 0 ||
+            rsa_seq.tag != 0x30U || key_off != key_tlv.len - 1U) {
             return -1;
         }
-    }
-    if (alg_off != alg_tlv.len) return -1;
 
-    if (key_tlv.len < 1U || key_tlv.value[0] != 0x00U) return -1;
-    if (user_tls_x509_read_tlv(key_tlv.value + 1U, key_tlv.len - 1U, &key_off, &rsa_seq) != 0 ||
-        rsa_seq.tag != 0x30U || key_off != key_tlv.len - 1U) {
+        key_off = 0;
+        if (user_tls_x509_read_tlv(rsa_seq.value, rsa_seq.len, &key_off, &modulus_tlv) != 0 ||
+            user_tls_x509_read_tlv(rsa_seq.value, rsa_seq.len, &key_off, &exponent_tlv) != 0 ||
+            key_off != rsa_seq.len || modulus_tlv.tag != 0x02U) {
+            return -1;
+        }
+
+        if (modulus_tlv.len == 0U) return -1;
+        if (modulus_tlv.value[0] == 0x00U) {
+            if (modulus_tlv.len == 1U) return -1;
+            modulus_index = 1U;
+        } else if ((modulus_tlv.value[0] & 0x80U) != 0U) {
+            return -1;
+        }
+        cert->rsa_modulus.data = modulus_tlv.value + modulus_index;
+        cert->rsa_modulus.len = modulus_tlv.len - modulus_index;
+        if (cert->rsa_modulus.len == 0U) return -1;
+
+        return user_tls_x509_parse_uint32_integer(&exponent_tlv, &cert->rsa_exponent);
+    }
+
+    if (!user_tls_x509_mem_equals(oid_tlv.value, oid_tlv.len,
+                                  user_tls_x509_oid_ec_public_key,
+                                  (uint32_t)sizeof(user_tls_x509_oid_ec_public_key))) {
         return -1;
     }
-
-    key_off = 0;
-    if (user_tls_x509_read_tlv(rsa_seq.value, rsa_seq.len, &key_off, &modulus_tlv) != 0 ||
-        user_tls_x509_read_tlv(rsa_seq.value, rsa_seq.len, &key_off, &exponent_tlv) != 0 ||
-        key_off != rsa_seq.len || modulus_tlv.tag != 0x02U) {
+    cert->key_type = USER_TLS_X509_KEY_EC_P256;
+    if (user_tls_x509_read_tlv(alg_tlv.value, alg_tlv.len, &alg_off, &curve_tlv) != 0 ||
+        curve_tlv.tag != 0x06U ||
+        !user_tls_x509_mem_equals(curve_tlv.value, curve_tlv.len,
+                                  user_tls_x509_oid_prime256v1,
+                                  (uint32_t)sizeof(user_tls_x509_oid_prime256v1)) ||
+        alg_off != alg_tlv.len) {
         return -1;
     }
-
-    if (modulus_tlv.len == 0U) return -1;
-    if (modulus_tlv.value[0] == 0x00U) {
-        if (modulus_tlv.len == 1U) return -1;
-        modulus_index = 1U;
-    } else if ((modulus_tlv.value[0] & 0x80U) != 0U) {
-        return -1;
-    }
-    cert->rsa_modulus.data = modulus_tlv.value + modulus_index;
-    cert->rsa_modulus.len = modulus_tlv.len - modulus_index;
-    if (cert->rsa_modulus.len == 0U) return -1;
-
-    return user_tls_x509_parse_uint32_integer(&exponent_tlv, &cert->rsa_exponent);
+    if (key_tlv.len != 66U || key_tlv.value[0] != 0x00U || key_tlv.value[1] != 0x04U) return -1;
+    cert->ec_public_x.data = key_tlv.value + 2U;
+    cert->ec_public_x.len = 32U;
+    cert->ec_public_y.data = key_tlv.value + 34U;
+    cert->ec_public_y.len = 32U;
+    return 0;
 }
 
 int USER_CODE user_tls_x509_parse_leaf(user_tls_x509_cert_t* out_cert, const uint8_t* der, uint32_t der_len) {
@@ -592,7 +622,8 @@ int USER_CODE user_tls_x509_selftest(char* detail, uint32_t detail_len) {
         user_tls_x509_copy_detail(detail, detail_len, user_tls_x509_selftest_time_fail);
         return -1;
     }
-    if (cert.rsa_exponent != 65537U || cert.rsa_modulus.len != 128U || cert.dns_name_count != 3U) {
+    if (cert.key_type != USER_TLS_X509_KEY_RSA ||
+        cert.rsa_exponent != 65537U || cert.rsa_modulus.len != 128U || cert.dns_name_count != 3U) {
         user_tls_x509_copy_detail(detail, detail_len, user_tls_x509_selftest_rsa_fail);
         return -1;
     }

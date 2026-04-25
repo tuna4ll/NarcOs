@@ -55,6 +55,7 @@ enum {
 enum {
     USER_TLS_GROUP_X25519 = 0x001dU,
     USER_TLS_CIPHER_TLS_AES_128_GCM_SHA256 = 0x1301U,
+    USER_TLS_SIG_ECDSA_SECP256R1_SHA256 = 0x0403U,
     USER_TLS_SIG_RSA_PSS_RSAE_SHA256 = 0x0804U,
     USER_TLS_SIG_RSA_PSS_PSS_SHA256 = 0x0809U,
     USER_TLS_VERSION_TLS12 = 0x0303U,
@@ -157,6 +158,7 @@ static const char user_tls_name_hash_kdf[] USER_RODATA = "hash_kdf";
 static const char user_tls_name_aes_gcm[] USER_RODATA = "aes_gcm";
 static const char user_tls_name_x25519[] USER_RODATA = "x25519";
 static const char user_tls_name_rsa_pss[] USER_RODATA = "rsa_pss";
+static const char user_tls_name_ecdsa_p256[] USER_RODATA = "ecdsa_p256";
 static const char user_tls_name_x509[] USER_RODATA = "x509";
 static const char user_tls_name_tls13[] USER_RODATA = "tls13";
 
@@ -172,7 +174,7 @@ static const char user_tls_error_invalid[] USER_RODATA = "invalid request";
 static const char user_tls_error_alloc[] USER_RODATA = "allocation failed";
 static const char user_tls_error_protocol[] USER_RODATA = "tls protocol error";
 static const char user_tls_error_crypto[] USER_RODATA = "tls crypto failure";
-static const char user_tls_error_pin[] USER_RODATA = "pin lookup mismatch";
+static const char user_tls_error_pin[] USER_RODATA = "tls pin check failed";
 static const char user_tls_error_hostname[] USER_RODATA = "hostname mismatch";
 static const char user_tls_error_certificate[] USER_RODATA = "certificate verify failed";
 static const char user_tls_error_cert_time[] USER_RODATA = "certificate time invalid";
@@ -319,6 +321,24 @@ static USER_CODE void user_tls_copy_text(char* dst, uint32_t dst_len, const char
 
 static USER_CODE void user_tls_copy_detail(char* detail, uint32_t detail_len, const char* text) {
     user_tls_copy_text(detail, detail_len, text);
+}
+
+static USER_CODE const char* user_tls_alert_detail(uint8_t description) {
+    switch (description) {
+        case 0U: return "alert close_notify";
+        case 10U: return "alert unexpected_message";
+        case 20U: return "alert bad_record_mac";
+        case 40U: return "alert handshake_failure";
+        case 47U: return "alert illegal_parameter";
+        case 50U: return "alert decode_error";
+        case 70U: return "alert protocol_version";
+        case 71U: return "alert insufficient_security";
+        case 80U: return "alert internal_error";
+        case 109U: return "alert missing_extension";
+        case 112U: return "alert unrecognized_name";
+        case 120U: return "alert no_application_protocol";
+        default: return "alert unknown";
+    }
 }
 
 static USER_CODE void user_tls_debug_reset(void) {
@@ -769,9 +789,11 @@ static USER_CODE int user_tls_handle_alert(user_tls_client_t* client,
     client->last_alert_description = payload[1];
     if (payload[1] == 0U) {
         client->peer_closed = 1U;
+        user_tls_copy_text(user_tls_debug_detail_storage, sizeof(user_tls_debug_detail_storage),
+                           user_tls_alert_detail(payload[1]));
         return NET_ERR_CLOSED;
     }
-    return USER_TLS_ERR_ALERT;
+    return user_tls_debug_fail(user_tls_debug_stage, USER_TLS_ERR_ALERT, user_tls_alert_detail(payload[1]));
 }
 
 static USER_CODE int user_tls_decrypt_record(user_tls_client_t* client,
@@ -988,16 +1010,9 @@ static USER_CODE int user_tls_build_client_hello(uint8_t* out_buf, uint32_t out_
     }
 
     if (user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_EXT_SIGNATURE_ALGORITHMS) != 0 ||
+        user_tls_buffer_append_u16(out_buf, out_cap, &off, 8U) != 0 ||
         user_tls_buffer_append_u16(out_buf, out_cap, &off, 6U) != 0 ||
-        user_tls_buffer_append_u16(out_buf, out_cap, &off, 4U) != 0 ||
-        user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_SIG_RSA_PSS_RSAE_SHA256) != 0 ||
-        user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_SIG_RSA_PSS_PSS_SHA256) != 0) {
-        return USER_TLS_ERR_RECORD_OVERFLOW;
-    }
-
-    if (user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_EXT_SIGNATURE_ALGORITHMS_CERT) != 0 ||
-        user_tls_buffer_append_u16(out_buf, out_cap, &off, 6U) != 0 ||
-        user_tls_buffer_append_u16(out_buf, out_cap, &off, 4U) != 0 ||
+        user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_SIG_ECDSA_SECP256R1_SHA256) != 0 ||
         user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_SIG_RSA_PSS_RSAE_SHA256) != 0 ||
         user_tls_buffer_append_u16(out_buf, out_cap, &off, USER_TLS_SIG_RSA_PSS_PSS_SHA256) != 0) {
         return USER_TLS_ERR_RECORD_OVERFLOW;
@@ -1188,7 +1203,7 @@ static USER_CODE int user_tls_process_certificate(user_tls_client_t* client,
                 return USER_TLS_ERR_CERTIFICATE;
             }
             if (user_tls_pins_match_host(client->server_name, spki_hash) != 0) {
-                return USER_TLS_ERR_PIN;
+                return user_tls_debug_fail(USER_TLS_DEBUG_STAGE_CERTIFICATE, USER_TLS_ERR_PIN, "pin mismatch");
             }
             saw_leaf = 1;
         }
@@ -1222,11 +1237,6 @@ static USER_CODE int user_tls_process_certificate_verify(user_tls_client_t* clie
         cursor.off != cursor.len) {
         return USER_TLS_ERR_CERTIFICATE;
     }
-    if (sig_alg != USER_TLS_SIG_RSA_PSS_RSAE_SHA256 &&
-        sig_alg != USER_TLS_SIG_RSA_PSS_PSS_SHA256) {
-        return USER_TLS_ERR_CERTIFICATE;
-    }
-
     memset(signed_content, 0x20, 64U);
     content_len = 64U;
     memcpy(signed_content + content_len, context_string, sizeof(context_string) - 1U);
@@ -1236,7 +1246,25 @@ static USER_CODE int user_tls_process_certificate_verify(user_tls_client_t* clie
     memcpy(signed_content + content_len, transcript_hash, sizeof(transcript_hash));
     content_len += sizeof(transcript_hash);
 
-    if (user_tls_rsa_pss_sha256_verify(client->server_cert.rsa_modulus.data,
+    if (sig_alg == USER_TLS_SIG_ECDSA_SECP256R1_SHA256) {
+        if (client->server_cert.key_type != USER_TLS_X509_KEY_EC_P256 ||
+            client->server_cert.ec_public_x.len != 32U ||
+            client->server_cert.ec_public_y.len != 32U ||
+            user_tls_ecdsa_p256_sha256_verify(client->server_cert.ec_public_x.data,
+                                              client->server_cert.ec_public_y.data,
+                                              signature, sig_len,
+                                              signed_content, content_len) != 0) {
+            return USER_TLS_ERR_CERTIFICATE;
+        }
+        return 0;
+    }
+
+    if (sig_alg != USER_TLS_SIG_RSA_PSS_RSAE_SHA256 &&
+        sig_alg != USER_TLS_SIG_RSA_PSS_PSS_SHA256) {
+        return USER_TLS_ERR_CERTIFICATE;
+    }
+    if (client->server_cert.key_type != USER_TLS_X509_KEY_RSA ||
+        user_tls_rsa_pss_sha256_verify(client->server_cert.rsa_modulus.data,
                                        client->server_cert.rsa_modulus.len,
                                        client->server_cert.rsa_exponent,
                                        signature, sig_len,
@@ -1556,7 +1584,7 @@ int USER_CODE user_tls_open(const char* host) {
     }
     user_tls_debug_note(USER_TLS_DEBUG_STAGE_OPEN, "pin lookup");
     if (user_tls_pins_lookup(host, (const user_tls_pin_entry_t**)0) != 0) {
-        return user_tls_debug_fail(USER_TLS_DEBUG_STAGE_OPEN, USER_TLS_ERR_PIN, "pin lookup");
+        return user_tls_debug_fail(USER_TLS_DEBUG_STAGE_OPEN, USER_TLS_ERR_PIN, "host not pinned");
     }
     user_tls_debug_note(USER_TLS_DEBUG_STAGE_OPEN, "ntp time");
     if (user_tls_get_utc_unix_time(&unix_seconds) != NET_OK) {
@@ -1579,7 +1607,7 @@ int USER_CODE user_tls_open(const char* host) {
     status = user_net_resolve(client->server_name, &client->peer_ip);
     if (status != NET_OK) {
         user_tls_free_client();
-        return user_tls_debug_propagate(USER_TLS_DEBUG_STAGE_OPEN, status, "dns resolve");
+        return user_tls_debug_fail(USER_TLS_DEBUG_STAGE_OPEN, NET_ERR_RESOLVE, "dns resolve");
     }
     if (client->peer_ip == 0U) {
         user_tls_free_client();
@@ -1946,6 +1974,17 @@ static USER_CODE void user_tls_selftest_rsa_pss(user_tls_selftest_report_t* repo
     user_tls_record_result(report, user_tls_name_rsa_pss, USER_TLS_TEST_STATUS_FAIL, detail);
 }
 
+static USER_CODE void user_tls_selftest_ecdsa_p256(user_tls_selftest_report_t* report) {
+    char detail[USER_TLS_SELFTEST_DETAIL_LEN];
+
+    if (!report) return;
+    if (user_tls_crypto_selftest_ecdsa_p256(detail, sizeof(detail)) == 0) {
+        user_tls_record_result(report, user_tls_name_ecdsa_p256, USER_TLS_TEST_STATUS_PASS, detail);
+        return;
+    }
+    user_tls_record_result(report, user_tls_name_ecdsa_p256, USER_TLS_TEST_STATUS_FAIL, detail);
+}
+
 static USER_CODE void user_tls_selftest_x509(user_tls_selftest_report_t* report) {
     char detail[USER_TLS_SELFTEST_DETAIL_LEN];
 
@@ -1977,6 +2016,7 @@ int USER_CODE user_tls_run_selftests(user_tls_selftest_report_t* out_report) {
     user_tls_selftest_aes_gcm(out_report);
     user_tls_selftest_x25519(out_report);
     user_tls_selftest_rsa_pss(out_report);
+    user_tls_selftest_ecdsa_p256(out_report);
     user_tls_selftest_x509(out_report);
     user_tls_selftest_tls13(out_report);
     return out_report->fail_count == 0U ? 0 : -1;

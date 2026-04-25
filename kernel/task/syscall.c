@@ -8,6 +8,7 @@
 #include "process.h"
 #include "fd.h"
 #include "rtc.h"
+#include "serial.h"
 #include "usermode.h"
 #include "string.h"
 
@@ -29,13 +30,50 @@ extern uint8_t __user_region_end[];
 #define SYSCALL_USER_PATH_MAX 256U
 #define SYSCALL_USER_TEXT_MAX 1024U
 
-static int copy_argv_from_user(const char* const* user_argv, uint32_t argc,
+static void syscall_set_result(arch_trap_frame_t* frame, intptr_t value) {
+    arch_frame_set_return_value(frame, (uintptr_t)value);
+}
+
+static uint8_t current_user_argv_slot_size(void) {
+    process_t* current = process_current();
+    exec_image_t image;
+
+    /* Static user tasks such as the desktop shell are compiled for the
+       kernel's native word size even though they do not own an exec image. */
+    if (!current || current->kind != PROCESS_KIND_USER) return sizeof(uintptr_t);
+    if (exec_query_image(&current->user_space, &image) != EXEC_OK) return sizeof(uint32_t);
+    return image.image_class == EXEC_IMAGE_CLASS_ELF64 ? sizeof(uint64_t) : sizeof(uint32_t);
+}
+
+static int copy_argv_from_user(uintptr_t user_argv, uint32_t argc, uint8_t argv_slot_size,
                                char out_args[PROCESS_MAX_ARGS][PROCESS_MAX_ARG_LEN],
                                const char* out_ptrs[PROCESS_MAX_ARGS]) {
-    for (uint32_t i = 0; i < argc; i++) {
-        uint32_t user_arg = 0;
+    if ((argc != 0U && user_argv == 0U) ||
+        (argv_slot_size != sizeof(uint32_t) && argv_slot_size != sizeof(uint64_t))) {
+        return -1;
+    }
 
-        if (copy_from_user(&user_arg, user_argv + i, sizeof(user_arg)) != 0) return -1;
+    for (uint32_t i = 0; i < argc; i++) {
+        uintptr_t user_arg = 0U;
+
+        if (argv_slot_size == sizeof(uint64_t)) {
+            uint64_t raw_arg = 0ULL;
+
+            if (copy_from_user(&raw_arg, (const void*)(user_argv + (uintptr_t)i * sizeof(raw_arg)),
+                               sizeof(raw_arg)) != 0) {
+                return -1;
+            }
+            user_arg = (uintptr_t)raw_arg;
+        } else {
+            uint32_t raw_arg = 0U;
+
+            if (copy_from_user(&raw_arg, (const void*)(user_argv + (uintptr_t)i * sizeof(raw_arg)),
+                               sizeof(raw_arg)) != 0) {
+                return -1;
+            }
+            user_arg = (uintptr_t)raw_arg;
+        }
+
         if (copy_string_from_user(out_args[i], (const char*)user_arg, PROCESS_MAX_ARG_LEN) != 0) return -1;
         out_ptrs[i] = out_args[i];
     }
@@ -84,9 +122,9 @@ static int kernel_fill_random(void* buffer, uint32_t length) {
     return 0;
 }
 
-static int user_range_in_window(uint32_t addr, uint32_t len, uint32_t base, uint32_t size) {
-    uint32_t end;
-    uint32_t window_end;
+static int user_range_in_window(uintptr_t addr, size_t len, uintptr_t base, size_t size) {
+    uintptr_t end;
+    uintptr_t window_end;
 
     if (len == 0U) return 1;
     if (addr < base) return 0;
@@ -97,22 +135,28 @@ static int user_range_in_window(uint32_t addr, uint32_t len, uint32_t base, uint
 }
 
 static int user_range_readable(const void* user_ptr, uint32_t len) {
-    uint32_t addr;
-    uint32_t code_base = (uint32_t)__user_region_start;
-    uint32_t code_size = (uint32_t)(__user_region_end - __user_region_start);
+    uintptr_t addr;
+    uintptr_t code_base = (uintptr_t)__user_region_start;
+    size_t code_size = (size_t)(__user_region_end - __user_region_start);
 
     if (len == 0U) return 1;
     if (!user_ptr) return 0;
-    addr = (uint32_t)user_ptr;
-    if (user_range_in_window(addr, len, code_base, code_size)) return 1;
-    if (user_range_in_window(addr, len, USER_DATA_WINDOW_BASE, USER_DATA_WINDOW_SIZE)) return 1;
+    addr = (uintptr_t)user_ptr;
+    if (user_range_in_window(addr, (size_t)len, code_base, code_size)) return 1;
+    if (user_range_in_window(addr, (size_t)len, USER_DATA_WINDOW_BASE, USER_DATA_WINDOW_SIZE)) return 1;
     return 0;
 }
 
 static int user_range_writable(const void* user_ptr, uint32_t len) {
+    uintptr_t addr;
+    uintptr_t code_base = (uintptr_t)__user_region_start;
+    size_t code_size = (size_t)(__user_region_end - __user_region_start);
+
     if (len == 0U) return 1;
     if (!user_ptr) return 0;
-    return user_range_in_window((uint32_t)user_ptr, len, USER_DATA_WINDOW_BASE, USER_DATA_WINDOW_SIZE);
+    addr = (uintptr_t)user_ptr;
+    if (user_range_in_window(addr, (size_t)len, code_base, code_size)) return 1;
+    return user_range_in_window(addr, (size_t)len, USER_DATA_WINDOW_BASE, USER_DATA_WINDOW_SIZE);
 }
 
 int copy_from_user(void* dst, const void* user_src, uint32_t len) {
@@ -149,25 +193,35 @@ static void reactivate_current_user_space(void) {
     (void)exec_activate_address_space(&current->user_space);
 }
 
-void syscall_handler(trap_frame_t* frame) {
-    uint32_t eax = frame->eax;
-    uint32_t ebx = frame->ebx;
-    uint32_t ecx = frame->ecx;
-    uint32_t edx = frame->edx;
-    uint32_t esi = frame->esi;
+void syscall_handler(arch_trap_frame_t* frame) {
+    arch_syscall_state_t regs;
+    uint32_t syscall_num;
+    uintptr_t arg0;
+    uintptr_t arg1;
+    uintptr_t arg2;
+    uintptr_t arg3;
 
-    if (eax == SYS_PRINT) {
+    arch_syscall_capture(frame, &regs);
+    syscall_num = (uint32_t)regs.number;
+    arg0 = (uintptr_t)regs.arg0;
+    arg1 = (uintptr_t)regs.arg1;
+    arg2 = (uintptr_t)regs.arg2;
+    arg3 = (uintptr_t)regs.arg3;
+
+    if (syscall_num == SYS_PRINT) {
         char text[SYSCALL_USER_TEXT_MAX];
-        if (copy_string_from_user(text, (const char*)ebx, sizeof(text)) != 0) frame->eax = (uint32_t)-1;
+
+        if (copy_string_from_user(text, (const char*)arg0, sizeof(text)) != 0) syscall_set_result(frame, -1);
         else {
             vga_println(text);
-            frame->eax = 0;
+            syscall_set_result(frame, 0);
         }
-    } else if (eax == SYS_MALLOC) {
-        frame->eax = (uint32_t)malloc((size_t)ebx);
-    } else if (eax == SYS_FREE) {
-        free((void*)ebx);
-    } else if (eax == SYS_GUI_UPDATE) {
+    } else if (syscall_num == SYS_MALLOC) {
+        syscall_set_result(frame, (intptr_t)(uintptr_t)malloc((size_t)arg0));
+    } else if (syscall_num == SYS_FREE) {
+        free((void*)arg0);
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_GUI_UPDATE) {
         if (timer_ticks - last_gui_tick > 2) { 
             vbe_compose_scene_basic();
             vbe_update();
@@ -177,282 +231,314 @@ void syscall_handler(trap_frame_t* frame) {
         volatile uint16_t* vga = (volatile uint16_t*)0xB8000;
         static int hb = 0;
         vga[78] = (hb++ % 2) ? 0x2F21 : 0x2F20; // '!' blinking in green
-    } else if (eax == SYS_YIELD) {
-        frame->eax = 0;
-    } else if (eax == SYS_UPTIME) {
-        frame->eax = timer_ticks;
-    } else if (eax == SYS_GETPID) {
-        frame->eax = (uint32_t)process_current_pid();
-    } else if (eax == SYS_GETPPID) {
-        frame->eax = (uint32_t)process_current_ppid();
-    } else if (eax == SYS_CHDIR) {
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_YIELD) {
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_UPTIME) {
+        syscall_set_result(frame, (intptr_t)timer_ticks);
+    } else if (syscall_num == SYS_GETPID) {
+        syscall_set_result(frame, process_current_pid());
+    } else if (syscall_num == SYS_GETPPID) {
+        syscall_set_result(frame, process_current_ppid());
+    } else if (syscall_num == SYS_CHDIR) {
         char path[SYSCALL_USER_PATH_MAX];
-        frame->eax = copy_string_from_user(path, (const char*)ebx, sizeof(path)) == 0
-                         ? (uint32_t)fs_change_dir(path)
-                         : (uint32_t)-1;
-    } else if (eax == SYS_FS_READ) {
+
+        syscall_set_result(frame, copy_string_from_user(path, (const char*)arg0, sizeof(path)) == 0
+                                      ? fs_change_dir(path)
+                                      : -1);
+    } else if (syscall_num == SYS_FS_READ) {
         char path[SYSCALL_USER_PATH_MAX];
         char* buffer;
+        int status;
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0 || edx == 0U) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0 || arg2 == 0U) {
+            syscall_set_result(frame, -1);
         } else {
-            buffer = (char*)malloc((size_t)edx);
-            if (!buffer) frame->eax = (uint32_t)-1;
+            buffer = (char*)malloc((size_t)arg2);
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                memset(buffer, 0, (size_t)edx);
-                frame->eax = (uint32_t)fs_read_file(path, buffer, (size_t)edx);
-                if ((int)frame->eax == 0 && copy_to_user((void*)ecx, buffer, edx) != 0) frame->eax = (uint32_t)-1;
+                memset(buffer, 0, (size_t)arg2);
+                status = fs_read_file(path, buffer, (size_t)arg2);
+                if (status == 0 && copy_to_user((void*)arg1, buffer, (uint32_t)arg2) != 0) status = -1;
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_FS_WRITE) {
+    } else if (syscall_num == SYS_FS_WRITE) {
         char path[SYSCALL_USER_PATH_MAX];
         char* contents;
+        int status;
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
             contents = (char*)malloc(MAX_FILE_SIZE + 1U);
-            if (!contents) frame->eax = (uint32_t)-1;
+            if (!contents) syscall_set_result(frame, -1);
             else {
-                frame->eax = copy_string_from_user(contents, (const char*)ecx, MAX_FILE_SIZE + 1U) == 0
-                                 ? (uint32_t)fs_write_file(path, contents)
-                                 : (uint32_t)-1;
+                status = copy_string_from_user(contents, (const char*)arg1, MAX_FILE_SIZE + 1U) == 0
+                             ? fs_write_file(path, contents)
+                             : -1;
+                syscall_set_result(frame, status);
                 free(contents);
             }
         }
-    } else if (eax == SYS_FS_READ_RAW) {
+    } else if (syscall_num == SYS_FS_READ_RAW) {
         char path[SYSCALL_USER_PATH_MAX];
         void* buffer;
+        int status;
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0 || esi == 0U) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0 || arg2 == 0U) {
+            syscall_set_result(frame, -1);
         } else {
-            buffer = malloc((size_t)esi);
-            if (!buffer) frame->eax = (uint32_t)-1;
+            buffer = malloc((size_t)arg2);
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                frame->eax = (uint32_t)fs_read_file_raw(path, buffer, (size_t)edx, (size_t)esi);
-                if ((int)frame->eax > 0 && copy_to_user((void*)ecx, buffer, frame->eax) != 0) frame->eax = (uint32_t)-1;
+                status = fs_read_file_raw(path, buffer, (size_t)arg3, (size_t)arg2);
+                if (status > 0 && copy_to_user((void*)arg1, buffer, (uint32_t)status) != 0) status = -1;
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_FS_WRITE_RAW) {
+    } else if (syscall_num == SYS_FS_WRITE_RAW) {
         char path[SYSCALL_USER_PATH_MAX];
         void* buffer;
+        int status;
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0) {
-            frame->eax = (uint32_t)-1;
-        } else if (edx == 0U) {
-            frame->eax = (uint32_t)fs_write_file_raw(path, 0, 0U);
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
+            syscall_set_result(frame, -1);
+        } else if (arg2 == 0U) {
+            syscall_set_result(frame, fs_write_file_raw(path, 0, 0U));
         } else {
-            buffer = malloc((size_t)edx);
-            if (!buffer) frame->eax = (uint32_t)-1;
+            buffer = malloc((size_t)arg2);
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                frame->eax = copy_from_user(buffer, (const void*)ecx, edx) == 0
-                                 ? (uint32_t)fs_write_file_raw(path, buffer, (size_t)edx)
-                                 : (uint32_t)-1;
+                status = copy_from_user(buffer, (const void*)arg1, (uint32_t)arg2) == 0
+                             ? fs_write_file_raw(path, buffer, (size_t)arg2)
+                             : -1;
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_FS_LIST) {
-        int max_entries = (int)ecx;
+    } else if (syscall_num == SYS_FS_LIST) {
+        int max_entries = (int)arg1;
         disk_fs_node_t* entries;
+        int status;
 
-        if (max_entries <= 0 || max_entries > MAX_FILES) frame->eax = (uint32_t)-1;
+        if (max_entries <= 0 || max_entries > MAX_FILES) syscall_set_result(frame, -1);
         else {
             entries = (disk_fs_node_t*)malloc((size_t)max_entries * sizeof(disk_fs_node_t));
-            if (!entries) frame->eax = (uint32_t)-1;
+            if (!entries) syscall_set_result(frame, -1);
             else {
-                frame->eax = (uint32_t)fs_list_dir_entries(entries, max_entries);
-                if ((int)frame->eax > 0 &&
-                    copy_to_user((void*)ebx, entries, (uint32_t)frame->eax * (uint32_t)sizeof(disk_fs_node_t)) != 0) {
-                    frame->eax = (uint32_t)-1;
+                status = fs_list_dir_entries(entries, max_entries);
+                if (status > 0 &&
+                    copy_to_user((void*)arg0, entries,
+                                 (uint32_t)status * (uint32_t)sizeof(disk_fs_node_t)) != 0) {
+                    status = -1;
                 }
+                syscall_set_result(frame, status);
                 free(entries);
             }
         }
-    } else if (eax == SYS_FS_GET_CWD) {
+    } else if (syscall_num == SYS_FS_GET_CWD) {
         char* path;
 
-        if (ecx == 0U) frame->eax = (uint32_t)-1;
+        if (arg1 == 0U) syscall_set_result(frame, -1);
         else {
-            path = (char*)malloc((size_t)ecx);
-            if (!path) frame->eax = (uint32_t)-1;
+            path = (char*)malloc((size_t)arg1);
+            if (!path) syscall_set_result(frame, -1);
             else {
-                memset(path, 0, (size_t)ecx);
-                fs_get_current_path(path, (size_t)ecx);
-                frame->eax = copy_to_user((void*)ebx, path, ecx) == 0 ? 0U : (uint32_t)-1;
+                memset(path, 0, (size_t)arg1);
+                fs_get_current_path(path, (size_t)arg1);
+                syscall_set_result(frame, copy_to_user((void*)arg0, path, (uint32_t)arg1) == 0 ? 0 : -1);
                 free(path);
             }
         }
-    } else if (eax == SYS_FS_TOUCH) {
+    } else if (syscall_num == SYS_FS_TOUCH) {
         char path[SYSCALL_USER_PATH_MAX];
         int status;
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
             status = fs_create_file(path);
             if (status != 0 && fs_find_node(path) >= 0) status = 0;
-            frame->eax = (uint32_t)status;
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_FS_MKDIR) {
+    } else if (syscall_num == SYS_FS_MKDIR) {
         char path[SYSCALL_USER_PATH_MAX];
-        frame->eax = copy_string_from_user(path, (const char*)ebx, sizeof(path)) == 0
-                         ? (uint32_t)fs_create_dir(path)
-                         : (uint32_t)-1;
-    } else if (eax == SYS_FS_DELETE) {
+
+        syscall_set_result(frame, copy_string_from_user(path, (const char*)arg0, sizeof(path)) == 0
+                                      ? fs_create_dir(path)
+                                      : -1);
+    } else if (syscall_num == SYS_FS_DELETE) {
         char path[SYSCALL_USER_PATH_MAX];
-        frame->eax = copy_string_from_user(path, (const char*)ebx, sizeof(path)) == 0
-                         ? (uint32_t)fs_delete_file(path)
-                         : (uint32_t)-1;
-    } else if (eax == SYS_FS_MOVE) {
+
+        syscall_set_result(frame, copy_string_from_user(path, (const char*)arg0, sizeof(path)) == 0
+                                      ? fs_delete_file(path)
+                                      : -1);
+    } else if (syscall_num == SYS_FS_MOVE) {
         char src[SYSCALL_USER_PATH_MAX];
         char dst[SYSCALL_USER_PATH_MAX];
 
-        if (copy_string_from_user(src, (const char*)ebx, sizeof(src)) != 0 ||
-            copy_string_from_user(dst, (const char*)ecx, sizeof(dst)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(src, (const char*)arg0, sizeof(src)) != 0 ||
+            copy_string_from_user(dst, (const char*)arg1, sizeof(dst)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)fs_move_file(src, dst);
+            syscall_set_result(frame, fs_move_file(src, dst));
         }
-    } else if (eax == SYS_FS_RENAME) {
+    } else if (syscall_num == SYS_FS_RENAME) {
         char path[SYSCALL_USER_PATH_MAX];
         char new_name[SYSCALL_USER_PATH_MAX];
 
-        if (copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0 ||
-            copy_string_from_user(new_name, (const char*)ecx, sizeof(new_name)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0 ||
+            copy_string_from_user(new_name, (const char*)arg1, sizeof(new_name)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)fs_rename(path, new_name);
+            syscall_set_result(frame, fs_rename(path, new_name));
         }
-    } else if (eax == SYS_FS_FIND_NODE) {
+    } else if (syscall_num == SYS_FS_FIND_NODE) {
         char path[SYSCALL_USER_PATH_MAX];
-        frame->eax = copy_string_from_user(path, (const char*)ebx, sizeof(path)) == 0
-                         ? (uint32_t)fs_find_node(path)
-                         : (uint32_t)-1;
-    } else if (eax == SYS_FS_GET_NODE_INFO) {
-        disk_fs_node_t node;
 
-        frame->eax = (uint32_t)fs_get_node_info((int)ebx, &node);
-        if ((int)frame->eax == 0 && copy_to_user((void*)ecx, &node, sizeof(node)) != 0) frame->eax = (uint32_t)-1;
-    } else if (eax == SYS_FS_GET_PATH) {
+        syscall_set_result(frame, copy_string_from_user(path, (const char*)arg0, sizeof(path)) == 0
+                                      ? fs_find_node(path)
+                                      : -1);
+    } else if (syscall_num == SYS_FS_GET_NODE_INFO) {
+        disk_fs_node_t node;
+        int status;
+
+        status = fs_get_node_info((int)arg0, &node);
+        if (status == 0 && copy_to_user((void*)arg1, &node, sizeof(node)) != 0) status = -1;
+        syscall_set_result(frame, status);
+    } else if (syscall_num == SYS_FS_GET_PATH) {
         char* path;
 
-        if (edx == 0U) frame->eax = (uint32_t)-1;
+        if (arg2 == 0U) syscall_set_result(frame, -1);
         else {
-            path = (char*)malloc((size_t)edx);
-            if (!path) frame->eax = (uint32_t)-1;
+            path = (char*)malloc((size_t)arg2);
+            if (!path) syscall_set_result(frame, -1);
             else {
-                memset(path, 0, (size_t)edx);
-                fs_get_path_by_index((int)ebx, path, (size_t)edx);
-                frame->eax = copy_to_user((void*)ecx, path, edx) == 0 ? 0U : (uint32_t)-1;
+                memset(path, 0, (size_t)arg2);
+                fs_get_path_by_index((int)arg0, path, (size_t)arg2);
+                syscall_set_result(frame, copy_to_user((void*)arg1, path, (uint32_t)arg2) == 0 ? 0 : -1);
                 free(path);
             }
         }
-    } else if (eax == SYS_SNAKE_GET_INPUT) {
-        frame->eax = (uint32_t)consume_user_snake_input();
-    } else if (eax == SYS_SNAKE_CLOSE) {
+    } else if (syscall_num == SYS_SNAKE_GET_INPUT) {
+        syscall_set_result(frame, consume_user_snake_input());
+    } else if (syscall_num == SYS_SNAKE_CLOSE) {
         stop_user_snake();
-        frame->eax = 0;
-    } else if (eax == SYS_RANDOM) {
-        frame->eax = kernel_next_random();
-    } else if (eax == SYS_GETRANDOM) {
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_RANDOM) {
+        syscall_set_result(frame, (intptr_t)kernel_next_random());
+    } else if (syscall_num == SYS_GETRANDOM) {
         void* buffer;
+        int status;
 
-        if (ecx == 0U) {
-            frame->eax = 0;
+        if (arg1 == 0U) {
+            syscall_set_result(frame, 0);
         } else {
-            buffer = malloc((size_t)ecx);
-            if (!buffer) frame->eax = (uint32_t)-1;
+            buffer = malloc((size_t)arg1);
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                frame->eax = (uint32_t)kernel_fill_random(buffer, ecx);
-                if ((int)frame->eax == 0 && copy_to_user((void*)ebx, buffer, ecx) != 0) frame->eax = (uint32_t)-1;
+                status = kernel_fill_random(buffer, (uint32_t)arg1);
+                if (status == 0 && copy_to_user((void*)arg0, buffer, (uint32_t)arg1) != 0) status = -1;
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_NET_GET_CONFIG) {
+    } else if (syscall_num == SYS_NET_GET_CONFIG) {
         net_ipv4_config_t config;
+        int status;
 
-        frame->eax = (uint32_t)net_get_ipv4_config(&config);
-        if ((int)frame->eax == 0 && copy_to_user((void*)ebx, &config, sizeof(config)) != 0) frame->eax = (uint32_t)-1;
-    } else if (eax == SYS_NET_DHCP) {
-        frame->eax = (uint32_t)net_run_dhcp(0);
-    } else if (eax == SYS_NET_RESOLVE) {
+        status = net_get_ipv4_config(&config);
+        if (status == 0 && copy_to_user((void*)arg0, &config, sizeof(config)) != 0) status = -1;
+        syscall_set_result(frame, status);
+    } else if (syscall_num == SYS_NET_DHCP) {
+        syscall_set_result(frame, net_run_dhcp(0));
+    } else if (syscall_num == SYS_NET_RESOLVE) {
         char host[SYSCALL_USER_PATH_MAX];
         uint32_t ip = 0;
+        int status;
 
-        if (copy_string_from_user(host, (const char*)ebx, sizeof(host)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(host, (const char*)arg0, sizeof(host)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)net_resolve_ipv4(host, &ip);
-            if ((int)frame->eax == 0 && copy_to_user((void*)ecx, &ip, sizeof(ip)) != 0) frame->eax = (uint32_t)-1;
+            status = net_resolve_ipv4(host, &ip);
+            if (status == 0 && copy_to_user((void*)arg1, &ip, sizeof(ip)) != 0) status = -1;
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_NET_NTP_QUERY) {
+    } else if (syscall_num == SYS_NET_NTP_QUERY) {
         char host[SYSCALL_USER_PATH_MAX];
         uint32_t unix_seconds = 0;
+        int status;
 
-        if (copy_string_from_user(host, (const char*)ebx, sizeof(host)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(host, (const char*)arg0, sizeof(host)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)net_ntp_query(host, &unix_seconds);
-            if ((int)frame->eax == 0 && copy_to_user((void*)ecx, &unix_seconds, sizeof(unix_seconds)) != 0) {
-                frame->eax = (uint32_t)-1;
-            }
+            status = net_ntp_query(host, &unix_seconds);
+            if (status == 0 && copy_to_user((void*)arg1, &unix_seconds, sizeof(unix_seconds)) != 0) status = -1;
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_NET_PING) {
+    } else if (syscall_num == SYS_NET_PING) {
         char host[SYSCALL_USER_PATH_MAX];
         net_ping_result_t result;
+        int status;
 
-        if (copy_string_from_user(host, (const char*)ebx, sizeof(host)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (copy_string_from_user(host, (const char*)arg0, sizeof(host)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)net_ping_host(host, &result);
-            if ((int)frame->eax == 0 && copy_to_user((void*)ecx, &result, sizeof(result)) != 0) frame->eax = (uint32_t)-1;
+            status = net_ping_host(host, &result);
+            if (status == 0 && copy_to_user((void*)arg1, &result, sizeof(result)) != 0) status = -1;
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_NET_SOCKET_OPEN) {
-        frame->eax = (uint32_t)net_socket_open((int)ebx);
-    } else if (eax == SYS_NET_SOCKET_CONNECT) {
-        frame->eax = (uint32_t)net_socket_connect((int)ebx, ecx, (uint16_t)edx, esi);
-    } else if (eax == SYS_NET_SOCKET_SEND) {
+    } else if (syscall_num == SYS_NET_SOCKET_OPEN) {
+        syscall_set_result(frame, net_socket_open((int)arg0));
+    } else if (syscall_num == SYS_NET_SOCKET_CONNECT) {
+        syscall_set_result(frame, net_socket_connect((int)arg0, (uint32_t)arg1, (uint16_t)arg2, (uint32_t)arg3));
+    } else if (syscall_num == SYS_NET_SOCKET_SEND) {
         void* data;
+        int status;
 
-        if (edx == 0U) {
-            frame->eax = (uint32_t)net_socket_send((int)ebx, 0, 0U);
+        if (arg2 == 0U) {
+            syscall_set_result(frame, net_socket_send((int)arg0, 0, 0U));
         } else {
-            data = malloc((size_t)edx);
-            if (!data) frame->eax = (uint32_t)-1;
+            data = malloc((size_t)arg2);
+            if (!data) syscall_set_result(frame, -1);
             else {
-                frame->eax = copy_from_user(data, (const void*)ecx, edx) == 0
-                                 ? (uint32_t)net_socket_send((int)ebx, data, (uint16_t)edx)
-                                 : (uint32_t)-1;
+                status = copy_from_user(data, (const void*)arg1, (uint32_t)arg2) == 0
+                             ? net_socket_send((int)arg0, data, (uint16_t)arg2)
+                             : -1;
+                syscall_set_result(frame, status);
                 free(data);
             }
         }
-    } else if (eax == SYS_NET_SOCKET_RECV) {
+    } else if (syscall_num == SYS_NET_SOCKET_RECV) {
         void* data;
+        int status;
 
-        if (edx == 0U) {
-            frame->eax = 0;
+        if (arg2 == 0U) {
+            syscall_set_result(frame, 0);
         } else {
-            data = malloc((size_t)edx);
-            if (!data) frame->eax = (uint32_t)-1;
+            data = malloc((size_t)arg2);
+            if (!data) syscall_set_result(frame, -1);
             else {
-                frame->eax = (uint32_t)net_socket_recv((int)ebx, data, (uint16_t)edx);
-                if ((int)frame->eax > 0 && copy_to_user((void*)ecx, data, frame->eax) != 0) frame->eax = (uint32_t)-1;
+                status = net_socket_recv((int)arg0, data, (uint16_t)arg2);
+                if (status > 0 && copy_to_user((void*)arg1, data, (uint32_t)status) != 0) status = -1;
+                syscall_set_result(frame, status);
                 free(data);
             }
         }
-    } else if (eax == SYS_NET_SOCKET_AVAILABLE) {
-        frame->eax = (uint32_t)net_socket_available((int)ebx);
-    } else if (eax == SYS_NET_SOCKET_CLOSE) {
-        frame->eax = (uint32_t)net_socket_close((int)ebx);
-    } else if (eax == SYS_CLEAR_SCREEN) {
+    } else if (syscall_num == SYS_NET_SOCKET_AVAILABLE) {
+        syscall_set_result(frame, net_socket_available((int)arg0));
+    } else if (syscall_num == SYS_NET_SOCKET_CLOSE) {
+        syscall_set_result(frame, net_socket_close((int)arg0));
+    } else if (syscall_num == SYS_CLEAR_SCREEN) {
         clear_screen();
-        frame->eax = 0;
-    } else if (eax == SYS_RTC_GET_LOCAL) {
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_RTC_GET_LOCAL) {
         rtc_local_time_t out_time;
+        int status;
+
         read_rtc();
         out_time.year = (uint16_t)get_year();
         out_time.month = get_month();
@@ -460,178 +546,208 @@ void syscall_handler(trap_frame_t* frame) {
         out_time.hour = get_hour();
         out_time.minute = get_minute();
         out_time.second = get_second();
-        frame->eax = copy_to_user((void*)ebx, &out_time, sizeof(out_time)) == 0 ? 0U : (uint32_t)-1;
-    } else if (eax == SYS_RTC_GET_TZ_OFFSET) {
-        frame->eax = (uint32_t)rtc_get_timezone_offset_minutes();
-    } else if (eax == SYS_RTC_SET_TZ_OFFSET) {
-        rtc_set_timezone_offset_minutes((int)ebx);
-        frame->eax = 0;
-    } else if (eax == SYS_RTC_SAVE_TZ) {
-        frame->eax = (uint32_t)rtc_save_timezone_setting();
-    } else if (eax == SYS_PRIV_CMD) {
+        status = copy_to_user((void*)arg0, &out_time, sizeof(out_time)) == 0 ? 0 : -1;
+        syscall_set_result(frame, status);
+    } else if (syscall_num == SYS_RTC_GET_TZ_OFFSET) {
+        syscall_set_result(frame, rtc_get_timezone_offset_minutes());
+    } else if (syscall_num == SYS_RTC_SET_TZ_OFFSET) {
+        rtc_set_timezone_offset_minutes((int)arg0);
+        syscall_set_result(frame, 0);
+    } else if (syscall_num == SYS_RTC_SAVE_TZ) {
+        syscall_set_result(frame, rtc_save_timezone_setting());
+    } else if (syscall_num == SYS_PRIV_CMD) {
         char arg[SYSCALL_USER_PATH_MAX];
 
-        if (ecx == 0U) {
-            frame->eax = (uint32_t)kernel_run_privileged_command((int)ebx, 0);
-        } else if (copy_string_from_user(arg, (const char*)ecx, sizeof(arg)) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (arg1 == 0U) {
+            syscall_set_result(frame, kernel_run_privileged_command((int)arg0, 0));
+        } else if (copy_string_from_user(arg, (const char*)arg1, sizeof(arg)) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)kernel_run_privileged_command((int)ebx, arg);
+            syscall_set_result(frame, kernel_run_privileged_command((int)arg0, arg));
         }
-    } else if (eax == SYS_PRINT_RAW) {
+    } else if (syscall_num == SYS_PRINT_RAW) {
         char text[SYSCALL_USER_TEXT_MAX];
-        if (copy_string_from_user(text, (const char*)ebx, sizeof(text)) != 0) frame->eax = (uint32_t)-1;
+
+        if (copy_string_from_user(text, (const char*)arg0, sizeof(text)) != 0) syscall_set_result(frame, -1);
         else {
             vga_print(text);
-            frame->eax = 0;
+            syscall_set_result(frame, 0);
         }
-    } else if (eax == SYS_GUI_OPEN_NARCPAD_FILE) {
+    } else if (syscall_num == SYS_GUI_OPEN_NARCPAD_FILE) {
         char path[SYSCALL_USER_PATH_MAX];
-        frame->eax = copy_string_from_user(path, (const char*)ebx, sizeof(path)) == 0
-                         ? (uint32_t)kernel_gui_open_narcpad_file(path)
-                         : (uint32_t)-1;
-    } else if (eax == SYS_SPAWN) {
+
+        syscall_set_result(frame, copy_string_from_user(path, (const char*)arg0, sizeof(path)) == 0
+                                      ? kernel_gui_open_narcpad_file(path)
+                                      : -1);
+    } else if (syscall_num == SYS_SPAWN) {
         char path[SYSCALL_USER_PATH_MAX];
         char argv_copy[PROCESS_MAX_ARGS][PROCESS_MAX_ARG_LEN];
         const char* argv_ptrs[PROCESS_MAX_ARGS];
+        uint8_t argv_slot_size = current_user_argv_slot_size();
 
-        if (edx > PROCESS_MAX_ARGS || copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0) {
-            frame->eax = (uint32_t)-1;
-        } else if (edx != 0U && copy_argv_from_user((const char* const*)ecx, edx, argv_copy, argv_ptrs) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (arg2 > PROCESS_MAX_ARGS || copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
+            syscall_set_result(frame, -1);
+        } else if (arg2 != 0U &&
+                   copy_argv_from_user(arg1, (uint32_t)arg2, argv_slot_size, argv_copy, argv_ptrs) != 0) {
+            syscall_set_result(frame, -1);
         } else {
-            frame->eax = (uint32_t)process_create_user(path, edx != 0U ? argv_ptrs : 0, (int)edx, 0U);
+            syscall_set_result(frame, process_create_user(path, arg2 != 0U ? argv_ptrs : 0, (int)arg2, 0U));
         }
-    } else if (eax == SYS_EXEC) {
+    } else if (syscall_num == SYS_EXEC) {
         char path[SYSCALL_USER_PATH_MAX];
         char argv_copy[PROCESS_MAX_ARGS][PROCESS_MAX_ARG_LEN];
         const char* argv_ptrs[PROCESS_MAX_ARGS];
+        uint8_t argv_slot_size = current_user_argv_slot_size();
 
-        if (edx > PROCESS_MAX_ARGS || copy_string_from_user(path, (const char*)ebx, sizeof(path)) != 0) {
-            frame->eax = (uint32_t)-1;
-        } else if (edx != 0U && copy_argv_from_user((const char* const*)ecx, edx, argv_copy, argv_ptrs) != 0) {
-            frame->eax = (uint32_t)-1;
-        } else if (process_request_exec_current(path, edx != 0U ? argv_ptrs : 0, (int)edx) != 0) {
-            frame->eax = (uint32_t)-1;
+        if (arg2 > PROCESS_MAX_ARGS || copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
+            syscall_set_result(frame, -1);
+        } else if (arg2 != 0U &&
+                   copy_argv_from_user(arg1, (uint32_t)arg2, argv_slot_size, argv_copy, argv_ptrs) != 0) {
+            syscall_set_result(frame, -1);
+        } else if (process_request_exec_current(path, arg2 != 0U ? argv_ptrs : 0, (int)arg2) != 0) {
+            syscall_set_result(frame, -1);
         } else {
             user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
-            frame->eax = 0;
+            syscall_set_result(frame, 0);
         }
-    } else if (eax == SYS_WAITPID) {
+    } else if (syscall_num == SYS_WAITPID) {
         process_t* current = process_current();
         int child_status = 0;
+        int status;
 
         if (current && current->kind == PROCESS_KIND_USER) {
-            if (process_request_wait_current((int)ebx, ecx, edx) != 0) {
-                frame->eax = (uint32_t)-1;
+            if (process_request_wait_current((int)arg0, arg1, (uint32_t)arg2) != 0) {
+                syscall_set_result(frame, -1);
             } else {
                 user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
-                frame->eax = 0;
+                syscall_set_result(frame, 0);
             }
         } else {
-            frame->eax = (uint32_t)process_waitpid_sync_current((int)ebx, edx, &child_status);
-            if ((int)frame->eax > 0 && ecx != 0U && copy_to_user((void*)ecx, &child_status, sizeof(child_status)) != 0) {
-                frame->eax = (uint32_t)-1;
+            status = process_waitpid_sync_current((int)arg0, (uint32_t)arg2, &child_status);
+            if (status > 0 && arg1 != 0U && copy_to_user((void*)arg1, &child_status, sizeof(child_status)) != 0) {
+                status = -1;
             }
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_KILL) {
-        frame->eax = (uint32_t)process_kill_pid((int)ebx);
-    } else if (eax == SYS_SLEEP) {
-        if (ebx == 0U) {
-            frame->eax = 0U;
-        } else if (process_request_sleep_current(ebx) != 0) {
-            frame->eax = (uint32_t)-1;
+    } else if (syscall_num == SYS_KILL) {
+        syscall_set_result(frame, process_kill_pid((int)arg0));
+    } else if (syscall_num == SYS_SLEEP) {
+        if (arg0 == 0U) {
+            syscall_set_result(frame, 0);
+        } else if (process_request_sleep_current((uint32_t)arg0) != 0) {
+            syscall_set_result(frame, -1);
         } else {
             user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
-            frame->eax = 0U;
+            syscall_set_result(frame, 0);
         }
-    } else if (eax == SYS_READ) {
+    } else if (syscall_num == SYS_READ) {
         process_t* current = process_current();
-        void* buffer;
+        int status;
 
-        if (!current) frame->eax = (uint32_t)-1;
-        else if (edx == 0U) frame->eax = 0U;
-        else {
-            buffer = malloc((size_t)edx);
-            if (!buffer) frame->eax = (uint32_t)-1;
+        if (!current) syscall_set_result(frame, -1);
+        else if (arg2 == 0U) syscall_set_result(frame, 0);
+        else if (current->kind == PROCESS_KIND_USER) {
+            if (process_request_read_current((int)arg0, arg1, (uint32_t)arg2) != 0) {
+                syscall_set_result(frame, -1);
+            } else {
+                user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
+                syscall_set_result(frame, 0);
+            }
+        } else {
+            void* buffer = malloc((size_t)arg2);
+
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                frame->eax = (uint32_t)fd_read(current, (int)ebx, buffer, edx);
-                if ((int)frame->eax > 0) {
+                status = fd_read(current, (int)arg0, buffer, (uint32_t)arg2);
+                if (status > 0) {
                     reactivate_current_user_space();
-                    if (copy_to_user((void*)ecx, buffer, frame->eax) != 0) frame->eax = (uint32_t)-1;
+                    if (copy_to_user((void*)arg1, buffer, (uint32_t)status) != 0) status = -1;
                 }
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_WRITE) {
+    } else if (syscall_num == SYS_WRITE) {
         process_t* current = process_current();
-        void* buffer;
+        int status;
 
-        if (!current) frame->eax = (uint32_t)-1;
-        else if (edx == 0U) frame->eax = 0U;
-        else {
-            buffer = malloc((size_t)edx);
-            if (!buffer) frame->eax = (uint32_t)-1;
+        if (!current) syscall_set_result(frame, -1);
+        else if (arg2 == 0U) syscall_set_result(frame, 0);
+        else if (current->kind == PROCESS_KIND_USER) {
+            if (process_request_write_current((int)arg0, arg1, (uint32_t)arg2) != 0) {
+                syscall_set_result(frame, -1);
+            } else {
+                user_kernel_return_mode = USER_KERNEL_RETURN_KERNEL;
+                syscall_set_result(frame, 0);
+            }
+        } else {
+            void* buffer = malloc((size_t)arg2);
+
+            if (!buffer) syscall_set_result(frame, -1);
             else {
-                frame->eax = copy_from_user(buffer, (const void*)ecx, edx) == 0
-                                 ? (uint32_t)fd_write(current, (int)ebx, buffer, edx)
-                                 : (uint32_t)-1;
+                status = copy_from_user(buffer, (const void*)arg1, (uint32_t)arg2) == 0
+                             ? fd_write(current, (int)arg0, buffer, (uint32_t)arg2)
+                             : -1;
+                syscall_set_result(frame, status);
                 free(buffer);
             }
         }
-    } else if (eax == SYS_CLOSE) {
-        frame->eax = (uint32_t)fd_close(process_current(), (int)ebx);
-    } else if (eax == SYS_DUP2) {
-        frame->eax = (uint32_t)fd_dup2(process_current(), (int)ebx, (int)ecx);
-    } else if (eax == SYS_PIPE) {
+    } else if (syscall_num == SYS_CLOSE) {
+        syscall_set_result(frame, fd_close(process_current(), (int)arg0));
+    } else if (syscall_num == SYS_DUP2) {
+        syscall_set_result(frame, fd_dup2(process_current(), (int)arg0, (int)arg1));
+    } else if (syscall_num == SYS_PIPE) {
         process_t* current = process_current();
         int pair[2];
+        int status;
 
-        if (!current) frame->eax = (uint32_t)-1;
-        else if (fd_pipe(current, pair) != 0) frame->eax = (uint32_t)-1;
+        if (!current) syscall_set_result(frame, -1);
+        else if (fd_pipe(current, pair) != 0) syscall_set_result(frame, -1);
         else {
             reactivate_current_user_space();
-            frame->eax = copy_to_user((void*)ebx, pair, sizeof(pair)) == 0 ? 0U : (uint32_t)-1;
-            if ((int)frame->eax != 0) {
+            status = copy_to_user((void*)arg0, pair, sizeof(pair)) == 0 ? 0 : -1;
+            if (status != 0) {
                 (void)fd_close(current, pair[0]);
                 (void)fd_close(current, pair[1]);
             }
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_PROCESS_SNAPSHOT) {
+    } else if (syscall_num == SYS_PROCESS_SNAPSHOT) {
         process_snapshot_entry_t entries[16];
+        int status;
 
-        if ((int)ecx <= 0 || ecx > (uint32_t)(sizeof(entries) / sizeof(entries[0]))) frame->eax = (uint32_t)-1;
+        if ((int)arg1 <= 0 || arg1 > (uintptr_t)(sizeof(entries) / sizeof(entries[0]))) {
+            syscall_set_result(frame, -1);
+        }
         else {
-            frame->eax = (uint32_t)process_snapshot(entries, (int)ecx);
-            if ((int)frame->eax > 0) {
+            status = process_snapshot(entries, (int)arg1);
+            if (status > 0) {
                 reactivate_current_user_space();
-                if (copy_to_user((void*)ebx, entries, (uint32_t)frame->eax * (uint32_t)sizeof(entries[0])) != 0) {
-                    frame->eax = (uint32_t)-1;
+                if (copy_to_user((void*)arg0, entries, (uint32_t)status * (uint32_t)sizeof(entries[0])) != 0) {
+                    status = -1;
                 }
             }
+            syscall_set_result(frame, status);
         }
-    } else if (eax == SYS_EXIT) {
-        if (usermode_schedule_current_process_exit((int)ebx) == 0) {
-            frame->eax = 0;
-        } else if (usermode_exit_current_task((int)ebx) == 0) {
-            frame->eax = 0;
+    } else if (syscall_num == SYS_EXIT) {
+        if (usermode_schedule_current_process_exit((int)arg0) == 0) {
+            syscall_set_result(frame, 0);
+        } else if (usermode_exit_current_task((int)arg0) == 0) {
+            syscall_set_result(frame, 0);
         } else {
-            process_exit_current((int)ebx);
+            process_exit_current((int)arg0);
         }
-    }
-
-    if (user_kernel_return_mode == USER_KERNEL_RETURN_KERNEL && user_current_task_frame_ptr) {
-        *user_current_task_frame_ptr = *frame;
     } else {
-        set_tss_stack(usermode_active_trap_stack_top());
+        syscall_set_result(frame, 0);
     }
-}
 
-extern void set_idt_gate(int n, uint32_t handler, uint8_t attributes);
-extern void isr_syscall();
-extern void isr_user_yield();
+    if (user_kernel_return_mode == USER_KERNEL_RETURN_KERNEL) {
+        process_t* current = process_current();
 
-void init_syscalls() {
-    set_idt_gate(0x80, (uint32_t)isr_syscall, 0xEF);
-    set_idt_gate(0x81, (uint32_t)isr_user_yield, 0xEF);
+        if (current && current->kind == PROCESS_KIND_USER) {
+            current->arch.user_frame = *frame;
+        }
+    } else {
+        arch_set_kernel_stack(usermode_active_trap_stack_top());
+    }
 }

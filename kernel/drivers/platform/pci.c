@@ -1,11 +1,11 @@
 #include "pci.h"
-#include "gdt.h"
 #include "io.h"
 #include "string.h"
 
 extern void vga_print(const char* str);
 extern void vga_println(const char* str);
 extern void vga_print_int(int num);
+extern void vga_print_int_hex(uint32_t n, char* buf);
 
 #define PCI_CONFIG_ADDRESS 0xCF8
 #define PCI_CONFIG_DATA    0xCFC

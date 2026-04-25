@@ -1,4 +1,6 @@
 #include <stdint.h>
+#include "paging.h"
+#include "serial.h"
 #include "vbe.h"
 #include "cpu.h"
 #include "string.h"
@@ -40,6 +42,7 @@ static uint8_t* backbuffer = (uint8_t*)0x800000;
 static uint8_t* wallpaper_buffer = (uint8_t*)0x1000000;
 static uint8_t* window_buffer = (uint8_t*)0x1800000;
 static uint8_t* composition_buffer = (uint8_t*)0x2000000;
+static uint8_t* framebuffer = 0;
 static int wallpaper_init = 0;
 
 volatile int gui_needs_redraw = 1;
@@ -47,8 +50,18 @@ volatile int gui_needs_redraw = 1;
 static uint8_t* current_target = (uint8_t*)0x800000;
 static uint32_t current_target_width = 0;
 
+static void vbe_memcpy_local(void* dest, const void* src, uint32_t count) {
+    memcpy(dest, src, count);
+}
+
+static uint8_t* vbe_frontbuffer(void) {
+    if (framebuffer) return framebuffer;
+    if (!mode_info->framebuffer) return 0;
+    return (uint8_t*)(uintptr_t)mode_info->framebuffer;
+}
+
 static void vbe_memcpy_fast(void* dest, const void* src, uint32_t count) {
-    vbe_memcpy(dest, (void*)src, count);
+    vbe_memcpy_local(dest, src, count);
 }
 
 static void vbe_memset_fast(void* dest, uint32_t color, uint32_t count_bytes) {
@@ -328,14 +341,16 @@ uint16_t snake_icon_bitmap[16] = {
 void* vbe_get_backbuffer() { return backbuffer; }
 
 void vbe_update() {
-    if (!mode_info->framebuffer) return;
+    uint8_t* frontbuffer = vbe_frontbuffer();
+
+    if (!frontbuffer) return;
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t row_size = mode_info->width * bpp_bytes;
     if (mode_info->pitch == row_size) {
-        vbe_memcpy_fast((void*)mode_info->framebuffer, backbuffer, mode_info->width * mode_info->height * bpp_bytes);
+        vbe_memcpy_fast(frontbuffer, backbuffer, mode_info->width * mode_info->height * bpp_bytes);
     } else {
         for(uint32_t y = 0; y < mode_info->height; y++) {
-            vbe_memcpy_fast((void*)(mode_info->framebuffer + y * mode_info->pitch), backbuffer + y * row_size, row_size);
+            vbe_memcpy_fast(frontbuffer + y * mode_info->pitch, backbuffer + y * row_size, row_size);
         }
     }
 }
@@ -346,6 +361,25 @@ void wait_vsync() {
 }
 
 void init_vbe() {
+    size_t framebuffer_size;
+
+    framebuffer = 0;
+    serial_write("[vbe] mode w=");
+    serial_write_hex32(mode_info->width);
+    serial_write(" h=");
+    serial_write_hex32(mode_info->height);
+    serial_write(" pitch=");
+    serial_write_hex32(mode_info->pitch);
+    serial_write(" bpp=");
+    serial_write_hex32(mode_info->bpp);
+    serial_write(" fb=");
+    serial_write_hex32(mode_info->framebuffer);
+    serial_write_char('\n');
+    if (mode_info->framebuffer && mode_info->width != 0 && mode_info->height != 0 && mode_info->pitch != 0) {
+        framebuffer_size = (size_t)mode_info->pitch * (size_t)mode_info->height;
+        framebuffer = (uint8_t*)paging_map_physical((uintptr_t)mode_info->framebuffer, framebuffer_size,
+                                                    PAGING_FLAG_WRITE | PAGING_FLAG_CACHE_DISABLE);
+    }
     current_target = backbuffer;
     current_target_width = mode_info->width;
     vbe_draw_wallpaper();
@@ -577,9 +611,12 @@ void vbe_draw_string(int x, int y, const char* s, uint32_t color) {
 void vbe_render_mouse(int x, int y) { vbe_draw_cursor(x, y); }
 
 void vbe_render_mouse_direct(int x, int y) {
+    uint8_t* frontbuffer = vbe_frontbuffer();
     uint8_t* old_target = current_target;
     uint32_t old_width = current_target_width;
-    current_target = (uint8_t*)mode_info->framebuffer;
+
+    if (!frontbuffer) return;
+    current_target = frontbuffer;
     current_target_width = mode_info->width;
     vbe_draw_cursor(x, y);
     current_target = old_target;
@@ -737,12 +774,15 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
 }
 
 void vbe_blit_rect(int x, int y, int w, int h, uint8_t* src_buf, uint32_t src_stride) {
+    uint8_t* frontbuffer = vbe_frontbuffer();
     uint32_t bpp = mode_info->bpp / 8;
+
+    if (!frontbuffer) return;
     for (int i = 0; i < h; i++) {
         if (y + i < 0 || (uint32_t)(y + i) >= mode_info->height) continue;
         if (x < 0 || (uint32_t)x >= mode_info->width) continue;
         uint32_t draw_w = (x + w > (int)mode_info->width) ? (mode_info->width - x) : w;
-        uint8_t* dest = (uint8_t*)mode_info->framebuffer + ((y + i) * mode_info->pitch + x * bpp);
+        uint8_t* dest = frontbuffer + ((y + i) * mode_info->pitch + x * bpp);
         uint8_t* src  = src_buf + ((y + i) * src_stride + x) * bpp;
         vbe_memcpy_fast(dest, src, draw_w * bpp);
     }
@@ -868,7 +908,7 @@ void vbe_draw_start_menu() {
     vbe_fill_rect_alpha(20, 286, 220, 1, UI_BORDER_SOFT, 255);
     vbe_draw_string(20, 306, "SESSION", UI_TEXT_SUBTLE);
     vbe_draw_string(20, 326, "narc desktop session", UI_ACCENT_ALT);
-    vbe_draw_string(20, 346, "x86 experimental desktop", UI_TEXT_MUTED);
+    vbe_draw_string(20, 346, "native desktop environment", UI_TEXT_MUTED);
 }
 void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
     (void)vertical;

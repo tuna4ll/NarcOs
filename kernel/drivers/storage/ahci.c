@@ -124,7 +124,7 @@ typedef struct {
     int irq_enabled;
     int initialized;
     uint8_t port_index;
-    uint32_t abar_phys;
+    uint64_t abar_phys;
     uint64_t sector_count;
     char model[41];
     pci_device_info_t controller;
@@ -220,10 +220,10 @@ static int ahci_setup_port(hba_port_t* port) {
     memset(ahci_state.fb_page, 0, 4096);
     memset(ahci_state.cmdtbl_page, 0, 4096);
 
-    port->clb = (uint32_t)ahci_state.clb_page;
-    port->clbu = 0;
-    port->fb = (uint32_t)ahci_state.fb_page;
-    port->fbu = 0;
+    port->clb = (uint32_t)((uintptr_t)ahci_state.clb_page & 0xFFFFFFFFU);
+    port->clbu = (uint32_t)(((uint64_t)(uintptr_t)ahci_state.clb_page >> 32) & 0xFFFFFFFFU);
+    port->fb = (uint32_t)((uintptr_t)ahci_state.fb_page & 0xFFFFFFFFU);
+    port->fbu = (uint32_t)(((uint64_t)(uintptr_t)ahci_state.fb_page >> 32) & 0xFFFFFFFFU);
     port->is = 0xFFFFFFFFU;
     port->serr = 0xFFFFFFFFU;
     port->ie = 0;
@@ -231,8 +231,8 @@ static int ahci_setup_port(hba_port_t* port) {
     cmd_header = (hba_cmd_header_t*)ahci_state.clb_page;
     memset(cmd_header, 0, 4096);
     cmd_header[0].prdtl = 1;
-    cmd_header[0].ctba = (uint32_t)ahci_state.cmdtbl_page;
-    cmd_header[0].ctbau = 0;
+    cmd_header[0].ctba = (uint32_t)((uintptr_t)ahci_state.cmdtbl_page & 0xFFFFFFFFU);
+    cmd_header[0].ctbau = (uint32_t)(((uint64_t)(uintptr_t)ahci_state.cmdtbl_page >> 32) & 0xFFFFFFFFU);
 
     return ahci_start_port(port);
 }
@@ -266,8 +266,10 @@ static int ahci_exec_command(uint8_t command, uint64_t lba, uint16_t sector_coun
     header[0].prdbc = 0;
 
     if (byte_count != 0U) {
-        table->prdt_entry[0].dba = (uint32_t)buffer;
-        table->prdt_entry[0].dbau = 0;
+        uint64_t buffer_addr = (uint64_t)(uintptr_t)buffer;
+
+        table->prdt_entry[0].dba = (uint32_t)(buffer_addr & 0xFFFFFFFFU);
+        table->prdt_entry[0].dbau = (uint32_t)((buffer_addr >> 32) & 0xFFFFFFFFU);
         table->prdt_entry[0].reserved0 = 0;
         table->prdt_entry[0].dbc = ((byte_count - 1U) & 0x003FFFFFU) | (1U << 31);
     }
@@ -335,7 +337,7 @@ int ahci_init(void) {
 
     if (ahci_find_controller(&ahci_state.controller) != 0) return -1;
     if (pci_decode_bar(&ahci_state.controller, 5, &abar_bar) != 0) return -1;
-    if (abar_bar.is_io || abar_bar.base > 0xFFFFFFFFULL) return -1;
+    if (abar_bar.is_io) return -1;
 
     pci_command = pci_read16(ahci_state.controller.bus, ahci_state.controller.slot,
                              ahci_state.controller.func, 0x04);
@@ -350,7 +352,7 @@ int ahci_init(void) {
         (void)pci_decode_irq(&ahci_state.controller, &ahci_state.irq_route);
     }
 
-    ahci_state.abar_phys = (uint32_t)abar_bar.base;
+    ahci_state.abar_phys = abar_bar.base;
     ahci_state.abar = (hba_mem_t*)paging_map_physical(ahci_state.abar_phys, 0x2000U,
                                                       PAGING_FLAG_WRITE | PAGING_FLAG_CACHE_DISABLE);
     if (!ahci_state.abar) return -1;
@@ -377,7 +379,7 @@ int ahci_init(void) {
 
     serial_write_line("[storage] ahci controller online");
     serial_write("[storage] ahci abar=");
-    serial_write_hex32(ahci_state.abar_phys);
+    serial_write_hex64(ahci_state.abar_phys);
     serial_write_char('\n');
     ahci_log_port("[storage] ahci port=", ahci_state.port_index);
     return 0;

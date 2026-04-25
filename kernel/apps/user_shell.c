@@ -62,7 +62,7 @@ static const char shell_help_lines[][72] USER_RODATA = {
     "  ping    - Ping an IPv4 host",
     "  ntp     - Query UTC time from an NTP server",
     "  http    - Fetch HTTP/1.0 response (http <host> [path])",
-    "  https   - Fetch HTTPS response (https https://host/path)",
+    "  https   - Fetch HTTPS response (https https://pinned-host/path)",
     "  netdemo - Run Ring 3 HTTP demo (netdemo <host> [path])",
     "  fetch   - Download HTTP/HTTPS body to a file",
     "  tls_test - Run TLS userland self-tests",
@@ -663,7 +663,7 @@ static USER_CODE int shell_run_cd(const char* arg) {
         shell_print_usage("Usage: cd <name>");
         return -1;
     }
-    if (user_syscall1(SYS_CHDIR, (uint32_t)arg) != 0) {
+    if (user_syscall1(SYS_CHDIR, (uintptr_t)arg) != 0) {
         shell_print_error("error: Directory not found.");
         return -1;
     }
@@ -952,11 +952,11 @@ static USER_CODE int shell_run_https(user_shell_state_t* state, const char* arg)
 
     if (!state) return -1;
     if (!arg || arg[0] == '\0') {
-        shell_print_usage("Usage: https https://<host>/<path>");
+        shell_print_usage("Usage: https https://<pinned-host>/<path>");
         return -1;
     }
     if (shell_parse_http_target(arg, host, sizeof(host), path, sizeof(path)) != 0) {
-        shell_print_usage("Usage: https https://<host>/<path>");
+        shell_print_usage("Usage: https https://<pinned-host>/<path>");
         return -1;
     }
     status = user_https_fetch_text(host, path, state->scratch, sizeof(state->scratch), &state->http_result);
@@ -1026,13 +1026,13 @@ static USER_CODE int shell_run_fetch(user_shell_state_t* state, const char* arg)
     if (!state) return -1;
     if (!arg || arg[0] == '\0') {
         shell_print_usage("Usage: fetch <host> [path] <output-file>");
-        shell_print_usage("   or: fetch https://<host>/<path> <output-file>");
+        shell_print_usage("   or: fetch https://<pinned-host>/<path> <output-file>");
         return -1;
     }
     if (shell_parse_fetch_args(arg, host, sizeof(host), path, sizeof(path),
                                output_path, sizeof(output_path), &use_https) != 0) {
         shell_print_usage("Usage: fetch <host> [path] <output-file>");
-        shell_print_usage("   or: fetch https://<host>/<path> <output-file>");
+        shell_print_usage("   or: fetch https://<pinned-host>/<path> <output-file>");
         return -1;
     }
 

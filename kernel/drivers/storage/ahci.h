@@ -8,7 +8,7 @@ typedef struct {
     int active;
     int irq_enabled;
     uint8_t port_index;
-    uint32_t abar_phys;
+    uint64_t abar_phys;
     uint64_t sector_count;
     char model[41];
     pci_device_info_t controller;

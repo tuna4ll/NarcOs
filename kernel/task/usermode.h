@@ -2,8 +2,8 @@
 #define USERMODE_H
 
 #include <stdint.h>
+#include "arch.h"
 #include "fs.h"
-#include "gdt.h"
 #include "net.h"
 #include "syscall.h"
 #include "user_tls.h"
@@ -158,7 +158,7 @@ int run_user_shell_command(const char* command);
 int usermode_prepare_process_context(process_t* proc);
 int usermode_run_external_process(process_t* proc);
 int usermode_schedule_current_process_exit(int exit_code);
-uint32_t usermode_active_trap_stack_top(void);
+uintptr_t usermode_active_trap_stack_top(void);
 void stop_user_snake();
 int user_snake_running();
 int user_narcpad_running();
@@ -171,7 +171,7 @@ void request_user_narcpad_open(const char* path);
 void queue_user_narcpad_event(int type, int value);
 void queue_user_settings_event(int type, int value);
 void queue_user_explorer_event(int type, int value);
-void user_yield_handler(trap_frame_t* frame);
+void user_yield_handler(arch_trap_frame_t* frame);
 void usermode_debug_dump(const char* tag);
 int usermode_exit_current_task(int exit_code);
 
@@ -189,13 +189,12 @@ extern user_explorer_state_t* user_explorer_state_ptr;
 #define user_narcpad_state  (*user_narcpad_state_ptr)
 #define user_settings_state (*user_settings_state_ptr)
 #define user_explorer_state (*user_explorer_state_ptr)
-extern uint32_t user_kernel_resume_esp;
-extern uint32_t user_kernel_ebx;
-extern uint32_t user_kernel_esi;
-extern uint32_t user_kernel_edi;
-extern uint32_t user_kernel_ebp;
-extern uint32_t user_kernel_return_mode;
-extern trap_frame_t* user_current_task_frame_ptr;
-extern void run_user_task(trap_frame_t* frame);
+extern uintptr_t user_kernel_resume_esp;
+extern uintptr_t user_kernel_ebx;
+extern uintptr_t user_kernel_esi;
+extern uintptr_t user_kernel_edi;
+extern uintptr_t user_kernel_ebp;
+extern uintptr_t user_kernel_return_mode;
+extern arch_trap_frame_t* user_current_task_frame_ptr;
 
 #endif
