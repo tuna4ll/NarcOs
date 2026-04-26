@@ -32,6 +32,8 @@ extern const uint8_t _binary_obj_x86_64_user_bin_proc_test_start[];
 extern const uint8_t _binary_obj_x86_64_user_bin_proc_test_end[];
 extern const uint8_t _binary_obj_x86_64_user_bin_pipe_test_start[];
 extern const uint8_t _binary_obj_x86_64_user_bin_pipe_test_end[];
+extern const uint8_t _binary_obj_x86_64_user_bin_neofetch_start[];
+extern const uint8_t _binary_obj_x86_64_user_bin_neofetch_end[];
 #else
 extern const uint8_t _binary_obj_i386_user_bin_hello_start[];
 extern const uint8_t _binary_obj_i386_user_bin_hello_end[];
@@ -47,6 +49,8 @@ extern const uint8_t _binary_obj_i386_user_bin_proc_test_start[];
 extern const uint8_t _binary_obj_i386_user_bin_proc_test_end[];
 extern const uint8_t _binary_obj_i386_user_bin_pipe_test_start[];
 extern const uint8_t _binary_obj_i386_user_bin_pipe_test_end[];
+extern const uint8_t _binary_obj_i386_user_bin_neofetch_start[];
+extern const uint8_t _binary_obj_i386_user_bin_neofetch_end[];
 #endif
 
 typedef struct {
@@ -63,7 +67,8 @@ static const fs_packaged_binary_t fs_packaged_binaries[] = {
     { "/bin/echo", _binary_obj_x86_64_user_bin_echo_start, _binary_obj_x86_64_user_bin_echo_end },
     { "/bin/kill", _binary_obj_x86_64_user_bin_kill_start, _binary_obj_x86_64_user_bin_kill_end },
     { "/bin/proc_test", _binary_obj_x86_64_user_bin_proc_test_start, _binary_obj_x86_64_user_bin_proc_test_end },
-    { "/bin/pipe_test", _binary_obj_x86_64_user_bin_pipe_test_start, _binary_obj_x86_64_user_bin_pipe_test_end }
+    { "/bin/pipe_test", _binary_obj_x86_64_user_bin_pipe_test_start, _binary_obj_x86_64_user_bin_pipe_test_end },
+    { "/bin/neofetch", _binary_obj_x86_64_user_bin_neofetch_start, _binary_obj_x86_64_user_bin_neofetch_end }
 #else
     { "/bin/hello", _binary_obj_i386_user_bin_hello_start, _binary_obj_i386_user_bin_hello_end },
     { "/bin/ps", _binary_obj_i386_user_bin_ps_start, _binary_obj_i386_user_bin_ps_end },
@@ -71,7 +76,8 @@ static const fs_packaged_binary_t fs_packaged_binaries[] = {
     { "/bin/echo", _binary_obj_i386_user_bin_echo_start, _binary_obj_i386_user_bin_echo_end },
     { "/bin/kill", _binary_obj_i386_user_bin_kill_start, _binary_obj_i386_user_bin_kill_end },
     { "/bin/proc_test", _binary_obj_i386_user_bin_proc_test_start, _binary_obj_i386_user_bin_proc_test_end },
-    { "/bin/pipe_test", _binary_obj_i386_user_bin_pipe_test_start, _binary_obj_i386_user_bin_pipe_test_end }
+    { "/bin/pipe_test", _binary_obj_i386_user_bin_pipe_test_start, _binary_obj_i386_user_bin_pipe_test_end },
+    { "/bin/neofetch", _binary_obj_i386_user_bin_neofetch_start, _binary_obj_i386_user_bin_neofetch_end }
 #endif
 };
 

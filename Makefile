@@ -12,7 +12,7 @@ USER_DIR = user
 ASSET_DIR = assets
 
 KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
-USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test
+USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test neofetch
 
 KERNEL_INCLUDE_FLAGS = $(addprefix -I,$(KERNEL_DIRS))
 COMMON_CFLAGS = -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -fno-strict-aliasing -Wall -Wextra
