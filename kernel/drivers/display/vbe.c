@@ -50,6 +50,23 @@ volatile int gui_needs_redraw = 1;
 static uint8_t* current_target = (uint8_t*)0x800000;
 static uint32_t current_target_width = 0;
 
+void vbe_put_pixel_to(uint8_t* buffer, uint32_t buf_width, int x, int y, uint32_t color);
+
+#if defined(__x86_64__)
+extern const uint8_t _binary_obj_x86_64_assets_bg_rgb_start[];
+extern const uint8_t _binary_obj_x86_64_assets_bg_rgb_end[];
+#else
+extern const uint8_t _binary_obj_i386_assets_bg_rgb_start[];
+extern const uint8_t _binary_obj_i386_assets_bg_rgb_end[];
+#endif
+
+typedef struct {
+    const uint8_t* pixels;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+} embedded_ppm_t;
+
 static void vbe_memcpy_local(void* dest, const void* src, uint32_t count) {
     memcpy(dest, src, count);
 }
@@ -70,6 +87,113 @@ static void vbe_memset_fast(void* dest, uint32_t color, uint32_t count_bytes) {
     for (uint32_t i = 0; i < count; i++) {
         pixels[i] = color;
     }
+}
+
+static int load_embedded_bg(embedded_ppm_t* out) {
+    const uint8_t* start;
+    const uint8_t* end;
+    uint32_t width;
+    uint32_t height;
+    uint32_t expected_size;
+
+    if (!out) return 0;
+#if defined(__x86_64__)
+    start = _binary_obj_x86_64_assets_bg_rgb_start;
+    end = _binary_obj_x86_64_assets_bg_rgb_end;
+    width = 400U;
+    height = 225U;
+#else
+    start = _binary_obj_i386_assets_bg_rgb_start;
+    end = _binary_obj_i386_assets_bg_rgb_end;
+    width = 240U;
+    height = 135U;
+#endif
+    expected_size = width * height * 3U;
+    if (!start || !end || end <= start) return 0;
+    if ((uint32_t)(end - start) < expected_size) return 0;
+
+    out->pixels = start;
+    out->width = width;
+    out->height = height;
+    out->stride = width * 3U;
+    return 1;
+}
+
+static void wallpaper_draw_fallback_gradient(void) {
+    for (uint32_t y = 0; y < mode_info->height; y++) {
+        for (uint32_t x = 0; x < mode_info->width; x++) {
+            int ratio = (int)((y * 255U) / mode_info->height);
+            uint32_t color = vbe_mix_color(UI_DESKTOP_BOTTOM, UI_DESKTOP_TOP, 255 - ratio);
+            if (((x + y) % 47U) == 0) {
+                color = vbe_mix_color(UI_ACCENT_DEEP, color, 36);
+            } else if (((x * 3U + y) % 131U) == 0) {
+                color = vbe_mix_color(UI_ACCENT_ALT, color, 18);
+            } else if (y > mode_info->height / 2 && ((x + y * 2U) % 173U) < 2U) {
+                color = vbe_mix_color(UI_DESKTOP_GLOW, color, 22);
+            }
+            vbe_put_pixel_to(wallpaper_buffer, mode_info->width, x, y, color);
+        }
+    }
+}
+
+static uint32_t wallpaper_sample_bilinear_rgb(const embedded_ppm_t* image, uint32_t x_fp, uint32_t y_fp) {
+    uint32_t x0 = x_fp >> 16;
+    uint32_t y0 = y_fp >> 16;
+    uint32_t fx = x_fp & 0xFFFFU;
+    uint32_t fy = y_fp & 0xFFFFU;
+    uint32_t x1 = (x0 + 1U < image->width) ? x0 + 1U : x0;
+    uint32_t y1 = (y0 + 1U < image->height) ? y0 + 1U : y0;
+    const uint8_t* p00 = image->pixels + y0 * image->stride + x0 * 3U;
+    const uint8_t* p10 = image->pixels + y0 * image->stride + x1 * 3U;
+    const uint8_t* p01 = image->pixels + y1 * image->stride + x0 * 3U;
+    const uint8_t* p11 = image->pixels + y1 * image->stride + x1 * 3U;
+    uint32_t inv_fx = 65536U - fx;
+    uint32_t inv_fy = 65536U - fy;
+    uint64_t w00 = (uint64_t)inv_fx * (uint64_t)inv_fy;
+    uint64_t w10 = (uint64_t)fx * (uint64_t)inv_fy;
+    uint64_t w01 = (uint64_t)inv_fx * (uint64_t)fy;
+    uint64_t w11 = (uint64_t)fx * (uint64_t)fy;
+    uint32_t r = (uint32_t)((p00[0] * w00 + p10[0] * w10 + p01[0] * w01 + p11[0] * w11) >> 32);
+    uint32_t g = (uint32_t)((p00[1] * w00 + p10[1] * w10 + p01[1] * w01 + p11[1] * w11) >> 32);
+    uint32_t b = (uint32_t)((p00[2] * w00 + p10[2] * w10 + p01[2] * w01 + p11[2] * w11) >> 32);
+    return (r << 16) | (g << 8) | b;
+}
+
+static int wallpaper_draw_embedded_image(void) {
+    embedded_ppm_t image;
+    uint32_t src_w;
+    uint32_t src_h;
+    uint32_t dst_w;
+    uint32_t dst_h;
+    uint32_t x_step;
+    uint32_t y_step;
+
+    if (!load_embedded_bg(&image)) return 0;
+    src_w = image.width;
+    src_h = image.height;
+    dst_w = mode_info->width;
+    dst_h = mode_info->height;
+    if (src_w == 0U || src_h == 0U || dst_w == 0U || dst_h == 0U) return 0;
+
+    x_step = (dst_w > 1U) ? (((src_w - 1U) << 16) / (dst_w - 1U)) : 0U;
+    y_step = (dst_h > 1U) ? (((src_h - 1U) << 16) / (dst_h - 1U)) : 0U;
+    if (x_step == 0U) x_step = 1U;
+    if (y_step == 0U) y_step = 1U;
+
+    for (uint32_t y = 0; y < dst_h; y++) {
+        uint32_t sy_fp = y * y_step;
+        uint32_t max_y_fp = (image.height - 1U) << 16;
+        if (sy_fp > max_y_fp) sy_fp = max_y_fp;
+        for (uint32_t x = 0; x < dst_w; x++) {
+            uint32_t sx_fp = x * x_step;
+            uint32_t max_x_fp = (image.width - 1U) << 16;
+            uint32_t color;
+            if (sx_fp > max_x_fp) sx_fp = max_x_fp;
+            color = wallpaper_sample_bilinear_rgb(&image, sx_fp, sy_fp);
+            vbe_put_pixel_to(wallpaper_buffer, mode_info->width, (int)x, (int)y, color);
+        }
+    }
+    return 1;
 }
 
 static void vbe_alpha_blend_fast(void* dest, uint32_t color, uint32_t alpha, uint32_t count_pixels) {
@@ -468,29 +592,7 @@ void vbe_draw_wallpaper() {
     uint32_t bpp_bytes = mode_info->bpp / 8;
     uint32_t screen_size = mode_info->width * mode_info->height * bpp_bytes;
     if (!wallpaper_init) {
-        for (uint32_t y = 0; y < mode_info->height; y++) {
-            for (uint32_t x = 0; x < mode_info->width; x++) {
-                int ratio = (int)((y * 255U) / mode_info->height);
-                uint32_t color = vbe_mix_color(UI_DESKTOP_BOTTOM, UI_DESKTOP_TOP, 255 - ratio);
-                if (((x + y) % 47U) == 0) {
-                    color = vbe_mix_color(UI_ACCENT_DEEP, color, 36);
-                } else if (((x * 3U + y) % 131U) == 0) {
-                    color = vbe_mix_color(UI_ACCENT_ALT, color, 18);
-                } else if (y > mode_info->height / 2 && ((x + y * 2U) % 173U) < 2U) {
-                    color = vbe_mix_color(UI_DESKTOP_GLOW, color, 22);
-                }
-                vbe_put_pixel_to(wallpaper_buffer, mode_info->width, x, y, color);
-            }
-        }
-        uint8_t* old_target = current_target;
-        uint32_t old_width = current_target_width;
-        vbe_set_target(wallpaper_buffer, mode_info->width);
-        vbe_fill_rect_alpha(0, 0, mode_info->width, 90, 0x04080D, 120);
-        vbe_fill_rect_alpha(0, mode_info->height - 120, mode_info->width, 120, 0x03060A, 110);
-        vbe_fill_rect_alpha(48, 54, 360, 360, UI_ACCENT_DEEP, 18);
-        vbe_fill_rect_alpha(72, 78, 320, 320, UI_ACCENT_ALT, 10);
-        vbe_fill_rect_alpha(mode_info->width - 420, 110, 300, 300, UI_ACCENT_DEEP, 12);
-        vbe_set_target(old_target, old_width);
+        if (!wallpaper_draw_embedded_image()) wallpaper_draw_fallback_gradient();
         wallpaper_init = 1;
     }
     vbe_memcpy_fast(backbuffer, wallpaper_buffer, screen_size);

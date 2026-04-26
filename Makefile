@@ -9,6 +9,7 @@ OBJ_DIR  = obj
 BOOT_DIR = boot
 KERN_DIR = kernel
 USER_DIR = user
+ASSET_DIR = assets
 
 KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
 USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test
@@ -29,8 +30,10 @@ I386_ASM_OBJECTS = $(patsubst $(KERN_DIR)/%.asm,$(I386_OBJ_DIR)/%.o,$(I386_ASM_S
 I386_USER_PROGRAM_OBJECTS = $(patsubst %,$(I386_OBJ_DIR)/user/programs/%.o,$(USER_PROGRAMS))
 I386_USER_BINARIES = $(patsubst %,$(I386_OBJ_DIR)/user/bin/%,$(USER_PROGRAMS))
 I386_USER_EMBED_OBJECTS = $(patsubst %,$(I386_OBJ_DIR)/user/embed/%.o,$(USER_PROGRAMS))
+I386_ASSET_BG_RGB = $(I386_OBJ_DIR)/assets/bg.rgb
+I386_ASSET_BG_OBJECT = $(I386_OBJ_DIR)/assets/bg.o
 I386_USER_CRT_OBJECT = $(I386_OBJ_DIR)/user/crt0.o
-I386_KERNEL_OBJECTS = $(I386_ASM_OBJECTS) $(I386_C_OBJECTS) $(I386_USER_EMBED_OBJECTS)
+I386_KERNEL_OBJECTS = $(I386_ASM_OBJECTS) $(I386_C_OBJECTS) $(I386_USER_EMBED_OBJECTS) $(I386_ASSET_BG_OBJECT)
 I386_BOOT_BIN = $(I386_OBJ_DIR)/boot/boot.bin
 I386_STAGE2_BIN = $(I386_OBJ_DIR)/boot/stage2.bin
 I386_KERNEL_BIN = $(I386_OBJ_DIR)/kernel.bin
@@ -69,8 +72,10 @@ X86_64_USER_PROGRAMS = $(USER_PROGRAMS)
 X86_64_USER_PROGRAM_OBJECTS = $(patsubst %,$(X86_64_OBJ_DIR)/user/programs/%.o,$(X86_64_USER_PROGRAMS))
 X86_64_USER_BINARIES = $(patsubst %,$(X86_64_OBJ_DIR)/user/bin/%,$(X86_64_USER_PROGRAMS))
 X86_64_USER_EMBED_OBJECTS = $(patsubst %,$(X86_64_OBJ_DIR)/user/embed/%.o,$(X86_64_USER_PROGRAMS))
+X86_64_ASSET_BG_RGB = $(X86_64_OBJ_DIR)/assets/bg.rgb
+X86_64_ASSET_BG_OBJECT = $(X86_64_OBJ_DIR)/assets/bg.o
 X86_64_USER_CRT_OBJECT = $(X86_64_OBJ_DIR)/user/crt0_x86_64.o
-X86_64_KERNEL_OBJECTS = $(X86_64_ASM_OBJECTS) $(X86_64_C_OBJECTS) $(X86_64_USER_EMBED_OBJECTS)
+X86_64_KERNEL_OBJECTS = $(X86_64_ASM_OBJECTS) $(X86_64_C_OBJECTS) $(X86_64_USER_EMBED_OBJECTS) $(X86_64_ASSET_BG_OBJECT)
 X86_64_KERNEL_ELF = $(X86_64_OBJ_DIR)/kernel64.elf
 X86_64_KERNEL_BIN = $(X86_64_OBJ_DIR)/kernel64.bin
 X86_64_BOOT_BIN = $(X86_64_OBJ_DIR)/boot/boot.bin
@@ -141,6 +146,14 @@ $(I386_OBJ_DIR)/user/embed/%.o: $(I386_OBJ_DIR)/user/bin/%
 	@mkdir -p $(dir $@)
 	$(LD) -r -b binary -m elf_i386 $< -o $@
 
+$(I386_ASSET_BG_RGB): $(ASSET_DIR)/bg.png
+	@mkdir -p $(dir $@)
+	magick $< -resize 240x135^ -gravity center -extent 240x135 -alpha off -depth 8 rgb:$@
+
+$(I386_ASSET_BG_OBJECT): $(I386_ASSET_BG_RGB)
+	@mkdir -p $(dir $@)
+	$(LD) -r -b binary -m elf_i386 $< -o $@
+
 $(I386_KERNEL_BIN): $(I386_KERNEL_OBJECTS) linker_i386.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(I386_LDFLAGS) -o $@ $(I386_KERNEL_OBJECTS)
@@ -178,6 +191,14 @@ $(X86_64_OBJ_DIR)/user/bin/%: $(X86_64_USER_CRT_OBJECT) $(X86_64_OBJ_DIR)/user/p
 	@echo "[OK] x86_64 user: $@ ($$(wc -c < $@) byte)"
 
 $(X86_64_OBJ_DIR)/user/embed/%.o: $(X86_64_OBJ_DIR)/user/bin/%
+	@mkdir -p $(dir $@)
+	$(LD) -r -b binary -m elf_x86_64 $< -o $@
+
+$(X86_64_ASSET_BG_RGB): $(ASSET_DIR)/bg.png
+	@mkdir -p $(dir $@)
+	magick $< -resize 400x225^ -gravity center -extent 400x225 -alpha off -depth 8 rgb:$@
+
+$(X86_64_ASSET_BG_OBJECT): $(X86_64_ASSET_BG_RGB)
 	@mkdir -p $(dir $@)
 	$(LD) -r -b binary -m elf_x86_64 $< -o $@
 
