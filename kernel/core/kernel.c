@@ -1347,6 +1347,87 @@ static int smoke_test_invalid_exec_rejected(void) {
     return 0;
 }
 
+static int smoke_test_large_file_roundtrip(void) {
+    static const char path[] = "/home/user/Desktop/smoke-big.bin";
+    const uint32_t total_size = 256U * 1024U;
+    const uint32_t chunk_size = 4096U;
+    uint8_t* write_buf;
+    uint8_t* read_buf;
+    uint32_t offset = 0U;
+    int status = -1;
+
+    write_buf = (uint8_t*)malloc(chunk_size);
+    read_buf = (uint8_t*)malloc(chunk_size);
+    if (!write_buf || !read_buf) {
+        serial_write_line("[smoke] large-file alloc failed");
+        goto cleanup;
+    }
+
+    if (fs_write_file_raw(path, 0, 0U) < 0) {
+        serial_write_line("[smoke] large-file create failed");
+        goto cleanup;
+    }
+
+    while (offset < total_size) {
+        uint32_t chunk = total_size - offset;
+
+        if (chunk > chunk_size) chunk = chunk_size;
+        for (uint32_t i = 0; i < chunk; i++) {
+            write_buf[i] = (uint8_t)(((offset + i) * 37U + 11U) & 0xFFU);
+        }
+        if (fs_write_file_raw_at(path, write_buf, offset, chunk) != (int)chunk) {
+            serial_write("[smoke] large-file write failed offset=");
+            serial_write_hex32(offset);
+            serial_write(" chunk=");
+            serial_write_hex32(chunk);
+            serial_write_char('\n');
+            goto cleanup;
+        }
+        offset += chunk;
+    }
+
+    offset = 0U;
+    while (offset < total_size) {
+        uint32_t chunk = total_size - offset;
+        int read_len;
+
+        if (chunk > chunk_size) chunk = chunk_size;
+        read_len = fs_read_file_raw(path, read_buf, offset, chunk);
+        if (read_len != (int)chunk) {
+            serial_write("[smoke] large-file read failed offset=");
+            serial_write_hex32(offset);
+            serial_write(" chunk=");
+            serial_write_hex32(chunk);
+            serial_write(" read=");
+            serial_write_hex32((uint32_t)read_len);
+            serial_write_char('\n');
+            goto cleanup;
+        }
+        for (uint32_t i = 0; i < chunk; i++) {
+            uint8_t expected = (uint8_t)(((offset + i) * 37U + 11U) & 0xFFU);
+            if (read_buf[i] != expected) {
+                serial_write("[smoke] large-file mismatch offset=");
+                serial_write_hex32(offset + i);
+                serial_write(" got=");
+                serial_write_hex32((uint32_t)read_buf[i]);
+                serial_write(" expected=");
+                serial_write_hex32((uint32_t)expected);
+                serial_write_char('\n');
+                goto cleanup;
+            }
+        }
+        offset += chunk;
+    }
+
+    status = 0;
+
+cleanup:
+    if (write_buf) free(write_buf);
+    if (read_buf) free(read_buf);
+    (void)fs_delete_file(path);
+    return status;
+}
+
 #if UINTPTR_MAX > 0xFFFFFFFFU
 static int smoke_test_page_fault_reporting(void) {
     x64_expect_fault(14U, (uint64_t)(uintptr_t)x64_test_page_fault_resume,
@@ -1436,6 +1517,11 @@ static void smoke_process_main(void* arg) {
         failed = 1;
         smoke_log_result("invalid-exec", 0);
     } else smoke_log_result("invalid-exec", 1);
+
+    if (smoke_test_large_file_roundtrip() != 0) {
+        failed = 1;
+        smoke_log_result("large-file", 0);
+    } else smoke_log_result("large-file", 1);
 
 #if UINTPTR_MAX > 0xFFFFFFFFU
     if (smoke_test_page_fault_reporting() != 0) {
@@ -2120,12 +2206,13 @@ void kmain() {
     smoke_pid = -1;
     if (screen_is_graphics_enabled()) {
         desktop_pid = process_create_kernel("desktop", desktop_process_entry, 0);
+        smoke_pid = process_create_kernel("smoke", smoke_process_entry, 0);
     } else {
         console_pid = process_create_kernel("console", console_process_entry, 0);
         smoke_pid = process_create_kernel("smoke", smoke_process_entry, 0);
     }
     service_pid = process_create_kernel("service", service_process_main, 0);
-    if ((screen_is_graphics_enabled() && desktop_pid < 0) ||
+    if ((screen_is_graphics_enabled() && (desktop_pid < 0 || smoke_pid < 0)) ||
         (!screen_is_graphics_enabled() && (console_pid < 0 || smoke_pid < 0)) ||
         service_pid < 0) {
         boot_fatal("Scheduler bootstrap failed.",

@@ -51,7 +51,7 @@ static void editor_draw_screen() {
     editor_update_cursor();
 }
 static void editor_save_file() {
-    char file_data[MAX_FILE_SIZE + 1] = {0};
+    char file_data[MAX_TEXT_FILE_SIZE + 1] = {0};
     int data_idx = 0;
     for (int r = 0; r < VGA_ROWS - 2; r++) {
         int last_char = -1;
@@ -62,12 +62,12 @@ static void editor_save_file() {
             }
         }
         for (int c = 0; c <= last_char; c++) {
-            if (data_idx < MAX_FILE_SIZE - 1) {
+            if (data_idx < (int)MAX_TEXT_FILE_SIZE - 1) {
                 file_data[data_idx++] = editor_buffer[r][c];
             }
         }
         if (last_char >= 0 || r < cursor_row) {
-             if (data_idx < MAX_FILE_SIZE - 1) {
+             if (data_idx < (int)MAX_TEXT_FILE_SIZE - 1) {
                  file_data[data_idx++] = '\n';
              }
         }
@@ -77,7 +77,7 @@ static void editor_save_file() {
     editor_print_string(60, VGA_ROWS - 1, "[ Saved ]", 0x72);
 }
 static void editor_load_file() {
-    char file_data[MAX_FILE_SIZE + 1] = {0};
+    char file_data[MAX_TEXT_FILE_SIZE + 1] = {0};
     for (int r = 0; r < VGA_ROWS - 2; r++) {
         for (int c = 0; c < VGA_COLS; c++) {
             editor_buffer[r][c] = ' ';

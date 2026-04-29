@@ -21,6 +21,7 @@
 #define KERNEL_VM_WINDOW_PDE  (KERNEL_VM_WINDOW_BASE / LARGE_PAGE_SIZE)
 #define KERNEL_VM_PAGE_COUNT  (KERNEL_VM_WINDOW_SIZE / PAGE_SIZE)
 #define USER_DATA_WINDOW_PDE  (USER_DATA_WINDOW_BASE / LARGE_PAGE_SIZE)
+#define USER_DATA_WINDOW_PT_COUNT (USER_DATA_WINDOW_SIZE / LARGE_PAGE_SIZE)
 #define USER_DATA_PAGE_COUNT  (USER_DATA_WINDOW_SIZE / PAGE_SIZE)
 
 #define E820_COUNT_PTR ((uint16_t*)0x5000)
@@ -47,7 +48,7 @@ static uint32_t low_identity_page_table[1024] __attribute__((aligned(4096)));
 static uint32_t kernel_page_directory[1024] __attribute__((aligned(4096)));
 static uint32_t kernel_stack_page_table[1024] __attribute__((aligned(4096)));
 static uint32_t kernel_vm_page_table[1024] __attribute__((aligned(4096)));
-static uint32_t user_data_page_table[1024] __attribute__((aligned(4096)));
+static uint32_t user_data_page_tables[USER_DATA_WINDOW_PT_COUNT][1024] __attribute__((aligned(4096)));
 static uint8_t frame_bitmap[BITMAP_SIZE];
 static uint8_t kernel_stack_slot_bitmap[KERNEL_STACK_PAGE_COUNT / 8U];
 static uint8_t kernel_vm_slot_bitmap[KERNEL_VM_PAGE_COUNT / 8U];
@@ -208,9 +209,11 @@ static void init_kernel_stack_window() {
 }
 
 static void init_user_data_window() {
-    memset(user_data_page_table, 0, sizeof(user_data_page_table));
-    kernel_page_directory[USER_DATA_WINDOW_PDE] = ((uint32_t)user_data_page_table) |
-                                                  PDE_PRESENT | PDE_RW | PDE_USER;
+    memset(user_data_page_tables, 0, sizeof(user_data_page_tables));
+    for (uint32_t i = 0; i < USER_DATA_WINDOW_PT_COUNT; i++) {
+        kernel_page_directory[USER_DATA_WINDOW_PDE + i] = ((uint32_t)user_data_page_tables[i]) |
+                                                          PDE_PRESENT | PDE_RW | PDE_USER;
+    }
 }
 
 static void init_kernel_vm_window() {
@@ -383,7 +386,10 @@ int paging_map_user_region(uint32_t virt_addr, uint32_t phys_addr, size_t size, 
     allowed_flags = paging_allowed_pte_flags(flags) | PDE_USER;
     for (uint32_t i = 0; i < page_count; i++) {
         uint32_t virt_page = virt_addr + i * PAGE_SIZE;
-        user_data_page_table[first_slot + i] = (phys_addr + i * PAGE_SIZE) | PTE_PRESENT | allowed_flags;
+        uint32_t slot = first_slot + i;
+        uint32_t pt_index = slot / 1024U;
+        uint32_t page_index = slot % 1024U;
+        user_data_page_tables[pt_index][page_index] = (phys_addr + i * PAGE_SIZE) | PTE_PRESENT | allowed_flags;
         paging_invalidate_page((void*)virt_page);
     }
     return 0;
@@ -406,7 +412,10 @@ void paging_unmap_user_region(uint32_t virt_addr, size_t size) {
     first_slot = (virt_addr - USER_DATA_WINDOW_BASE) / PAGE_SIZE;
     for (uint32_t i = 0; i < page_count; i++) {
         uint32_t virt_page = virt_addr + i * PAGE_SIZE;
-        user_data_page_table[first_slot + i] = 0;
+        uint32_t slot = first_slot + i;
+        uint32_t pt_index = slot / 1024U;
+        uint32_t page_index = slot % 1024U;
+        user_data_page_tables[pt_index][page_index] = 0;
         paging_invalidate_page((void*)virt_page);
     }
 }

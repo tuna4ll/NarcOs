@@ -25,16 +25,16 @@ typedef struct x64_heap_block {
 #define X64_MAX_FRAMES              (X64_MAX_MANAGED_PHYS_ADDR / X64_PAGE_SIZE)
 #define X64_BITMAP_SIZE             (X64_MAX_FRAMES / 8ULL)
 #define X64_RESERVED_PHYS_END       0x00400000ULL
-#define X64_HEAP_SIZE               (2ULL * 1024ULL * 1024ULL)
+#define X64_HEAP_SIZE               (8ULL * 1024ULL * 1024ULL)
 #define X64_VM_WINDOW_SIZE          (16ULL * 1024ULL * 1024ULL)
 #define X64_HEAP_BASE               0xFFFF800000200000ULL
-#define X64_VM_WINDOW_BASE          0xFFFF800000400000ULL
+#define X64_VM_WINDOW_BASE          0xFFFF800000A00000ULL
 #define X64_HEAP_PAGE_COUNT         (X64_HEAP_SIZE / X64_PAGE_SIZE)
 #define X64_VM_WINDOW_PAGE_COUNT    (X64_VM_WINDOW_SIZE / X64_PAGE_SIZE)
 #define X64_VM_WINDOW_PT_COUNT      (X64_VM_WINDOW_SIZE / X64_LARGE_PAGE_SIZE)
 #define X64_HEAP_PT_COUNT           (X64_HEAP_SIZE / X64_LARGE_PAGE_SIZE)
 #define X64_USER_WINDOW_BASE        0x0000000040000000ULL
-#define X64_USER_WINDOW_SIZE        0x0000000000400000ULL
+#define X64_USER_WINDOW_SIZE        0x0000000000800000ULL
 #define X64_USER_WINDOW_PT_COUNT    (X64_USER_WINDOW_SIZE / X64_LARGE_PAGE_SIZE)
 #define X64_USER_WINDOW_PAGE_COUNT  (X64_USER_WINDOW_SIZE / X64_PAGE_SIZE)
 #define X64_IDENTITY_PDPT_COUNT     4U
@@ -59,7 +59,7 @@ static uint64_t identity_pds[X64_IDENTITY_PDPT_COUNT][512] __attribute__((aligne
 static uint64_t low_identity_pt0[512] __attribute__((aligned(4096)));
 static uint64_t high_pdpt[512] __attribute__((aligned(4096)));
 static uint64_t high_pd[512] __attribute__((aligned(4096)));
-static uint64_t heap_pt[512] __attribute__((aligned(4096)));
+static uint64_t heap_pts[X64_HEAP_PT_COUNT][512] __attribute__((aligned(4096)));
 static uint64_t vm_pts[X64_VM_WINDOW_PT_COUNT][512] __attribute__((aligned(4096)));
 static uint64_t user_pts[X64_USER_WINDOW_PT_COUNT][512] __attribute__((aligned(4096)));
 static uint8_t frame_bitmap[X64_BITMAP_SIZE];
@@ -290,7 +290,9 @@ static void x64_setup_high_windows(void) {
     kernel_pml4[high_pml4_index] = ((uint64_t)(uintptr_t)high_pdpt) | X64_PAGING_PRESENT | X64_PAGING_RW;
     high_pdpt[high_pdpt_index] = ((uint64_t)(uintptr_t)high_pd) | X64_PAGING_PRESENT | X64_PAGING_RW;
 
-    high_pd[heap_pd_index] = ((uint64_t)(uintptr_t)heap_pt) | X64_PAGING_PRESENT | X64_PAGING_RW;
+    for (uint64_t i = 0; i < X64_HEAP_PT_COUNT; i++) {
+        high_pd[heap_pd_index + i] = ((uint64_t)(uintptr_t)heap_pts[i]) | X64_PAGING_PRESENT | X64_PAGING_RW;
+    }
     for (uint64_t i = 0; i < X64_VM_WINDOW_PT_COUNT; i++) {
         high_pd[vm_pd_index + i] = ((uint64_t)(uintptr_t)vm_pts[i]) | X64_PAGING_PRESENT | X64_PAGING_RW;
     }
@@ -312,8 +314,13 @@ static void x64_setup_user_window(void) {
 static int x64_map_heap_pages(void) {
     for (uint64_t i = 0; i < X64_HEAP_PAGE_COUNT; i++) {
         void* phys_page = x64_alloc_physical_page();
+        uint64_t pt_index;
+        uint64_t page_index;
+
         if (!phys_page) return -1;
-        heap_pt[i] = ((uint64_t)(uintptr_t)phys_page) | X64_PAGING_PRESENT | X64_PAGING_RW;
+        pt_index = i / 512ULL;
+        page_index = i % 512ULL;
+        heap_pts[pt_index][page_index] = ((uint64_t)(uintptr_t)phys_page) | X64_PAGING_PRESENT | X64_PAGING_RW;
     }
     return 0;
 }
@@ -327,7 +334,9 @@ int x64_paging_init(void) {
         low_identity_pt0[i] = 0;
         high_pdpt[i] = 0;
         high_pd[i] = 0;
-        heap_pt[i] = 0;
+        }
+    for (uint64_t pt = 0; pt < X64_HEAP_PT_COUNT; pt++) {
+        for (uint64_t i = 0; i < 512ULL; i++) heap_pts[pt][i] = 0;
     }
     for (uint64_t pdpt = 0; pdpt < X64_IDENTITY_PDPT_COUNT; pdpt++) {
         for (uint64_t i = 0; i < 512ULL; i++) identity_pds[pdpt][i] = 0;

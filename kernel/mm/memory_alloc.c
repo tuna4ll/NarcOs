@@ -4,7 +4,7 @@ extern void vga_print(const char* str);
 extern void vga_print_int(int num);
 extern void vga_println(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
-#define HEAP_SIZE  (2 * 1024 * 1024)
+#define HEAP_SIZE  (8 * 1024 * 1024)
 
 extern uint8_t __kernel_end[];
 typedef struct block_header {

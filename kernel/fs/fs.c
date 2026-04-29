@@ -469,13 +469,14 @@ int fs_write_file_by_idx(int idx, const char* data) {
 
     if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE || !data) return -1;
     len = strlen(data);
-    if (len > MAX_FILE_SIZE) len = MAX_FILE_SIZE;
+    if (len > MAX_TEXT_FILE_SIZE) len = MAX_TEXT_FILE_SIZE;
     return fs_write_file_raw_by_idx(idx, data, len) < 0 ? -1 : 0;
 }
 int fs_write_file_raw_at_by_idx(int idx, const void* data, size_t offset, size_t len) {
     uint8_t* merged;
     size_t old_size;
     size_t new_size;
+    size_t write_len;
     int read_status;
     int write_status;
 
@@ -484,6 +485,7 @@ int fs_write_file_raw_at_by_idx(int idx, const void* data, size_t offset, size_t
     if (offset > MAX_FILE_SIZE) return -1;
     if (len > MAX_FILE_SIZE - offset) len = MAX_FILE_SIZE - offset;
     if (len == 0U) return 0;
+    write_len = len;
     old_size = dir_cache[idx].size;
     new_size = old_size > offset + len ? old_size : offset + len;
     if (new_size == 0U) return fs_write_file_raw_by_idx(idx, 0, 0U);
@@ -501,7 +503,7 @@ int fs_write_file_raw_at_by_idx(int idx, const void* data, size_t offset, size_t
     if (len != 0U) memcpy(merged + offset, data, len);
     write_status = fs_write_file_raw_by_idx(idx, merged, new_size);
     free(merged);
-    return write_status;
+    return write_status < 0 ? write_status : (int)write_len;
 }
 int fs_write_file(const char* name, const char* data) {
     int idx = fs_find_node(name);

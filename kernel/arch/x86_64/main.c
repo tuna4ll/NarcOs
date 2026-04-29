@@ -536,6 +536,56 @@ static int phase8_run_kill_smoke(void) {
     return output[0] == '\0' ? 0 : -1;
 }
 
+static int phase8_smoke_large_file_roundtrip(void) {
+    static const char path[] = "/home/user/Desktop/phase8-big.bin";
+    const uint32_t total_size = 256U * 1024U;
+    const uint32_t chunk_size = 4096U;
+    uint8_t* write_buf = 0;
+    uint8_t* read_buf = 0;
+    uint32_t offset = 0U;
+    int status = -1;
+
+    write_buf = (uint8_t*)malloc(chunk_size);
+    read_buf = (uint8_t*)malloc(chunk_size);
+    if (!write_buf || !read_buf) goto cleanup;
+
+    if (fs_write_file_raw(path, 0, 0U) < 0) goto cleanup;
+
+    while (offset < total_size) {
+        uint32_t chunk = total_size - offset;
+
+        if (chunk > chunk_size) chunk = chunk_size;
+        for (uint32_t i = 0; i < chunk; i++) {
+            write_buf[i] = (uint8_t)(((offset + i) * 53U + 19U) & 0xFFU);
+        }
+        if (fs_write_file_raw_at(path, write_buf, offset, chunk) != (int)chunk) goto cleanup;
+        offset += chunk;
+    }
+
+    offset = 0U;
+    while (offset < total_size) {
+        uint32_t chunk = total_size - offset;
+        int read_len;
+
+        if (chunk > chunk_size) chunk = chunk_size;
+        read_len = fs_read_file_raw(path, read_buf, offset, chunk);
+        if (read_len != (int)chunk) goto cleanup;
+        for (uint32_t i = 0; i < chunk; i++) {
+            uint8_t expected = (uint8_t)(((offset + i) * 53U + 19U) & 0xFFU);
+            if (read_buf[i] != expected) goto cleanup;
+        }
+        offset += chunk;
+    }
+
+    status = 0;
+
+cleanup:
+    if (write_buf) free(write_buf);
+    if (read_buf) free(read_buf);
+    (void)fs_delete_file(path);
+    return status;
+}
+
 static void phase8_smoke_process_main(void* arg) {
     static const char readme_text[] =
         "Welcome to NarcOs Professional Desktop!\n"
@@ -611,6 +661,13 @@ static void phase8_smoke_process_main(void* arg) {
         phase8_log_smoke_result("kill", 0);
     } else {
         phase8_log_smoke_result("kill", 1);
+    }
+
+    if (phase8_smoke_large_file_roundtrip() != 0) {
+        all_passed = 0;
+        phase8_log_smoke_result("large-file", 0);
+    } else {
+        phase8_log_smoke_result("large-file", 1);
     }
 
     if (all_passed) {

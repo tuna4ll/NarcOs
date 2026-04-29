@@ -3,3 +3,4 @@ boot/*.bin
 kernel.bin
 minios.img
 obj/
+plan.md

@@ -304,10 +304,10 @@ void syscall_FS_WRITE(arch_trap_frame_t *frame, arch_syscall_state_t *regs) {
     if (copy_string_from_user(path, (const char*)arg0, sizeof(path)) != 0) {
         syscall_set_result(frame, -1);
     } else {
-        contents = (char*)malloc(MAX_FILE_SIZE + 1U);
+        contents = (char*)malloc(MAX_TEXT_FILE_SIZE + 1U);
         if (!contents) syscall_set_result(frame, -1);
         else {
-            status = copy_string_from_user(contents, (const char*)arg1, MAX_FILE_SIZE + 1U) == 0
+            status = copy_string_from_user(contents, (const char*)arg1, MAX_TEXT_FILE_SIZE + 1U) == 0
                          ? fs_write_file(path, contents)
                          : -1;
             syscall_set_result(frame, status);

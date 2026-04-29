@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <stddef.h>
 #define MAX_FILES 64
-#define MAX_FILE_SIZE 16384
+#define MAX_FILE_SIZE (8U * 1024U * 1024U)
+#define MAX_TEXT_FILE_SIZE 16384U
 #define FS_NODE_FILE 1
 #define FS_NODE_DIR  2
 typedef struct {
