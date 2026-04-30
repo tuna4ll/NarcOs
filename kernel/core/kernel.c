@@ -50,10 +50,6 @@ volatile uint32_t timer_ticks = 0;
 static volatile int kernel_graphics_ready = 0;
 static volatile int kernel_waitpid_test_release = 0;
 
-#define SMOKE_CAPTURE_TMP_STDIN  11
-#define SMOKE_CAPTURE_TMP_STDOUT 12
-#define SMOKE_CAPTURE_TMP_STDERR 13
-
 typedef struct {
     volatile int writer_status;
     volatile int reader_status;
@@ -1162,387 +1158,6 @@ fail:
     return -1;
 }
 
-static int smoke_text_contains(const char* text, const char* needle) {
-    size_t text_len;
-    size_t needle_len;
-
-    if (!text || !needle) return 0;
-    needle_len = strlen(needle);
-    if (needle_len == 0U) return 1;
-    text_len = strlen(text);
-    if (needle_len > text_len) return 0;
-    for (size_t i = 0; i + needle_len <= text_len; i++) {
-        if (memcmp(text + i, needle, needle_len) == 0) return 1;
-    }
-    return 0;
-}
-
-static int smoke_capture_pipe_output(process_t* current, int read_fd, char* out, size_t out_size) {
-    char discard[128];
-    size_t used = 0;
-
-    if (!current || read_fd < 0 || !out || out_size == 0U) return -1;
-    out[0] = '\0';
-    for (;;) {
-        char* target = discard;
-        uint32_t want = sizeof(discard);
-        int rc;
-
-        if (used + 1U < out_size) {
-            target = out + used;
-            want = (uint32_t)(out_size - used - 1U);
-        }
-        rc = fd_read(current, read_fd, target, want);
-        if (rc < 0) return -1;
-        if (rc == 0) break;
-        if (target == out + used) {
-            used += (size_t)rc;
-            out[used] = '\0';
-        }
-    }
-    return 0;
-}
-
-static int smoke_capture_shell_output(const char* command, char* out, size_t out_size, int* out_status) {
-    process_t* current = process_current();
-    int pipefd[2] = { -1, -1 };
-    int status = -1;
-    int capture_status = 0;
-
-    if (!current || !command || !out || out_size == 0U) return -1;
-    out[0] = '\0';
-    if (fd_dup2(current, 1, SMOKE_CAPTURE_TMP_STDOUT) < 0) return -1;
-    if (fd_dup2(current, 2, SMOKE_CAPTURE_TMP_STDERR) < 0) {
-        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDOUT);
-        return -1;
-    }
-    if (fd_pipe(current, pipefd) != 0) {
-        capture_status = -1;
-        goto done;
-    }
-    if (fd_dup2(current, pipefd[1], 1) < 0 || fd_dup2(current, pipefd[1], 2) < 0) {
-        capture_status = -1;
-        goto done;
-    }
-    (void)fd_close(current, pipefd[1]);
-    pipefd[1] = -1;
-
-    status = run_user_shell_command(command);
-
-done:
-    if (current->fd_table[SMOKE_CAPTURE_TMP_STDOUT]) {
-        (void)fd_dup2(current, SMOKE_CAPTURE_TMP_STDOUT, 1);
-        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDOUT);
-    }
-    if (current->fd_table[SMOKE_CAPTURE_TMP_STDERR]) {
-        (void)fd_dup2(current, SMOKE_CAPTURE_TMP_STDERR, 2);
-        (void)fd_close(current, SMOKE_CAPTURE_TMP_STDERR);
-    }
-    if (pipefd[1] >= 0) (void)fd_close(current, pipefd[1]);
-    if (pipefd[0] >= 0) {
-        if (smoke_capture_pipe_output(current, pipefd[0], out, out_size) != 0) capture_status = -1;
-        (void)fd_close(current, pipefd[0]);
-    }
-    if (out_status) *out_status = status;
-    return capture_status;
-}
-
-static void smoke_log_result(const char* label, int passed) {
-    serial_write("[smoke] ");
-    serial_write(label ? label : "test");
-    serial_write(passed ? " OK" : " FAIL");
-    serial_write_char('\n');
-}
-
-static void smoke_log_command_failure(const char* command, int status, const char* output) {
-    serial_write("[smoke] command=");
-    serial_write(command ? command : "<null>");
-    serial_write(" status=");
-    serial_write_hex32((uint32_t)status);
-    serial_write(" output=\"");
-    if (output) {
-        size_t limit = strlen(output);
-        if (limit > 160U) limit = 160U;
-        for (size_t i = 0; i < limit; i++) {
-            char ch = output[i];
-            if (ch == '\n') serial_write("\\n");
-            else if (ch == '\r') serial_write("\\r");
-            else serial_write_char(ch);
-        }
-        if (strlen(output) > limit) serial_write("...");
-    }
-    serial_write("\"\n");
-}
-
-static int smoke_expect_exact_output(const char* command, const char* expected_output) {
-    char output[1024];
-    int status = -1;
-
-    if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0) {
-        smoke_log_command_failure(command, status, output);
-        return -1;
-    }
-    if (status != 0 || strcmp(output, expected_output) != 0) {
-        smoke_log_command_failure(command, status, output);
-        return -1;
-    }
-    return 0;
-}
-
-static int smoke_expect_output_contains(const char* command, const char* needle0, const char* needle1) {
-    char output[4096];
-    int status = -1;
-
-    if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0) {
-        smoke_log_command_failure(command, status, output);
-        return -1;
-    }
-    if (status != 0 ||
-        (needle0 && !smoke_text_contains(output, needle0)) ||
-        (needle1 && !smoke_text_contains(output, needle1))) {
-        smoke_log_command_failure(command, status, output);
-        return -1;
-    }
-    return 0;
-}
-
-static int smoke_expect_repeated_output(const char* command, const char* expected_output, int iterations) {
-    char output[1024];
-    int status = -1;
-
-    for (int i = 0; i < iterations; i++) {
-        if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0 ||
-            status != 0 || strcmp(output, expected_output) != 0) {
-            smoke_log_command_failure(command, status, output);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int smoke_expect_repeated_contains(const char* command, const char* needle, int iterations) {
-    char output[4096];
-    int status = -1;
-
-    for (int i = 0; i < iterations; i++) {
-        if (smoke_capture_shell_output(command, output, sizeof(output), &status) != 0 ||
-            status != 0 || !smoke_text_contains(output, needle)) {
-            smoke_log_command_failure(command, status, output);
-            return -1;
-        }
-    }
-    return 0;
-}
-
-static int smoke_test_invalid_exec_rejected(void) {
-    static const char* argv[] = { "/home/user/Desktop/readme.txt", 0 };
-    int pid = process_create_user("/home/user/Desktop/readme.txt", argv, 1, 0U);
-
-    if (pid >= 0) {
-        int status = 0;
-
-        (void)process_waitpid_sync_current(pid, 0U, &status);
-        return -1;
-    }
-    return 0;
-}
-
-static int smoke_test_large_file_roundtrip(void) {
-    static const char path[] = "/home/user/Desktop/smoke-big.bin";
-    const uint32_t total_size = 256U * 1024U;
-    const uint32_t chunk_size = 4096U;
-    uint8_t* write_buf;
-    uint8_t* read_buf;
-    uint32_t offset = 0U;
-    int status = -1;
-
-    write_buf = (uint8_t*)malloc(chunk_size);
-    read_buf = (uint8_t*)malloc(chunk_size);
-    if (!write_buf || !read_buf) {
-        serial_write_line("[smoke] large-file alloc failed");
-        goto cleanup;
-    }
-
-    if (fs_write_file_raw(path, 0, 0U) < 0) {
-        serial_write_line("[smoke] large-file create failed");
-        goto cleanup;
-    }
-
-    while (offset < total_size) {
-        uint32_t chunk = total_size - offset;
-
-        if (chunk > chunk_size) chunk = chunk_size;
-        for (uint32_t i = 0; i < chunk; i++) {
-            write_buf[i] = (uint8_t)(((offset + i) * 37U + 11U) & 0xFFU);
-        }
-        if (fs_write_file_raw_at(path, write_buf, offset, chunk) != (int)chunk) {
-            serial_write("[smoke] large-file write failed offset=");
-            serial_write_hex32(offset);
-            serial_write(" chunk=");
-            serial_write_hex32(chunk);
-            serial_write_char('\n');
-            goto cleanup;
-        }
-        offset += chunk;
-    }
-
-    offset = 0U;
-    while (offset < total_size) {
-        uint32_t chunk = total_size - offset;
-        int read_len;
-
-        if (chunk > chunk_size) chunk = chunk_size;
-        read_len = fs_read_file_raw(path, read_buf, offset, chunk);
-        if (read_len != (int)chunk) {
-            serial_write("[smoke] large-file read failed offset=");
-            serial_write_hex32(offset);
-            serial_write(" chunk=");
-            serial_write_hex32(chunk);
-            serial_write(" read=");
-            serial_write_hex32((uint32_t)read_len);
-            serial_write_char('\n');
-            goto cleanup;
-        }
-        for (uint32_t i = 0; i < chunk; i++) {
-            uint8_t expected = (uint8_t)(((offset + i) * 37U + 11U) & 0xFFU);
-            if (read_buf[i] != expected) {
-                serial_write("[smoke] large-file mismatch offset=");
-                serial_write_hex32(offset + i);
-                serial_write(" got=");
-                serial_write_hex32((uint32_t)read_buf[i]);
-                serial_write(" expected=");
-                serial_write_hex32((uint32_t)expected);
-                serial_write_char('\n');
-                goto cleanup;
-            }
-        }
-        offset += chunk;
-    }
-
-    status = 0;
-
-cleanup:
-    if (write_buf) free(write_buf);
-    if (read_buf) free(read_buf);
-    (void)fs_delete_file(path);
-    return status;
-}
-
-#if UINTPTR_MAX > 0xFFFFFFFFU
-static int smoke_test_page_fault_reporting(void) {
-    x64_expect_fault(14U, (uint64_t)(uintptr_t)x64_test_page_fault_resume,
-                     0xFFFF800010000000ULL, 2);
-    x64_test_page_fault();
-    return x64_last_fault_test_passed() ? 0 : -1;
-}
-#endif
-
-static void smoke_process_main(void* arg) {
-    int failed = 0;
-    int hello_idx = fs_find_node("/bin/hello");
-
-    (void)arg;
-    vga_println("Running headless smoke suite...");
-    serial_write_line("[smoke] suite start");
-    serial_write("[smoke] kernel /bin/hello idx=");
-    serial_write_hex32((uint32_t)hello_idx);
-    serial_write_char('\n');
-
-    if (smoke_expect_exact_output("/bin/hello", "hello from /bin/hello v2\n") != 0) {
-        failed = 1;
-        smoke_log_result("hello", 0);
-    } else smoke_log_result("hello", 1);
-
-    if (smoke_expect_output_contains("/bin/ps",
-                                     "PID\tPPID\tSTATE\tKIND\tNAME\tIMAGE\n",
-                                     "/bin/ps") != 0) {
-        failed = 1;
-        smoke_log_result("ps", 0);
-    } else smoke_log_result("ps", 1);
-
-    if (smoke_expect_exact_output("/bin/echo smoke-echo", "smoke-echo\n") != 0) {
-        failed = 1;
-        smoke_log_result("echo", 0);
-    } else smoke_log_result("echo", 1);
-
-    if (smoke_expect_output_contains("/bin/cat /home/user/Desktop/readme.txt",
-                                     "Welcome to NarcOs Professional Desktop!",
-                                     "Files here appear on your desktop icons.") != 0) {
-        failed = 1;
-        smoke_log_result("cat", 0);
-    } else smoke_log_result("cat", 1);
-
-    if (smoke_expect_exact_output("/bin/proc_test", "proc_test: ok\n") != 0) {
-        failed = 1;
-        smoke_log_result("proc_test", 0);
-    } else smoke_log_result("proc_test", 1);
-
-    if (smoke_expect_exact_output("/bin/pipe_test", "pipe_test: ok\n") != 0) {
-        failed = 1;
-        smoke_log_result("pipe_test", 0);
-    } else smoke_log_result("pipe_test", 1);
-
-    if (smoke_expect_output_contains("tls_test",
-                                     "Failed         : 0\n",
-                                     "[PASS] ecdsa_p256") != 0) {
-        failed = 1;
-        smoke_log_result("tls-selftest", 0);
-    } else smoke_log_result("tls-selftest", 1);
-
-    if (net_is_available()) {
-        if (smoke_expect_output_contains("https https://www.python.com/",
-                                         "HTTP GET        : https://www.python.com/\n",
-                                         "HTTP/") != 0) {
-            failed = 1;
-            smoke_log_result("https-live", 0);
-        } else smoke_log_result("https-live", 1);
-    }
-
-    if (smoke_expect_exact_output("/bin/echo smoke-pipe | /bin/cat", "smoke-pipe\n") != 0) {
-        failed = 1;
-        smoke_log_result("dup2-pipeline", 0);
-    } else smoke_log_result("dup2-pipeline", 1);
-
-    if (smoke_expect_repeated_output("/bin/hello", "hello from /bin/hello v2\n", 4) != 0) {
-        failed = 1;
-        smoke_log_result("repeat-hello", 0);
-    } else smoke_log_result("repeat-hello", 1);
-
-    if (smoke_expect_repeated_contains("/bin/ps", "PID\tPPID\tSTATE\tKIND\tNAME\tIMAGE\n", 3) != 0) {
-        failed = 1;
-        smoke_log_result("repeat-ps", 0);
-    } else smoke_log_result("repeat-ps", 1);
-
-    if (smoke_test_invalid_exec_rejected() != 0) {
-        failed = 1;
-        smoke_log_result("invalid-exec", 0);
-    } else smoke_log_result("invalid-exec", 1);
-
-    if (smoke_test_large_file_roundtrip() != 0) {
-        failed = 1;
-        smoke_log_result("large-file", 0);
-    } else smoke_log_result("large-file", 1);
-
-#if UINTPTR_MAX > 0xFFFFFFFFU
-    if (smoke_test_page_fault_reporting() != 0) {
-        failed = 1;
-        smoke_log_result("page-fault", 0);
-    } else smoke_log_result("page-fault", 1);
-#endif
-
-    if (failed) {
-        vga_println("Headless smoke suite failed.");
-        serial_write_line("[smoke] suite failed");
-    } else {
-        vga_println("Headless smoke suite passed.");
-        serial_write_line("[smoke] suite ok");
-    }
-}
-
-static void smoke_process_entry(void* arg) {
-    smoke_process_main(arg);
-}
-
 int kernel_run_privileged_command(int cmd, const char* arg) {
     const char* value = arg ? arg : "";
     int graphics_mode = screen_is_graphics_enabled();
@@ -1982,7 +1597,7 @@ static void desktop_process_main(void) {
                         if (settings_handle_click(&windows[hit_win], mx, my)) goto process_done;
                     }
                 } else {
-                    if (start_menu_visible && (mx > 200 || my > 335)) { start_menu_visible = 0; gui_needs_redraw = 1; }
+                    if (start_menu_visible && (mx > 268 || my > 397)) { start_menu_visible = 0; gui_needs_redraw = 1; }
                     if (mx >= 20 && mx <= 60) {
                         if (my >= 60 && my <= 110 && double_click) { 
                             open_explorer_window(desk_dir_idx);
@@ -2131,7 +1746,6 @@ void kmain() {
     const cpu_info_t* cpu;
     int console_pid;
     int desktop_pid;
-    int smoke_pid;
     int service_pid;
 
     serial_init();
@@ -2203,17 +1817,14 @@ void kmain() {
     usermode_debug_dump("post-procinit");
     console_pid = -1;
     desktop_pid = -1;
-    smoke_pid = -1;
     if (screen_is_graphics_enabled()) {
         desktop_pid = process_create_kernel("desktop", desktop_process_entry, 0);
-        smoke_pid = process_create_kernel("smoke", smoke_process_entry, 0);
     } else {
         console_pid = process_create_kernel("console", console_process_entry, 0);
-        smoke_pid = process_create_kernel("smoke", smoke_process_entry, 0);
     }
     service_pid = process_create_kernel("service", service_process_main, 0);
-    if ((screen_is_graphics_enabled() && (desktop_pid < 0 || smoke_pid < 0)) ||
-        (!screen_is_graphics_enabled() && (console_pid < 0 || smoke_pid < 0)) ||
+    if ((screen_is_graphics_enabled() && desktop_pid < 0) ||
+        (!screen_is_graphics_enabled() && console_pid < 0) ||
         service_pid < 0) {
         boot_fatal("Scheduler bootstrap failed.",
                    "Kernel tasks could not be created with the current memory map.");

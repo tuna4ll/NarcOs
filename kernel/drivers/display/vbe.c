@@ -6,8 +6,13 @@
 #include "string.h"
 #include "fs.h"
 #include "rtc.h"
+#include "maple_mono_8x8.h"
 #include "usermode.h"
 #include "ui_theme.h"
+
+#define UI_GLYPH_W         7
+#define UI_GLYPH_ADVANCE   7
+
 extern disk_fs_node_t dir_cache[MAX_FILES];
 typedef struct {
     uint16_t attributes;
@@ -89,6 +94,20 @@ static void vbe_memset_fast(void* dest, uint32_t color, uint32_t count_bytes) {
     }
 }
 
+static uint32_t vbe_get_pixel_from(uint8_t* buffer, uint32_t buf_width, int x, int y) {
+    uint32_t bpp_bytes;
+    int offset;
+
+    if (!buffer || x < 0 || y < 0 || (uint32_t)x >= buf_width || (uint32_t)y >= mode_info->height) return 0;
+    bpp_bytes = mode_info->bpp / 8;
+    offset = (y * (int)buf_width + x) * (int)bpp_bytes;
+    if (bpp_bytes == 4U) return *(uint32_t*)(buffer + offset);
+    if (bpp_bytes == 3U) return ((uint32_t)buffer[offset + 2] << 16) |
+                                  ((uint32_t)buffer[offset + 1] << 8) |
+                                  (uint32_t)buffer[offset];
+    return 0;
+}
+
 static int load_embedded_bg(embedded_ppm_t* out) {
     const uint8_t* start;
     const uint8_t* end;
@@ -132,6 +151,27 @@ static void wallpaper_draw_fallback_gradient(void) {
                 color = vbe_mix_color(UI_DESKTOP_GLOW, color, 22);
             }
             vbe_put_pixel_to(wallpaper_buffer, mode_info->width, x, y, color);
+        }
+    }
+
+    {
+        int glow_w = (int)mode_info->width / 3;
+        int glow_h = (int)mode_info->height / 2;
+        int glow_x = (int)mode_info->width - glow_w - 42;
+        int glow_y = 42;
+
+        for (int gy = 0; gy < glow_h; gy++) {
+            for (int gx = 0; gx < glow_w; gx++) {
+                int dx = gx - glow_w / 2;
+                int dy = gy - glow_h / 2;
+                int dist = (dx * dx) / (glow_w / 2 + 1) + (dy * dy) / (glow_h / 2 + 1);
+                int alpha = 100 - dist;
+                if (alpha > 0) {
+                    uint32_t old_color = vbe_get_pixel_from(wallpaper_buffer, mode_info->width, glow_x + gx, glow_y + gy);
+                    vbe_put_pixel_to(wallpaper_buffer, mode_info->width, glow_x + gx, glow_y + gy,
+                                     vbe_mix_color(UI_DESKTOP_GLOW, old_color, alpha));
+                }
+            }
         }
     }
 }
@@ -205,7 +245,7 @@ static void vbe_alpha_blend_fast(void* dest, uint32_t color, uint32_t alpha, uin
 
 static void vbe_draw_glyph_solid_32(int x, int y, const unsigned char* glyph, uint32_t color) {
     int start_col = 0;
-    int end_col = 8;
+    int end_col = UI_GLYPH_W;
     int start_row = 0;
     int end_row = 8;
 
@@ -226,105 +266,6 @@ static void vbe_draw_glyph_solid_32(int x, int y, const unsigned char* glyph, ui
     }
 }
 
-unsigned char vbe_font[256][8] = {
-    [0] = {0},
-    ['0'] = {0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00},
-    ['1'] = {0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    ['2'] = {0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x7E, 0x00},
-    ['3'] = {0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00},
-    ['4'] = {0x0C, 0x1C, 0x3C, 0x6C, 0x7E, 0x0C, 0x0C, 0x00},
-    ['5'] = {0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00},
-    ['6'] = {0x3C, 0x66, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00},
-    ['7'] = {0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00},
-    ['8'] = {0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00},
-    ['9'] = {0x3C, 0x66, 0x66, 0x3E, 0x06, 0x66, 0x3C, 0x00},
-    ['A'] = {0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00},
-    ['B'] = {0x7C, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x7C, 0x00},
-    ['C'] = {0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00},
-    ['D'] = {0x78, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00},
-    ['E'] = {0x7E, 0x60, 0x60, 0x78, 0x60, 0x60, 0x7E, 0x00},
-    ['F'] = {0x7E, 0x60, 0x60, 0x78, 0x60, 0x60, 0x60, 0x00},
-    ['G'] = {0x3C, 0x66, 0x60, 0x6E, 0x66, 0x66, 0x3C, 0x00},
-    ['H'] = {0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00},
-    ['I'] = {0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    ['J'] = {0x1E, 0x0C, 0x0C, 0x0C, 0x0C, 0x6C, 0x38, 0x00},
-    ['K'] = {0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x00},
-    ['L'] = {0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00},
-    ['M'] = {0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00},
-    ['N'] = {0x66, 0x76, 0x7E, 0x7E, 0x7E, 0x6E, 0x66, 0x00},
-    ['O'] = {0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00},
-    ['P'] = {0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00},
-    ['Q'] = {0x3C, 0x66, 0x66, 0x66, 0x6E, 0x3C, 0x0E, 0x00},
-    ['R'] = {0x7C, 0x66, 0x66, 0x7C, 0x78, 0x6C, 0x66, 0x00},
-    ['S'] = {0x3C, 0x66, 0x30, 0x18, 0x0C, 0x66, 0x3C, 0x00},
-    ['T'] = {0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00},
-    ['U'] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00},
-    ['V'] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00},
-    ['W'] = {0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00},
-    ['X'] = {0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00},
-    ['Y'] = {0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00},
-    ['Z'] = {0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00},
-    ['a'] = {0x00, 0x00, 0x3C, 0x06, 0x3E, 0x66, 0x3B, 0x00},
-    ['b'] = {0x60, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x7C, 0x00},
-    ['c'] = {0x00, 0x00, 0x3C, 0x60, 0x60, 0x66, 0x3C, 0x00},
-    ['d'] = {0x06, 0x06, 0x3E, 0x66, 0x66, 0x66, 0x3E, 0x00},
-    ['e'] = {0x00, 0x00, 0x3C, 0x66, 0x7E, 0x60, 0x3C, 0x00},
-    ['f'] = {0x1C, 0x36, 0x30, 0x7C, 0x30, 0x30, 0x30, 0x00},
-    ['g'] = {0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x3C},
-    ['h'] = {0x60, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00},
-    ['i'] = {0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    ['j'] = {0x06, 0x00, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3C},
-    ['k'] = {0x60, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0x00},
-    ['l'] = {0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00},
-    ['m'] = {0x00, 0x00, 0x6B, 0x7F, 0x7F, 0x6B, 0x63, 0x00},
-    ['n'] = {0x00, 0x00, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00},
-    ['o'] = {0x00, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x00},
-    ['p'] = {0x00, 0x00, 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60},
-    ['q'] = {0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x06},
-    ['r'] = {0x00, 0x00, 0x7C, 0x66, 0x60, 0x60, 0x60, 0x00},
-    ['s'] = {0x00, 0x00, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x00},
-    ['t'] = {0x18, 0x18, 0x7E, 0x18, 0x18, 0x18, 0x0E, 0x00},
-    ['u'] = {0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3E, 0x00},
-    ['v'] = {0x00, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00},
-    ['w'] = {0x00, 0x00, 0x63, 0x6B, 0x7F, 0x7F, 0x36, 0x00},
-    ['x'] = {0x00, 0x00, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x00},
-    ['y'] = {0x00, 0x00, 0x66, 0x66, 0x66, 0x3E, 0x06, 0x3C},
-    ['z'] = {0x00, 0x00, 0x7E, 0x0C, 0x18, 0x30, 0x7E, 0x00},
-    [' '] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-    ['!'] = {0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00},
-    ['"'] = {0x36, 0x36, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00},
-    ['#'] = {0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00},
-    ['$'] = {0x18, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x18, 0x00},
-    ['%'] = {0x62, 0x64, 0x08, 0x10, 0x26, 0x46, 0x00, 0x00},
-    ['&'] = {0x30, 0x48, 0x30, 0x4A, 0x44, 0x3A, 0x00, 0x00},
-    ['\''] = {0x18, 0x18, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00},
-    ['('] = {0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00},
-    [')'] = {0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00},
-    ['*'] = {0x00, 0x66, 0x3C, 0x7E, 0x3C, 0x66, 0x00, 0x00},
-    ['+'] = {0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00},
-    [','] = {0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x10, 0x20},
-    ['-'] = {0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00},
-    [':'] = {0x00, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x00},
-    [';'] = {0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x10, 0x20},
-    ['<'] = {0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x00},
-    ['='] = {0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00},
-    ['>'] = {0x30, 0x18, 0x0C, 0x06, 0x0C, 0x18, 0x30, 0x00},
-    ['?'] = {0x3C, 0x66, 0x06, 0x0C, 0x18, 0x00, 0x18, 0x00},
-    ['@'] = {0x3C, 0x42, 0x5A, 0x5E, 0x5C, 0x40, 0x3C, 0x00},
-    ['['] = {0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00},
-    ['\\'] = {0x00, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x00, 0x00},
-    [']'] = {0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00},
-    ['^'] = {0x18, 0x3C, 0x66, 0x42, 0x00, 0x00, 0x00, 0x00},
-    ['_'] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00},
-    ['`'] = {0x18, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00},
-    ['{'] = {0x0E, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0E, 0x00},
-    ['|'] = {0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00},
-    ['}'] = {0x70, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x70, 0x00},
-    ['~'] = {0x32, 0x4C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-    ['/'] = {0x00, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x00, 0x00},
-    ['.'] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00},
-};
-
 enum {
     GLYPH_C_CEDILLA_UPPER = 256,
     GLYPH_G_BREVE_UPPER,
@@ -340,18 +281,18 @@ enum {
     GLYPH_U_UMLAUT_LOWER
 };
 
-static unsigned char glyph_c_cedilla_upper[8] = {0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x18};
-static unsigned char glyph_g_breve_upper[8]   = {0x1C, 0x00, 0x3C, 0x66, 0x60, 0x6E, 0x66, 0x3C};
-static unsigned char glyph_i_dotted_upper[8]  = {0x18, 0x00, 0x3C, 0x18, 0x18, 0x18, 0x18, 0x3C};
-static unsigned char glyph_o_umlaut_upper[8]  = {0x66, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x66, 0x3C};
-static unsigned char glyph_s_cedilla_upper[8] = {0x3C, 0x66, 0x30, 0x18, 0x0C, 0x66, 0x3C, 0x18};
-static unsigned char glyph_u_umlaut_upper[8]  = {0x66, 0x00, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C};
-static unsigned char glyph_c_cedilla_lower[8] = {0x00, 0x00, 0x3C, 0x60, 0x60, 0x66, 0x3C, 0x18};
-static unsigned char glyph_g_breve_lower[8]   = {0x1C, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x3C};
-static unsigned char glyph_dotless_i_lower[8] = {0x00, 0x00, 0x38, 0x18, 0x18, 0x18, 0x18, 0x3C};
-static unsigned char glyph_o_umlaut_lower[8]  = {0x66, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x66, 0x3C};
-static unsigned char glyph_s_cedilla_lower[8] = {0x00, 0x00, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x18};
-static unsigned char glyph_u_umlaut_lower[8]  = {0x66, 0x00, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3E};
+static unsigned char glyph_c_cedilla_upper[8] = {0x00, 0x70, 0xC0, 0x80, 0x80, 0x80, 0xC0, 0x70};
+static unsigned char glyph_g_breve_upper[8]   = {0x30, 0x70, 0x90, 0x80, 0xB0, 0x90, 0x90, 0x70};
+static unsigned char glyph_i_dotted_upper[8]  = {0x20, 0x70, 0x20, 0x20, 0x20, 0x20, 0x20, 0x70};
+static unsigned char glyph_o_umlaut_upper[8]  = {0x50, 0x60, 0x90, 0x90, 0x90, 0x90, 0x90, 0x60};
+static unsigned char glyph_s_cedilla_upper[8] = {0x00, 0x70, 0x48, 0x60, 0x38, 0x08, 0x48, 0x78};
+static unsigned char glyph_u_umlaut_upper[8]  = {0x50, 0x48, 0x48, 0x48, 0x48, 0x48, 0x48, 0x30};
+static unsigned char glyph_c_cedilla_lower[8] = {0x00, 0x00, 0x00, 0x38, 0x40, 0x40, 0x40, 0x38};
+static unsigned char glyph_g_breve_lower[8]   = {0x00, 0x70, 0x00, 0x38, 0x48, 0x48, 0x48, 0x78};
+static unsigned char glyph_dotless_i_lower[8] = {0x00, 0x00, 0x00, 0x60, 0x20, 0x20, 0x20, 0xF8};
+static unsigned char glyph_o_umlaut_lower[8]  = {0x00, 0x50, 0x00, 0x30, 0x48, 0x48, 0x48, 0x30};
+static unsigned char glyph_s_cedilla_lower[8] = {0x00, 0x00, 0x00, 0x78, 0x40, 0x30, 0x48, 0x78};
+static unsigned char glyph_u_umlaut_lower[8]  = {0x00, 0x50, 0x00, 0x48, 0x48, 0x48, 0x48, 0x78};
 
 static unsigned char* vbe_get_glyph_bitmap(uint16_t glyph) {
     switch (glyph) {
@@ -423,12 +364,12 @@ void vbe_draw_int(int x, int y, int num, uint32_t color) {
     if (num == 0) buf[pos++] = '0';
     else {
         int n = num;
-        if (n < 0) { vbe_draw_char(x, y, '-', color); x += 8; n = -n; }
+        if (n < 0) { vbe_draw_char(x, y, '-', color); x += UI_GLYPH_ADVANCE; n = -n; }
         while (n > 0) { buf[pos++] = (char)((n % 10) + '0'); n /= 10; }
     }
     for (int i = pos - 1; i >= 0; i--) {
         vbe_draw_char(x, y, buf[i], color);
-        x += 8;
+        x += UI_GLYPH_ADVANCE;
     }
 }
 
@@ -436,30 +377,6 @@ uint16_t mouse_cursor_bitmap[12] = {
     0b110000000000, 0b111000000000, 0b111100000000, 0b111110000000,
     0b111111000000, 0b111111100000, 0b111111110000, 0b111111111000,
     0b111111111100, 0b111111000000, 0b110111000000, 0b100011000000
-};
-uint16_t folder_icon_bitmap[16] = {
-    0b0111100000000000, 0b1111110000000000, 0b1111111111111110, 0b1111111111111110,
-    0b1100000000000010, 0b1100000000000010, 0b1100000000000010, 0b1100000000000010,
-    0b1100000000000010, 0b1100000000000010, 0b1100000000000010, 0b1100000000000010,
-    0b1111111111111110, 0b1111111111111110, 0b0000000000000000, 0b0000000000000000
-};
-uint16_t file_icon_bitmap[16] = {
-    0b0011111111110000, 0b0011111111111000, 0b0011111111111100, 0b0011111100111110,
-    0b0011111100011110, 0b0011111100001110, 0b0011111111111110, 0b0011111111111110,
-    0b0011111111111110, 0b0011111111111110, 0b0011111111111110, 0b0011111111111110,
-    0b0011111111111110, 0b0011111111111110, 0b0000000000000000, 0b0000000000000000
-};
-uint16_t pc_icon_bitmap[16] = {
-    0b1111111111111111, 0b1111111111111111, 0b1100000000000011, 0b1100000000000011,
-    0b1100001111000011, 0b1100001111000011, 0b1100000000000011, 0b1100000000000011,
-    0b1111111111111111, 0b1111111111111111, 0b0000001111000000, 0b0000001111000000,
-    0b0001111111111000, 0b0001111111111000, 0b0000000000000000, 0b0000000000000000
-};
-uint16_t snake_icon_bitmap[16] = {
-    0b0111110000000000, 0b1111111000000000, 0b1100011000000000, 0b1100011000000000,
-    0b1111111000001110, 0b0111110000011111, 0b0000000000110011, 0b0000001111110011,
-    0b0000011111100011, 0b0000110000000111, 0b0001110000001110, 0b0001110000011100,
-    0b0000111111111000, 0b0000011111100000, 0b0000000000000000, 0b0000000000000000
 };
 
 void* vbe_get_backbuffer() { return backbuffer; }
@@ -642,7 +559,7 @@ void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
             return;
         }
         for (int row = 0; row < 8; row++) {
-            for (int col = 0; col < 8; col++) {
+            for (int col = 0; col < UI_GLYPH_W; col++) {
                 if (glyph[row] & (1 << (7 - col))) vbe_put_pixel_alpha(x + col, y + row, color, 255);
             }
         }
@@ -650,7 +567,7 @@ void vbe_draw_char_hd(int x, int y, char c, uint32_t color, int scale) {
     }
 
     for (int row = 0; row < 8 * scale; row++) {
-        for (int col = 0; col < 8 * scale; col++) {
+        for (int col = 0; col < UI_GLYPH_W * scale; col++) {
             int ox = col / scale;
             int oy = row / scale;
             
@@ -676,14 +593,14 @@ static void vbe_draw_glyph_hd(int x, int y, uint16_t glyph_id, uint32_t color, i
             return;
         }
         for (int row = 0; row < 8; row++) {
-            for (int col = 0; col < 8; col++) {
+            for (int col = 0; col < UI_GLYPH_W; col++) {
                 if (glyph[row] & (1 << (7 - col))) vbe_put_pixel_alpha(x + col, y + row, color, 255);
             }
         }
         return;
     }
     for (int row = 0; row < 8 * scale; row++) {
-        for (int col = 0; col < 8 * scale; col++) {
+        for (int col = 0; col < UI_GLYPH_W * scale; col++) {
             int ox = col / scale;
             int oy = row / scale;
             if (glyph[oy] & (1 << (7 - ox))) {
@@ -702,7 +619,7 @@ void vbe_draw_string_hd(int x, int y, const char* s, uint32_t color, int scale) 
         uint16_t glyph = vbe_utf8_next_glyph(&s);
         if (glyph == 0) break;
         vbe_draw_glyph_hd(cur_x, y, glyph, color, scale);
-        cur_x += 8 * scale + 2;
+        cur_x += UI_GLYPH_ADVANCE * scale;
     }
 }
 
@@ -739,27 +656,33 @@ void vbe_copy_to_buffer(void* source) {
 #define WINDOW_CLIENT_INSET_X 1
 #define WINDOW_CLIENT_TOP 40
 #define WINDOW_CLIENT_BOTTOM 8
+#define UI_GLYPH_W         7
+#define UI_GLYPH_ADVANCE   7
 
 static void ui_draw_panel(int x, int y, int w, int h, int radius, uint32_t fill, int fill_alpha, uint32_t border, int border_alpha) {
     vbe_draw_shadow(x + 4, y + 6, w, h, radius);
     vbe_draw_rounded_rect(x, y, w, h, radius, fill, fill_alpha);
     vbe_draw_rounded_rect(x, y, w, h, radius, border, border_alpha);
+    if (w > 8 && h > 8) vbe_fill_rect_alpha(x + 2, y + 2, w - 4, 1, 0xFFFFFF, 14);
 }
 
 static void ui_draw_panel_flat(int x, int y, int w, int h, int radius, uint32_t fill, int fill_alpha, uint32_t border, int border_alpha) {
     vbe_draw_rounded_rect(x, y, w, h, radius, fill, fill_alpha);
     vbe_draw_rounded_rect(x, y, w, h, radius, border, border_alpha);
+    if (w > 8 && h > 8) vbe_fill_rect_alpha(x + 2, y + 2, w - 4, 1, 0xFFFFFF, 10);
 }
 
 static void ui_draw_chip(int x, int y, int w, int h, uint32_t fill, uint32_t text, const char* label) {
     vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_SM, fill, 220);
+    vbe_draw_rect(x, y, w, h, UI_BORDER_SOFT);
     if (label) vbe_draw_string(x + 9, y + 6, label, text);
 }
 
 static void ui_draw_app_toolbar(int x, int y, int w, const char* app_name, const char* meta) {
-    (void)app_name;
-    (void)meta;
-    vbe_fill_rect_alpha(x, y + 24, w, 1, UI_BORDER_SOFT, 255);
+    vbe_fill_rect_alpha(x, y, w, 28, UI_SURFACE_1, 255);
+    vbe_fill_rect_alpha(x, y + 27, w, 1, UI_BORDER_SOFT, 255);
+    if (app_name) vbe_draw_string(x + 12, y + 9, app_name, UI_TEXT);
+    if (meta) vbe_draw_string(x + w - 120, y + 9, meta, UI_TEXT_SUBTLE);
 }
 
 static void ui_draw_modal(void) {
@@ -822,7 +745,7 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
     int h = win->h;
 
     vbe_draw_shadow(x + 4, y + 6, w, h, UI_RADIUS_LG);
-    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 228);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 238);
 
     uint32_t title_top = is_focused ? UI_SURFACE_3 : UI_SURFACE_2;
     uint32_t title_bottom = is_focused ? UI_SURFACE_2 : UI_SURFACE_1;
@@ -830,7 +753,7 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
     vbe_fill_rect_alpha(x + 1, y + 34, w - 2, 1, is_focused ? UI_ACCENT : UI_BORDER_SOFT, 180);
     vbe_fill_rect_alpha(x + WINDOW_CLIENT_INSET_X, y + WINDOW_CLIENT_TOP,
                         w - WINDOW_CLIENT_INSET_X * 2, h - WINDOW_CLIENT_TOP - WINDOW_CLIENT_BOTTOM,
-                        UI_SURFACE_0, 210);
+                        UI_SURFACE_0, 255);
 
     {
         char title_buf[20];
@@ -841,8 +764,8 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
         vbe_draw_string(x + 16, y + 12, title_buf, COLOR_TEXT);
     }
 
-    vbe_fill_rect_alpha(x + w - 44, y + 10, 10, 10, UI_WARNING, 255);
-    vbe_fill_rect_alpha(x + w - 24, y + 10, 10, 10, UI_DANGER, 255);
+    vbe_draw_rounded_rect(x + w - 44, y + 9, 12, 12, 6, UI_WARNING, 230);
+    vbe_draw_rounded_rect(x + w - 22, y + 9, 12, 12, 6, UI_DANGER, 240);
 
     if (win_buf) {
         uint32_t bpp = mode_info->bpp / 8;
@@ -956,8 +879,8 @@ void vbe_draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color, in
 }
 
 void vbe_draw_shadow(int x, int y, int w, int h, int r) {
-    vbe_draw_rounded_rect(x + 2, y + 2, w + 4, h + 4, r + 2, 0x000000, 30);
-    vbe_draw_rounded_rect(x + 4, y + 4, w + 8, h + 8, r + 4, 0x000000, 15);
+    vbe_draw_rounded_rect(x + 2, y + 3, w + 4, h + 6, r + 2, 0x000000, 28);
+    vbe_draw_rounded_rect(x + 4, y + 6, w + 8, h + 12, r + 4, 0x000000, 12);
 }
 
 void vbe_draw_taskbar(int start_btn_active) {
@@ -998,22 +921,21 @@ void vbe_draw_taskbar(int start_btn_active) {
 
 void vbe_draw_start_menu() {
     ui_draw_panel(8, 41, 260, 356, UI_RADIUS_LG, UI_SURFACE_1, 244, UI_BORDER_SOFT, 255);
-    vbe_fill_rect_gradient(9, 42, 258, 64, UI_SURFACE_3, UI_SURFACE_2, 1);
+    vbe_fill_rect_gradient(9, 42, 258, 56, UI_SURFACE_3, UI_SURFACE_2, 1);
     vbe_draw_string(24, 58, "NarcOS", UI_TEXT);
-    vbe_draw_string(24, 76, "Professional Workstation", UI_TEXT_MUTED);
+    vbe_draw_string(24, 76, "Applications", UI_TEXT_MUTED);
 
-    ui_draw_chip(20, 122, 220, 24, UI_SURFACE_2, UI_TEXT, "Terminal");
-    ui_draw_chip(20, 154, 220, 24, UI_SURFACE_2, UI_TEXT, "Snake");
-    ui_draw_chip(20, 186, 220, 24, UI_SURFACE_2, UI_TEXT, "NarcPad");
-    ui_draw_chip(20, 218, 220, 24, UI_SURFACE_2, UI_TEXT, "Settings");
+    ui_draw_chip(20, 114, 220, 24, UI_SURFACE_2, UI_TEXT, "Terminal");
+    ui_draw_chip(20, 146, 220, 24, UI_SURFACE_2, UI_TEXT, "Snake");
+    ui_draw_chip(20, 178, 220, 24, UI_SURFACE_2, UI_TEXT, "NarcPad");
+    ui_draw_chip(20, 210, 220, 24, UI_SURFACE_2, UI_TEXT, "Settings");
 
-    vbe_fill_rect_alpha(20, 286, 220, 1, UI_BORDER_SOFT, 255);
-    vbe_draw_string(20, 306, "SESSION", UI_TEXT_SUBTLE);
-    vbe_draw_string(20, 326, "narc desktop session", UI_ACCENT_ALT);
-    vbe_draw_string(20, 346, "native desktop environment", UI_TEXT_MUTED);
+    ui_draw_panel_flat(20, 258, 220, 78, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+    vbe_draw_string(34, 276, "Session", UI_TEXT_SUBTLE);
+    vbe_draw_string(34, 296, "Desktop", UI_TEXT);
+    vbe_draw_string(34, 314, "Local system", UI_TEXT_MUTED);
 }
 void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
-    (void)vertical;
     if (x < 0) { w += x; x = 0; }
     if (y < 0) { h += y; y = 0; }
     if (x + w > (int)current_target_width) w = current_target_width - x;
@@ -1021,19 +943,37 @@ void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2
     if (w <= 0 || h <= 0) return;
 
     if (mode_info->bpp == 32) {
-        for (int i = 0; i < h; i++) {
-            int ratio = (i * 255) / h;
-            uint32_t color = vbe_mix_color(c2, c1, ratio);
-            uint32_t* row = (uint32_t*)(current_target + ((y + i) * current_target_width + x) * 4U);
-            vbe_memset_fast(row, color, (uint32_t)(w * 4));
+        if (vertical) {
+            for (int i = 0; i < h; i++) {
+                int ratio = (i * 255) / h;
+                uint32_t color = vbe_mix_color(c2, c1, ratio);
+                uint32_t* row = (uint32_t*)(current_target + ((y + i) * current_target_width + x) * 4U);
+                vbe_memset_fast(row, color, (uint32_t)(w * 4));
+            }
+        } else {
+            for (int iy = 0; iy < h; iy++) {
+                uint32_t* row = (uint32_t*)(current_target + ((y + iy) * current_target_width + x) * 4U);
+                for (int ix = 0; ix < w; ix++) {
+                    int ratio = (ix * 255) / w;
+                    row[ix] = vbe_mix_color(c2, c1, ratio);
+                }
+            }
         }
         return;
     }
 
-    for (int i = 0; i < h; i++) {
-        int ratio = (i * 255) / h;
-        uint32_t color = vbe_mix_color(c2, c1, ratio);
-        vbe_fill_rect(x, y + i, w, 1, color);
+    if (vertical) {
+        for (int i = 0; i < h; i++) {
+            int ratio = (i * 255) / h;
+            uint32_t color = vbe_mix_color(c2, c1, ratio);
+            vbe_fill_rect(x, y + i, w, 1, color);
+        }
+    } else {
+        for (int i = 0; i < w; i++) {
+            int ratio = (i * 255) / w;
+            uint32_t color = vbe_mix_color(c2, c1, ratio);
+            vbe_fill_rect(x + i, y, 1, h, color);
+        }
     }
 }
 
@@ -1047,7 +987,7 @@ void vbe_draw_clock() {
     time_str[3] = (mm / 10) + '0'; time_str[4] = (mm % 10) + '0'; time_str[5] = ':';
     time_str[6] = (ss / 10) + '0'; time_str[7] = (ss % 10) + '0'; time_str[8] = '\0';
     ui_draw_chip(w - 104, 8, 90, 20, UI_SURFACE_2, UI_TEXT, 0);
-    vbe_draw_string(w - 91, 14, time_str, UI_ACCENT_ALT);
+    vbe_draw_string(w - 96, 14, time_str, UI_ACCENT_ALT);
 }
 
 void vbe_draw_vector_folder(int x, int y, int selected) {

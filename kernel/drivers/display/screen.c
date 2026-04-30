@@ -19,11 +19,11 @@
 #define TERM_WARN           UI_WARNING
 #define TERM_ERR            UI_DANGER
 
-#define TERM_CONTENT_X      18
-#define TERM_CONTENT_Y      16
-#define TERM_CONTENT_W      (WIN_WIDTH - 36)
-#define TERM_CONTENT_H      (WIN_HEIGHT - 32)
-#define TERM_CELL_W         9
+#define TERM_CONTENT_X      22
+#define TERM_CONTENT_Y      52
+#define TERM_CONTENT_W      (WIN_WIDTH - 44)
+#define TERM_CONTENT_H      (WIN_HEIGHT - 76)
+#define TERM_CELL_W         7
 #define TERM_CELL_H         12
 #define TERM_COLS           (TERM_CONTENT_W / TERM_CELL_W)
 #define TERM_ROWS           (TERM_CONTENT_H / TERM_CELL_H)
@@ -235,6 +235,13 @@ static void term_store_cell(screen_char_t* cell, uint16_t glyph, uint8_t color) 
 
 static void term_draw_shell(void) {
     vbe_fill_rect(0, 0, WIN_WIDTH, WIN_HEIGHT, TERM_CANVAS_BG);
+    vbe_fill_rect_alpha(0, 0, WIN_WIDTH, 30, UI_SURFACE_1, 255);
+    vbe_fill_rect_alpha(0, 30, WIN_WIDTH, 1, UI_BORDER_SOFT, 255);
+    vbe_fill_rect_alpha(14, 40, WIN_WIDTH - 28, WIN_HEIGHT - 54, UI_SURFACE_0, 255);
+    vbe_draw_rect(14, 40, WIN_WIDTH - 28, WIN_HEIGHT - 54, UI_BORDER_SOFT);
+    vbe_draw_string(22, 10, "Terminal", UI_TEXT);
+    vbe_draw_string(22, 45, "Console", UI_TEXT_SUBTLE);
+    vbe_draw_string(WIN_WIDTH - 92, 10, "PgUp/Dn", UI_TEXT_SUBTLE);
 }
 
 static void term_draw_cursor(void) {

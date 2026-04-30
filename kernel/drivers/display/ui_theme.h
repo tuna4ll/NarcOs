@@ -5,35 +5,35 @@
 #define UI_RADIUS_MD 10
 #define UI_RADIUS_LG 14
 
-#define UI_DESKTOP_TOP        0x08111C
-#define UI_DESKTOP_BOTTOM     0x13263D
-#define UI_DESKTOP_GLOW       0x1E6FA8
+#define UI_DESKTOP_TOP        0x0B1118
+#define UI_DESKTOP_BOTTOM     0x19232F
+#define UI_DESKTOP_GLOW       0x203244
 
-#define UI_SURFACE_0          0x0B1016
-#define UI_SURFACE_1          0x111821
-#define UI_SURFACE_2          0x16202B
-#define UI_SURFACE_3          0x1B2734
+#define UI_SURFACE_0          0x0F151C
+#define UI_SURFACE_1          0x161E27
+#define UI_SURFACE_2          0x1D2833
+#define UI_SURFACE_3          0x243240
 
-#define UI_BORDER_SOFT        0x263444
-#define UI_BORDER_STRONG      0x36506A
+#define UI_BORDER_SOFT        0x31404F
+#define UI_BORDER_STRONG      0x415467
 
-#define UI_ACCENT             0x2AA9FF
-#define UI_ACCENT_ALT         0x7FDBFF
-#define UI_ACCENT_DEEP        0x0E6BA8
-#define UI_SUCCESS            0x7FDB7F
-#define UI_WARNING            0xF4D35E
-#define UI_DANGER             0xFF6B6B
+#define UI_ACCENT             0x5FA8D3
+#define UI_ACCENT_ALT         0x8BC0DF
+#define UI_ACCENT_DEEP        0x3C7EA4
+#define UI_SUCCESS            0x76B58A
+#define UI_WARNING            0xD0AF69
+#define UI_DANGER             0xD67C7C
 
-#define UI_TEXT               0xE6EEF7
-#define UI_TEXT_MUTED         0x91A3B6
-#define UI_TEXT_SUBTLE        0x6E8093
-#define UI_TEXT_DARK          0x1A2430
+#define UI_TEXT               0xE8EEF3
+#define UI_TEXT_MUTED         0xA7B2BC
+#define UI_TEXT_SUBTLE        0x7C8791
+#define UI_TEXT_DARK          0x1A222A
 
-#define UI_FOLDER             0xF5C96A
-#define UI_FILE               0xE7EDF4
+#define UI_FOLDER             0xD7B16A
+#define UI_FILE               0xE3E9EE
 
-#define UI_TASKBAR_BG         0x091019
-#define UI_TASKBAR_MID        0x0D1520
-#define UI_TASKBAR_EDGE       0x203040
+#define UI_TASKBAR_BG         0x0D141B
+#define UI_TASKBAR_MID        0x151E27
+#define UI_TASKBAR_EDGE       0x2B3947
 
 #endif

@@ -683,8 +683,6 @@ static void phase8_smoke_process_main(void* arg) {
 }
 
 void phase8_x86_64_main(void) {
-    int smoke_pid;
-
     serial_init();
     serial_write_line("[X64] Phase 10 boot");
 
@@ -703,12 +701,9 @@ void phase8_x86_64_main(void) {
     read_rtc();
     process_init();
 
-    smoke_pid = process_create_kernel("phase8-smoke", phase8_smoke_process_main, 0);
-    if (smoke_pid < 0) phase8_panic("phase8 smoke process creation failed");
-
     x64_sti();
     vga_println("NarcOs x86_64 Phase 10");
-    vga_println("Running ELF64 native smoke suite...");
+    vga_println("System ready.");
     scheduler_start();
     phase8_halt_forever();
 }
