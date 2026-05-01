@@ -15,6 +15,12 @@ EFER_LME        equ 0x00000100
 %ifndef KERNEL_SECTORS
 %define KERNEL_SECTORS 128
 %endif
+%ifndef VBE_WIDTH
+%define VBE_WIDTH 1920
+%endif
+%ifndef VBE_HEIGHT
+%define VBE_HEIGHT 1080
+%endif
 
 stage2_main:
     mov [boot_drive], dl
@@ -40,6 +46,9 @@ stage2_main:
     int 0x10
     cmp ax, 0x004F
     jne .vbe_failed
+
+    call find_preferred_mode
+    jc .mode_found
 
     mov si, preferred_modes
 .find_mode_loop:
@@ -89,6 +98,64 @@ stage2_main:
     or eax, 1
     mov cr0, eax
     jmp 0x08:protected_mode_entry
+
+find_preferred_mode:
+    push ax
+    push bx
+    push dx
+    push si
+    push di
+    push ds
+    push es
+
+    mov si, [vbe_info_block + 0x0E]
+    mov dx, [vbe_info_block + 0x10]
+.scan_loop:
+    mov ax, dx
+    mov ds, ax
+    mov ax, dx
+    lodsw
+    cmp ax, 0xFFFF
+    je .not_found
+
+    mov bx, ax
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov cx, bx
+    or cx, 0x4000
+    mov ax, 0x4F01
+    mov di, mode_info_block
+    int 0x10
+    cmp ax, 0x004F
+    jne .scan_loop
+    cmp word [mode_info_block + 18], VBE_WIDTH
+    jne .scan_loop
+    cmp word [mode_info_block + 20], VBE_HEIGHT
+    jne .scan_loop
+    cmp byte [mode_info_block + 25], 24
+    jb .scan_loop
+
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    stc
+    ret
+
+.not_found:
+    pop es
+    pop ds
+    pop di
+    pop si
+    pop dx
+    pop bx
+    pop ax
+    clc
+    ret
 
 detect_long_mode:
     pushfd

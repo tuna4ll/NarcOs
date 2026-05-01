@@ -79,6 +79,7 @@ static USER_CODE void explorer_open_dir(user_explorer_state_t* state, int dir_id
     if (state->current_dir != dir_idx) state->prev_dir = state->current_dir;
     state->current_dir = dir_idx;
     state->selected_idx = -1;
+    state->list_scroll = 0;
     explorer_cancel_modal(state);
     state->dirty = 1;
 }

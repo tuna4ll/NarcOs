@@ -6,6 +6,7 @@
 #include "syscall.h"
 #include "string.h"
 #include "usermode.h"
+#include "rtc.h"
 
 #define MAX_PROCESSES 8
 #define PROCESS_STACK_PAGES 4
@@ -17,6 +18,9 @@ static int current_process_idx = -1;
 static uintptr_t bootstrap_sp = 0;
 
 volatile int scheduler_pending = 0;
+extern volatile int gui_needs_redraw;
+extern int screen_is_graphics_enabled(void);
+extern void vbe_compose_scene_basic(void);
 
 void process_bootstrap_entry(void);
 static void idle_process(void* arg);
@@ -38,12 +42,28 @@ static int process_service_user_request(process_t* proc);
 static void process_reset_unused(process_t* proc);
 static const char* process_state_name(process_state_t state);
 static const char* process_kind_name(process_kind_t kind);
+static void process_pump_gui_if_needed(void);
 
 #if UINTPTR_MAX > 0xFFFFFFFFU
 extern void x64_process_bootstrap_trampoline(void);
 #endif
 
 extern volatile uint32_t timer_ticks;
+
+static void process_pump_gui_if_needed(void) {
+    static uint32_t last_clock_tick = 0;
+
+    if (!screen_is_graphics_enabled()) return;
+    if (timer_ticks - last_clock_tick >= 100U) {
+        read_rtc();
+        last_clock_tick = timer_ticks;
+        gui_needs_redraw = 1;
+    }
+    if (gui_needs_redraw) {
+        vbe_compose_scene_basic();
+        gui_needs_redraw = 0;
+    }
+}
 
 static void process_log_hex_uintptr(uintptr_t value) {
 #if UINTPTR_MAX > 0xFFFFFFFFU
@@ -791,6 +811,7 @@ static int process_service_user_request(process_t* proc) {
             if (exec_activate_address_space(&proc->user_space) != EXEC_OK) return -1;
             status = process_waitpid_query(proc, proc->pending_wait_pid, proc->pending_wait_flags, &child_status);
             if (status == -2) {
+                process_pump_gui_if_needed();
                 process_yield();
                 return 1;
             }
@@ -859,6 +880,7 @@ static int process_service_user_request(process_t* proc) {
             free(buffer);
             process_clear_pending_request(proc);
             arch_frame_set_return_value(&proc->arch.user_frame, (uintptr_t)status);
+            process_pump_gui_if_needed();
             return 0;
         }
         default:

@@ -63,6 +63,15 @@ typedef struct {
     uint32_t rtt_ms[4];
 } net_ping_result_t;
 
+typedef struct {
+    uint32_t rx_bytes;
+    uint32_t tx_bytes;
+    uint32_t rx_packets;
+    uint32_t tx_packets;
+    int available;
+    int configured;
+} net_stats_t;
+
 void net_init();
 void net_poll();
 int net_is_available();
@@ -90,5 +99,6 @@ int net_dns_command(const char* host);
 int net_ping_command(const char* target);
 int net_ntp_command(const char* host);
 int net_http_command(const char* target);
+int net_get_stats(net_stats_t* out_stats);
 
 #endif

@@ -5,11 +5,13 @@ extern void outb(uint16_t port, uint8_t val);
 extern uint8_t inb(uint16_t port);
 static uint8_t mouse_cycle = 0;
 static uint8_t mouse_packet[4];
+static uint8_t mouse_packet_size = 3;
 static volatile int mouse_x = 512;
 static volatile int mouse_y = 384;
 static int     left_button = 0;
 static int     right_button = 0;
 static volatile int mouse_moved = 0;
+static volatile int mouse_wheel = 0;
 
 void mouse_wait(uint8_t type) {
     uint32_t timeout = 100000;
@@ -37,6 +39,7 @@ uint8_t mouse_read() {
 }
 
 void init_mouse() {
+    uint8_t mouse_id;
     mouse_wait(1);
     outb(0x64, 0xA8); 
     mouse_write(0xFF);
@@ -49,6 +52,22 @@ void init_mouse() {
     mouse_read();
     mouse_write(200);
     mouse_read();
+    mouse_write(0xF3);
+    mouse_read();
+    mouse_write(100);
+    mouse_read();
+    mouse_write(0xF3);
+    mouse_read();
+    mouse_write(80);
+    mouse_read();
+    mouse_write(0xF2);
+    mouse_read();
+    mouse_id = mouse_read();
+    if (mouse_id == 0x03U || mouse_id == 0x04U) {
+        mouse_packet_size = 4;
+    } else {
+        mouse_packet_size = 3;
+    }
     mouse_write(0xF4);
     mouse_read();
     mouse_wait(1);
@@ -76,7 +95,7 @@ void handle_mouse() {
 
         mouse_packet[mouse_cycle++] = data;
 
-        if (mouse_cycle == 3) {
+        if (mouse_cycle == mouse_packet_size) {
             mouse_cycle = 0;
             
             if (!(mouse_packet[0] & 0x08)) continue;
@@ -116,6 +135,11 @@ void handle_mouse() {
                 mouse_y = new_y;
                 mouse_moved = 1;
             }
+            if (mouse_packet_size >= 4) {
+                int wheel = (int8_t)(mouse_packet[3] & 0x0F);
+                if (wheel == 0x0F) wheel = -1;
+                if (wheel == 1 || wheel == -1) mouse_wheel -= wheel;
+            }
         }
     }
     outb(0x20, 0x20);
@@ -129,4 +153,9 @@ int mouse_consume_moved() {
     int moved = mouse_moved;
     mouse_moved = 0;
     return moved;
+}
+int mouse_consume_wheel() {
+    int wheel = mouse_wheel;
+    mouse_wheel = 0;
+    return wheel;
 }

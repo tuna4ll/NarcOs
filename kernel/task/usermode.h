@@ -110,6 +110,7 @@ typedef enum {
 typedef struct {
     int status;
     int dirty;
+    int view_scroll;
     int event_head;
     int event_tail;
     uint16_t event_type[USER_GUI_EVENT_QUEUE_CAP];
@@ -135,6 +136,7 @@ typedef struct {
     int current_dir;
     int prev_dir;
     int selected_idx;
+    int list_scroll;
     int modal_mode;
     int modal_input_len;
     int event_head;

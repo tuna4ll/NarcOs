@@ -19,14 +19,11 @@
 #define TERM_WARN           UI_WARNING
 #define TERM_ERR            UI_DANGER
 
-#define TERM_CONTENT_X      22
-#define TERM_CONTENT_Y      52
-#define TERM_CONTENT_W      (WIN_WIDTH - 44)
-#define TERM_CONTENT_H      (WIN_HEIGHT - 76)
+#define TERM_CONTENT_X      24
+#define TERM_CONTENT_Y      46
 #define TERM_CELL_W         7
 #define TERM_CELL_H         12
-#define TERM_COLS           (TERM_CONTENT_W / TERM_CELL_W)
-#define TERM_ROWS           (TERM_CONTENT_H / TERM_CELL_H)
+#define TERM_MAX_COLS       160
 #define TERM_SCROLLBACK_LINES 512
 #define VGA_TEXT_COLS       80
 #define VGA_TEXT_ROWS       25
@@ -45,12 +42,17 @@ int win_visible = 0;
 static int cursor_x = 0;
 static int cursor_y = 0;
 static int screen_graphics_enabled = 0;
+static int vga_window_dirty = 1;
+static int vga_last_window_w = 0;
+static int vga_last_window_h = 0;
 /* Keep a longer terminal history so the window can scroll back. */
-static screen_char_t text_buffer[TERM_SCROLLBACK_LINES][TERM_COLS];
+static screen_char_t text_buffer[TERM_SCROLLBACK_LINES][TERM_MAX_COLS];
 static int term_line_count = 1;
 static int term_view_scroll = 0;
 
 extern volatile uint32_t timer_ticks;
+extern window_t windows[MAX_WINDOWS];
+extern int nwm_get_idx_by_type(window_type_t type);
 
 static const uint32_t term_palette[16] = {
     0x000000, 0x4FA3FF, TERM_PROMPT_USER, 0x52D1DC,
@@ -63,16 +65,71 @@ static const screen_char_t term_blank_cell = {
     0, 0x07, 0, TERM_TEXT
 };
 
+static int term_window_w(void) {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
+    if (idx >= 0 && windows[idx].w > 0) return windows[idx].w;
+    return WIN_WIDTH;
+}
+
+static int term_window_h(void) {
+    int idx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
+    if (idx >= 0 && windows[idx].h > 0) return windows[idx].h;
+    return WIN_HEIGHT;
+}
+
+static int term_content_w(void) {
+    int w = term_window_w() - 48;
+    if (w < TERM_CELL_W * 8) w = TERM_CELL_W * 8;
+    return w;
+}
+
+static int term_content_h(void) {
+    int h = term_window_h() - 68;
+    if (h < TERM_CELL_H * 4) h = TERM_CELL_H * 4;
+    return h;
+}
+
+static int term_cols_visible(void) {
+    int cols = term_content_w() / TERM_CELL_W;
+    if (cols < 8) cols = 8;
+    if (cols > TERM_MAX_COLS) cols = TERM_MAX_COLS;
+    return cols;
+}
+
+static int term_rows_visible(void) {
+    int rows = term_content_h() / TERM_CELL_H;
+    if (rows < 4) rows = 4;
+    return rows;
+}
+
+static int term_max_scroll(void);
+
+static void term_ensure_layout_valid(void) {
+    int cols = term_cols_visible();
+    int max_scroll;
+
+    if (cursor_x >= cols) cursor_x = cols - 1;
+    if (cursor_x < 0) cursor_x = 0;
+    if (cursor_y < 0) cursor_y = 0;
+    if (cursor_y >= TERM_SCROLLBACK_LINES) cursor_y = TERM_SCROLLBACK_LINES - 1;
+    if (term_line_count < 1) term_line_count = 1;
+    if (term_line_count > TERM_SCROLLBACK_LINES) term_line_count = TERM_SCROLLBACK_LINES;
+    max_scroll = term_max_scroll();
+    if (term_view_scroll > max_scroll) term_view_scroll = max_scroll;
+    if (term_view_scroll < 0) term_view_scroll = 0;
+}
+
 static void term_clear_line(int line) {
     if (line < 0 || line >= TERM_SCROLLBACK_LINES) return;
-    for (int x = 0; x < TERM_COLS; x++) {
+    for (int x = 0; x < TERM_MAX_COLS; x++) {
         text_buffer[line][x] = term_blank_cell;
     }
 }
 
 static int term_max_scroll(void) {
-    if (term_line_count <= TERM_ROWS) return 0;
-    return term_line_count - TERM_ROWS;
+    int rows = term_rows_visible();
+    if (term_line_count <= rows) return 0;
+    return term_line_count - rows;
 }
 
 static void term_clamp_view_scroll(void) {
@@ -82,7 +139,7 @@ static void term_clamp_view_scroll(void) {
 }
 
 static int term_first_visible_line(void) {
-    int first_line = term_line_count - TERM_ROWS - term_view_scroll;
+    int first_line = term_line_count - term_rows_visible() - term_view_scroll;
     if (first_line < 0) first_line = 0;
     return first_line;
 }
@@ -94,7 +151,7 @@ static int term_cursor_screen_y(void) {
     if (term_view_scroll != 0) return -1;
     first_line = term_first_visible_line();
     screen_y = cursor_y - first_line;
-    if (screen_y < 0 || screen_y >= TERM_ROWS) return -1;
+    if (screen_y < 0 || screen_y >= term_rows_visible()) return -1;
     return screen_y;
 }
 
@@ -234,14 +291,15 @@ static void term_store_cell(screen_char_t* cell, uint16_t glyph, uint8_t color) 
 }
 
 static void term_draw_shell(void) {
-    vbe_fill_rect(0, 0, WIN_WIDTH, WIN_HEIGHT, TERM_CANVAS_BG);
-    vbe_fill_rect_alpha(0, 0, WIN_WIDTH, 30, UI_SURFACE_1, 255);
-    vbe_fill_rect_alpha(0, 30, WIN_WIDTH, 1, UI_BORDER_SOFT, 255);
-    vbe_fill_rect_alpha(14, 40, WIN_WIDTH - 28, WIN_HEIGHT - 54, UI_SURFACE_0, 255);
-    vbe_draw_rect(14, 40, WIN_WIDTH - 28, WIN_HEIGHT - 54, UI_BORDER_SOFT);
-    vbe_draw_string(22, 10, "Terminal", UI_TEXT);
-    vbe_draw_string(22, 45, "Console", UI_TEXT_SUBTLE);
-    vbe_draw_string(WIN_WIDTH - 92, 10, "PgUp/Dn", UI_TEXT_SUBTLE);
+    int w = term_window_w();
+    int h = term_window_h();
+    vbe_fill_rect(0, 0, w, h, TERM_CANVAS_BG);
+    vbe_fill_rect_alpha(0, 0, w, 32, UI_SURFACE_1, 255);
+    vbe_fill_rect_alpha(0, 32, w, 1, UI_BORDER_SOFT, 255);
+    vbe_fill_rect_alpha(0, 33, w, h - 33, UI_SURFACE_0, 255);
+    vbe_draw_string(24, 14, "Terminal", UI_TEXT);
+    vbe_draw_string(24, 48, "Shell", UI_TEXT_SUBTLE);
+    vbe_draw_string(w - 92, 14, "PgUp/Dn", UI_TEXT_SUBTLE);
 }
 
 static void term_draw_cursor(void) {
@@ -264,22 +322,34 @@ void vga_set_window_pos(int x, int y) {
 
 int vga_get_window_x() { return win_x; }
 int vga_get_window_y() { return win_y; }
-int vga_get_window_w() { return WIN_WIDTH; }
-int vga_get_window_h() { return WIN_HEIGHT; }
+int vga_get_window_w() { return term_window_w(); }
+int vga_get_window_h() { return term_window_h(); }
 int vga_get_title_h() { return 0; }
 void* vga_get_window_buffer() { return vbe_get_window_buffer(); }
 
+int vga_window_needs_refresh(void) {
+    int w = term_window_w();
+    int h = term_window_h();
+    if (vga_window_dirty) return 1;
+    if (w != vga_last_window_w || h != vga_last_window_h) return 1;
+    return 0;
+}
+
 void vga_prepare_win_draw() {
-    vbe_set_target(vbe_get_window_buffer(), WIN_WIDTH);
+    vbe_set_target(vbe_get_window_buffer(), (uint32_t)term_window_w());
 }
 
 void vga_redraw_text_to_buffer() {
     int first_line = term_first_visible_line();
+    int rows = term_rows_visible();
+    int cols = term_cols_visible();
+    term_ensure_layout_valid();
+    first_line = term_first_visible_line();
 
-    for (int y = 0; y < TERM_ROWS; y++) {
+    for (int y = 0; y < rows; y++) {
         int line_idx = first_line + y;
         if (line_idx >= term_line_count) break;
-        for (int x = 0; x < TERM_COLS; x++) {
+        for (int x = 0; x < cols; x++) {
             if (text_buffer[line_idx][x].glyph != 0) {
                 term_draw_glyph(TERM_CONTENT_X + x * TERM_CELL_W, TERM_CONTENT_Y + y * TERM_CELL_H,
                                 text_buffer[line_idx][x].glyph, text_buffer[line_idx][x].rgb);
@@ -290,6 +360,7 @@ void vga_redraw_text_to_buffer() {
 }
 
 void draw_window_frame_to_buffer() {
+    term_ensure_layout_valid();
     vga_prepare_win_draw();
     term_draw_shell();
 }
@@ -297,6 +368,9 @@ void draw_window_frame_to_buffer() {
 void vga_refresh_window() {
     draw_window_frame_to_buffer();
     vga_redraw_text_to_buffer();
+    vga_last_window_w = term_window_w();
+    vga_last_window_h = term_window_h();
+    vga_window_dirty = 0;
     vbe_set_target(vbe_get_backbuffer(), vbe_get_width());
     gui_needs_redraw = 1;
 }
@@ -367,7 +441,7 @@ static void vga_put_glyph_color(uint16_t glyph, uint8_t color) {
         else textmode_update_cursor();
         return;
     }
-    if (cursor_x >= TERM_COLS - 1) vga_newline();
+    if (cursor_x >= term_cols_visible() - 1) vga_newline();
     term_store_cell(&text_buffer[cursor_y][cursor_x], glyph, color);
     if (term_view_scroll == 0) {
         int screen_y = term_cursor_screen_y();
@@ -431,7 +505,14 @@ void vga_backspace() {
 
 void vga_scrollback_page(int direction) {
     if (!screen_graphics_enabled || direction == 0) return;
-    term_view_scroll += direction * (TERM_ROWS - 2);
+    term_view_scroll += direction * (term_rows_visible() - 2);
+    term_clamp_view_scroll();
+    vga_refresh_window();
+}
+
+void vga_scrollback_lines(int direction) {
+    if (!screen_graphics_enabled || direction == 0) return;
+    term_view_scroll += direction;
     term_clamp_view_scroll();
     vga_refresh_window();
 }

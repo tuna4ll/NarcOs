@@ -4,6 +4,8 @@
 #include "serial.h"
 #include "string.h"
 #include "vbe.h"
+#include "mouse.h"
+#include "rtc.h"
 
 extern uint8_t __user_region_start[];
 extern uint8_t __user_region_end[];
@@ -24,6 +26,8 @@ extern void vga_println(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_print_int(int num);
 extern void net_print_ip(uint32_t ip);
+extern int screen_is_graphics_enabled(void);
+extern void vbe_compose_scene_basic(void);
 
 typedef enum {
     USER_TASK_NONE = 0,
@@ -713,8 +717,51 @@ int usermode_run_external_process(process_t* proc) {
 }
 
 static int run_sync_user_app(user_task_kind_t kind, arch_trap_frame_t* context, int* status_ptr) {
+    uint32_t last_clock_tick = timer_ticks;
+    int last_mx = get_mouse_x();
+    int last_my = get_mouse_y();
+    int last_lp = mouse_left_pressed();
+    int last_rp = mouse_right_pressed();
+
     while (*status_ptr == USER_APP_STATUS_RUNNING) {
+        process_t* current;
+        int mx;
+        int my;
+        int lp;
+        int rp;
+        int needs_present = 0;
+
         dispatch_user_task(kind, context);
+
+        current = process_current();
+        if (!current || strcmp(current->name, "desktop") != 0 || !screen_is_graphics_enabled()) {
+            continue;
+        }
+
+        if (timer_ticks - last_clock_tick >= 100U) {
+            read_rtc();
+            last_clock_tick = timer_ticks;
+            gui_needs_redraw = 1;
+        }
+
+        mx = get_mouse_x();
+        my = get_mouse_y();
+        lp = mouse_left_pressed();
+        rp = mouse_right_pressed();
+
+        if (mx != last_mx || my != last_my || lp != last_lp || rp != last_rp) {
+            needs_present = 1;
+        }
+        if (gui_needs_redraw) needs_present = 1;
+
+        if (needs_present) {
+            vbe_compose_scene_basic();
+            gui_needs_redraw = 0;
+            last_mx = mx;
+            last_my = my;
+            last_lp = lp;
+            last_rp = rp;
+        }
     }
     return *status_ptr;
 }

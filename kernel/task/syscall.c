@@ -15,7 +15,6 @@
 extern void vga_println(const char* str);
 extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
-extern void vbe_compose_scene_basic();
 extern int get_mouse_x();
 extern int get_mouse_y();
 extern void clear_screen(void);
@@ -224,8 +223,7 @@ void syscall_GUI_UPDATE(arch_trap_frame_t *frame, arch_syscall_state_t *regs) {
     (void)regs;
 
     if (timer_ticks - last_gui_tick > 2) { 
-        vbe_compose_scene_basic();
-        vbe_update();
+        gui_needs_redraw = 1;
         last_gui_tick = timer_ticks;
     }
 

@@ -10,6 +10,14 @@ typedef enum {
     WIN_TYPE_SETTINGS
 } window_type_t;
 
+typedef enum {
+    CURSOR_MODE_ARROW = 0,
+    CURSOR_MODE_RESIZE_H,
+    CURSOR_MODE_RESIZE_V,
+    CURSOR_MODE_RESIZE_DIAG_LR,
+    CURSOR_MODE_RESIZE_DIAG_RL
+} cursor_mode_t;
+
 typedef struct {
     window_type_t type;
     int x, y, w, h;
@@ -35,12 +43,15 @@ void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2
 void vbe_draw_rect(int x, int y, int w, int h, uint32_t color);
 void vbe_draw_wallpaper();
 void vbe_draw_cursor(int x, int y);
+void vbe_set_cursor_mode(cursor_mode_t mode);
 void vbe_render_mouse(int x, int y);
 void vbe_render_mouse_direct(int x, int y);
 void* vbe_get_backbuffer();
 void* vbe_get_window_buffer();
 void vbe_set_target(uint8_t* buffer, uint32_t width);
 void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int start_vis, int desktop_dir, int drag_file_idx, int mx, int my, int ctx_vis, int ctx_x, int ctx_y, const char** ctx_items, int ctx_count, int ctx_sel);
+void vbe_present_composition_with_cursor(int mx, int my);
+void vbe_present_composition_region(int x, int y, int w, int h);
 void vbe_draw_desktop_icons(int desktop_dir);
 void vbe_draw_context_menu(int x, int y, const char** items, int count, int selected_idx);
 void vbe_draw_rounded_rect(int x, int y, int w, int h, int radius, uint32_t color, int alpha);

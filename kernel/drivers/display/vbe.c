@@ -6,6 +6,7 @@
 #include "string.h"
 #include "fs.h"
 #include "rtc.h"
+#include "net.h"
 #include "maple_mono_8x8.h"
 #include "usermode.h"
 #include "ui_theme.h"
@@ -14,6 +15,7 @@
 #define UI_GLYPH_ADVANCE   7
 
 extern disk_fs_node_t dir_cache[MAX_FILES];
+extern volatile uint32_t timer_ticks;
 typedef struct {
     uint16_t attributes;
     uint8_t  win_a, win_b;
@@ -43,10 +45,25 @@ vbe_mode_info_t* mode_info = (vbe_mode_info_t*)0x6100;
 extern uint8_t inb(uint16_t port);
 extern void outb(uint16_t port, uint8_t val);
 
+#if defined(__x86_64__)
+/*
+ * On x86_64, early kernel task stacks live around 12 MiB. A 1920x1080x24bpp
+ * backbuffer is ~6.22 MiB, so the old 8 MiB placement was clobbering stacks.
+ */
+static uint8_t* backbuffer = (uint8_t*)0x3000000;
+static uint8_t* wallpaper_buffer = (uint8_t*)0x4000000;
+static uint8_t* window_buffer = (uint8_t*)0x5000000;
+static uint8_t* composition_buffer = (uint8_t*)0x6000000;
+#else
+/*
+ * On i386 these addresses must remain inside the low identity mapped region;
+ * the 8-32 MiB range is safe and does not overlap the kernel stack window.
+ */
 static uint8_t* backbuffer = (uint8_t*)0x800000;
 static uint8_t* wallpaper_buffer = (uint8_t*)0x1000000;
 static uint8_t* window_buffer = (uint8_t*)0x1800000;
 static uint8_t* composition_buffer = (uint8_t*)0x2000000;
+#endif
 static uint8_t* framebuffer = 0;
 static int wallpaper_init = 0;
 
@@ -56,6 +73,7 @@ static uint8_t* current_target = (uint8_t*)0x800000;
 static uint32_t current_target_width = 0;
 
 void vbe_put_pixel_to(uint8_t* buffer, uint32_t buf_width, int x, int y, uint32_t color);
+void vbe_put_pixel_alpha(int x, int y, uint32_t color, int alpha);
 
 #if defined(__x86_64__)
 extern const uint8_t _binary_obj_x86_64_assets_bg_rgb_start[];
@@ -124,8 +142,8 @@ static int load_embedded_bg(embedded_ppm_t* out) {
 #else
     start = _binary_obj_i386_assets_bg_rgb_start;
     end = _binary_obj_i386_assets_bg_rgb_end;
-    width = 240U;
-    height = 135U;
+    width = 200U;
+    height = 112U;
 #endif
     expected_size = width * height * 3U;
     if (!start || !end || end <= start) return 0;
@@ -379,6 +397,53 @@ uint16_t mouse_cursor_bitmap[12] = {
     0b111111111100, 0b111111000000, 0b110111000000, 0b100011000000
 };
 
+static cursor_mode_t current_cursor_mode = CURSOR_MODE_ARROW;
+
+void vbe_set_cursor_mode(cursor_mode_t mode) {
+    current_cursor_mode = mode;
+}
+
+static void vbe_draw_cursor_pixel(int x, int y, uint32_t color) {
+    if (mode_info->bpp == 32) vbe_put_pixel_alpha(x, y, color, 255);
+    else vbe_put_pixel(x, y, color);
+}
+
+static void vbe_draw_cursor_hresize(int x, int y) {
+    for (int px = 3; px <= 8; px++) vbe_draw_cursor_pixel(x + px, y + 5, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 2, y + 5, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 3, y + 4, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 3, y + 6, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 9, y + 5, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 8, y + 4, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 8, y + 6, 0xFFFFFF);
+}
+
+static void vbe_draw_cursor_vresize(int x, int y) {
+    for (int py = 3; py <= 8; py++) vbe_draw_cursor_pixel(x + 5, y + py, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 5, y + 2, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 4, y + 3, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 6, y + 3, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 5, y + 9, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 4, y + 8, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 6, y + 8, 0xFFFFFF);
+}
+
+static void vbe_draw_cursor_diag_lr(int x, int y) {
+    for (int i = 2; i <= 8; i++) vbe_draw_cursor_pixel(x + i, y + i, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 2, y + 3, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 3, y + 2, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 7, y + 8, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 8, y + 7, 0xFFFFFF);
+}
+
+static void vbe_draw_cursor_diag_rl(int x, int y) {
+    for (int i = 2; i <= 8; i++) vbe_draw_cursor_pixel(x + (10 - i), y + i, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 8, y + 3, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 7, y + 2, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 3, y + 8, 0xFFFFFF);
+    vbe_draw_cursor_pixel(x + 2, y + 7, 0xFFFFFF);
+}
+
 void* vbe_get_backbuffer() { return backbuffer; }
 
 void vbe_update() {
@@ -394,6 +459,30 @@ void vbe_update() {
             vbe_memcpy_fast(frontbuffer + y * mode_info->pitch, backbuffer + y * row_size, row_size);
         }
     }
+}
+
+void vbe_present_composition_with_cursor(int mx, int my) {
+    uint8_t* saved_backbuffer = backbuffer;
+
+    backbuffer = composition_buffer;
+    vbe_update();
+    backbuffer = saved_backbuffer;
+    vbe_render_mouse_direct(mx, my);
+}
+
+void vbe_present_composition_region(int x, int y, int w, int h) {
+    if (x < 0) {
+        w += x;
+        x = 0;
+    }
+    if (y < 0) {
+        h += y;
+        y = 0;
+    }
+    if (x + w > (int)mode_info->width) w = (int)mode_info->width - x;
+    if (y + h > (int)mode_info->height) h = (int)mode_info->height - y;
+    if (w <= 0 || h <= 0) return;
+    vbe_blit_rect(x, y, w, h, composition_buffer, mode_info->width);
 }
 
 void wait_vsync() {
@@ -516,6 +605,22 @@ void vbe_draw_wallpaper() {
 }
 
 void vbe_draw_cursor(int x, int y) {
+    if (current_cursor_mode == CURSOR_MODE_RESIZE_H) {
+        vbe_draw_cursor_hresize(x, y);
+        return;
+    }
+    if (current_cursor_mode == CURSOR_MODE_RESIZE_V) {
+        vbe_draw_cursor_vresize(x, y);
+        return;
+    }
+    if (current_cursor_mode == CURSOR_MODE_RESIZE_DIAG_LR) {
+        vbe_draw_cursor_diag_lr(x, y);
+        return;
+    }
+    if (current_cursor_mode == CURSOR_MODE_RESIZE_DIAG_RL) {
+        vbe_draw_cursor_diag_rl(x, y);
+        return;
+    }
     if (mode_info->bpp == 32) {
         int start_x = x < 0 ? 0 : x;
         int start_y = y < 0 ? 0 : y;
@@ -660,29 +765,36 @@ void vbe_copy_to_buffer(void* source) {
 #define UI_GLYPH_ADVANCE   7
 
 static void ui_draw_panel(int x, int y, int w, int h, int radius, uint32_t fill, int fill_alpha, uint32_t border, int border_alpha) {
-    vbe_draw_shadow(x + 4, y + 6, w, h, radius);
+    vbe_draw_shadow(x + 1, y + 2, w, h, radius);
     vbe_draw_rounded_rect(x, y, w, h, radius, fill, fill_alpha);
+    if (w > 6 && h > 6) {
+        vbe_draw_rounded_rect(x + 1, y + 1, w - 2, h - 2, radius > 1 ? radius - 1 : radius, 0xFFFFFF, 8);
+    }
     vbe_draw_rounded_rect(x, y, w, h, radius, border, border_alpha);
-    if (w > 8 && h > 8) vbe_fill_rect_alpha(x + 2, y + 2, w - 4, 1, 0xFFFFFF, 14);
 }
 
 static void ui_draw_panel_flat(int x, int y, int w, int h, int radius, uint32_t fill, int fill_alpha, uint32_t border, int border_alpha) {
     vbe_draw_rounded_rect(x, y, w, h, radius, fill, fill_alpha);
+    if (w > 6 && h > 6) {
+        vbe_draw_rounded_rect(x + 1, y + 1, w - 2, h - 2, radius > 1 ? radius - 1 : radius, 0xFFFFFF, 5);
+    }
     vbe_draw_rounded_rect(x, y, w, h, radius, border, border_alpha);
-    if (w > 8 && h > 8) vbe_fill_rect_alpha(x + 2, y + 2, w - 4, 1, 0xFFFFFF, 10);
 }
 
 static void ui_draw_chip(int x, int y, int w, int h, uint32_t fill, uint32_t text, const char* label) {
-    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_SM, fill, 220);
-    vbe_draw_rect(x, y, w, h, UI_BORDER_SOFT);
-    if (label) vbe_draw_string(x + 9, y + 6, label, text);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_SM, fill, 235);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_SM, UI_BORDER_SOFT, 180);
+    if (label) vbe_draw_string(x + 10, y + 6, label, text);
 }
 
-static void ui_draw_app_toolbar(int x, int y, int w, const char* app_name, const char* meta) {
-    vbe_fill_rect_alpha(x, y, w, 28, UI_SURFACE_1, 255);
-    vbe_fill_rect_alpha(x, y + 27, w, 1, UI_BORDER_SOFT, 255);
-    if (app_name) vbe_draw_string(x + 12, y + 9, app_name, UI_TEXT);
-    if (meta) vbe_draw_string(x + w - 120, y + 9, meta, UI_TEXT_SUBTLE);
+static int ui_explorer_sidebar_width(int client_w) {
+    if (client_w < 470) return 104;
+    if (client_w < 620) return 116;
+    return 132;
+}
+
+static int ui_settings_compact_layout(int client_w) {
+    return client_w < 430;
 }
 
 static void ui_draw_modal(void) {
@@ -744,13 +856,14 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
     int w = win->w;
     int h = win->h;
 
-    vbe_draw_shadow(x + 4, y + 6, w, h, UI_RADIUS_LG);
-    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 238);
+    vbe_draw_shadow(x + 1, y + 2, w, h, UI_RADIUS_LG);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, COLOR_GLASS_BG, 246);
+    vbe_draw_rounded_rect(x, y, w, h, UI_RADIUS_LG, UI_BORDER_STRONG, 220);
 
     uint32_t title_top = is_focused ? UI_SURFACE_3 : UI_SURFACE_2;
     uint32_t title_bottom = is_focused ? UI_SURFACE_2 : UI_SURFACE_1;
-    vbe_fill_rect_gradient(x + 1, y + 1, w - 2, 34, title_top, title_bottom, 1);
-    vbe_fill_rect_alpha(x + 1, y + 34, w - 2, 1, is_focused ? UI_ACCENT : UI_BORDER_SOFT, 180);
+    vbe_fill_rect_gradient(x + 1, y + 1, w - 2, 38, title_top, title_bottom, 1);
+    vbe_fill_rect_alpha(x + 1, y + 38, w - 2, 1, is_focused ? UI_ACCENT : UI_BORDER_SOFT, 200);
     vbe_fill_rect_alpha(x + WINDOW_CLIENT_INSET_X, y + WINDOW_CLIENT_TOP,
                         w - WINDOW_CLIENT_INSET_X * 2, h - WINDOW_CLIENT_TOP - WINDOW_CLIENT_BOTTOM,
                         UI_SURFACE_0, 255);
@@ -761,11 +874,15 @@ void vbe_blit_window(window_t* win, uint8_t* win_buf, int is_focused) {
         if (title_chars < 6) title_chars = 6;
         if (title_chars > 19) title_chars = 19;
         ui_copy_truncated(title_buf, win->title, title_chars);
-        vbe_draw_string(x + 16, y + 12, title_buf, COLOR_TEXT);
+        vbe_draw_string(x + 18, y + 15, title_buf, COLOR_TEXT);
     }
 
-    vbe_draw_rounded_rect(x + w - 44, y + 9, 12, 12, 6, UI_WARNING, 230);
-    vbe_draw_rounded_rect(x + w - 22, y + 9, 12, 12, 6, UI_DANGER, 240);
+    vbe_draw_rounded_rect(x + w - 64, y + 14, 8, 8, 4, UI_SUCCESS, 200);
+    vbe_draw_rounded_rect(x + w - 46, y + 14, 8, 8, 4, UI_WARNING, 210);
+    vbe_draw_rounded_rect(x + w - 28, y + 14, 8, 8, 4, UI_DANGER, 225);
+    vbe_fill_rect_alpha(x + w - 18, y + h - 12, 8, 1, UI_TEXT_SUBTLE, 180);
+    vbe_fill_rect_alpha(x + w - 15, y + h - 9, 5, 1, UI_TEXT_SUBTLE, 180);
+    vbe_fill_rect_alpha(x + w - 12, y + h - 6, 2, 1, UI_TEXT_SUBTLE, 180);
 
     if (win_buf) {
         uint32_t bpp = mode_info->bpp / 8;
@@ -879,61 +996,188 @@ void vbe_draw_rounded_rect(int x, int y, int w, int h, int r, uint32_t color, in
 }
 
 void vbe_draw_shadow(int x, int y, int w, int h, int r) {
-    vbe_draw_rounded_rect(x + 2, y + 3, w + 4, h + 6, r + 2, 0x000000, 28);
-    vbe_draw_rounded_rect(x + 4, y + 6, w + 8, h + 12, r + 4, 0x000000, 12);
+    vbe_draw_rounded_rect(x + 1, y + 2, w + 2, h + 4, r + 2, 0x000000, 22);
+    vbe_draw_rounded_rect(x + 3, y + 5, w + 6, h + 8, r + 3, 0x000000, 8);
+}
+
+static void ui_draw_taskbar_button(int x, int y, int w, int h, int active, const char* label) {
+    uint32_t fill = active ? UI_ACCENT_DEEP : UI_TASKBAR_PANEL;
+    uint32_t text = active ? UI_TEXT : UI_TEXT_MUTED;
+    vbe_draw_rounded_rect(x, y, w, h, 9, fill, 248);
+    vbe_draw_rounded_rect(x, y, w, h, 9, active ? UI_ACCENT_ALT : UI_BORDER_SOFT, active ? 210 : 150);
+    if (label) vbe_draw_string(x + 28, y + 9, label, text);
+    vbe_fill_rect_alpha(x + 12, y + 9, 8, 8, active ? 0xDCEBFA : UI_TEXT_SUBTLE, 235);
+}
+
+static void ui_draw_taskbar_terminal_button(int x, int y, int active) {
+    uint32_t fill = active ? UI_SURFACE_3 : UI_TASKBAR_PANEL;
+    vbe_draw_rounded_rect(x, y, 34, 28, 9, fill, 246);
+    vbe_draw_rounded_rect(x, y, 34, 28, 9, active ? UI_ACCENT : UI_BORDER_SOFT, active ? 210 : 150);
+    vbe_draw_vector_terminal(x + 2, y - 1);
+}
+
+static void ui_draw_taskbar_window_slot(int x, int y, int w, const char* title, int active) {
+    uint32_t fill = active ? UI_TASKBAR_PANEL_ALT : UI_TASKBAR_PANEL;
+    uint32_t border = active ? UI_ACCENT : UI_BORDER_SOFT;
+    uint32_t text = active ? UI_TEXT : UI_TEXT_MUTED;
+    vbe_draw_rounded_rect(x, y, w, 26, 8, fill, 244);
+    vbe_draw_rounded_rect(x, y, w, 26, 8, border, active ? 205 : 135);
+    if (active) vbe_fill_rect_alpha(x + 8, y + 18, 3, 3, UI_ACCENT_ALT, 255);
+    vbe_draw_string(x + 16, y + 8, title, text);
+}
+
+static void ui_format_rate_short(char* out, uint32_t bytes_per_sec) {
+    uint32_t whole;
+    uint32_t frac;
+    if (!out) return;
+    if (bytes_per_sec >= 1024U * 1024U) {
+        whole = bytes_per_sec / (1024U * 1024U);
+        frac = ((bytes_per_sec % (1024U * 1024U)) * 10U) / (1024U * 1024U);
+        out[0] = (char)('0' + (whole / 10U));
+        out[1] = (char)('0' + (whole % 10U));
+        out[2] = '.';
+        out[3] = (char)('0' + frac);
+        out[4] = 'M';
+        out[5] = '\0';
+    } else {
+        whole = bytes_per_sec / 1024U;
+        if (whole > 99U) whole = 99U;
+        out[0] = (char)('0' + (whole / 10U));
+        out[1] = (char)('0' + (whole % 10U));
+        out[2] = 'K';
+        out[3] = '\0';
+    }
+}
+
+static void ui_draw_taskbar_network_panel(int x, int y, int w, int h) {
+    static uint32_t last_sample_tick = 0;
+    static uint32_t last_rx_bytes = 0;
+    static uint32_t last_tx_bytes = 0;
+    static uint16_t rx_hist[24];
+    static uint16_t tx_hist[24];
+    net_stats_t stats;
+    char rx_buf[6];
+    char tx_buf[6];
+    uint32_t max_rate = 1;
+
+    if (net_get_stats(&stats) != 0 || !stats.available) {
+        vbe_draw_rounded_rect(x, y, w, h, 8, UI_TASKBAR_PANEL, 246);
+        vbe_draw_rounded_rect(x, y, w, h, 8, UI_BORDER_SOFT, 150);
+        vbe_draw_string(x + 10, y + 9, "NET", UI_TEXT_MUTED);
+        vbe_draw_string(x + 36, y + 9, "offline", UI_TEXT_SUBTLE);
+        return;
+    }
+
+    if (last_sample_tick == 0 || timer_ticks - last_sample_tick >= 100U) {
+        uint32_t rx_rate = stats.rx_bytes - last_rx_bytes;
+        uint32_t tx_rate = stats.tx_bytes - last_tx_bytes;
+        for (int i = 0; i < 23; i++) {
+            rx_hist[i] = rx_hist[i + 1];
+            tx_hist[i] = tx_hist[i + 1];
+        }
+        rx_hist[23] = (uint16_t)(rx_rate > 65535U ? 65535U : rx_rate);
+        tx_hist[23] = (uint16_t)(tx_rate > 65535U ? 65535U : tx_rate);
+        last_rx_bytes = stats.rx_bytes;
+        last_tx_bytes = stats.tx_bytes;
+        last_sample_tick = timer_ticks;
+    }
+
+    for (int i = 0; i < 24; i++) {
+        if (rx_hist[i] > max_rate) max_rate = rx_hist[i];
+        if (tx_hist[i] > max_rate) max_rate = tx_hist[i];
+    }
+
+    vbe_draw_rounded_rect(x, y, w, h, 8, UI_TASKBAR_PANEL, 246);
+    vbe_draw_rounded_rect(x, y, w, h, 8, UI_BORDER_SOFT, 150);
+    vbe_draw_string(x + 8, y + 5, stats.configured ? "NET" : "DHCP", UI_TEXT_MUTED);
+
+    for (int i = 0; i < 24; i++) {
+        int bar_h_rx = (rx_hist[i] * 10U) / max_rate;
+        int bar_h_tx = (tx_hist[i] * 10U) / max_rate;
+        int px = x + 8 + i * 2;
+        if (bar_h_rx > 0) vbe_fill_rect_alpha(px, y + 20 - bar_h_rx, 1, bar_h_rx, UI_ACCENT_ALT, 255);
+        if (bar_h_tx > 0) vbe_fill_rect_alpha(px + 1, y + 20 - bar_h_tx, 1, bar_h_tx, UI_SUCCESS, 255);
+    }
+
+    ui_format_rate_short(rx_buf, rx_hist[23]);
+    ui_format_rate_short(tx_buf, tx_hist[23]);
+    vbe_draw_string(x + 60, y + 5, rx_buf, UI_ACCENT_ALT);
+    vbe_draw_string(x + 60, y + 14, tx_buf, UI_SUCCESS);
 }
 
 void vbe_draw_taskbar(int start_btn_active) {
     uint32_t w = mode_info->width;
-    uint32_t tb_h = 35;
-    vbe_fill_rect_gradient(0, 0, w, tb_h, UI_TASKBAR_MID, UI_TASKBAR_BG, 1);
-    vbe_fill_rect_alpha(0, 0, w, 1, UI_TASKBAR_EDGE, 140);
-    vbe_fill_rect_alpha(0, tb_h - 1, w, 1, UI_BORDER_SOFT, 180);
-    
-    uint32_t btn_color = start_btn_active ? UI_ACCENT_DEEP : UI_SURFACE_2;
-    vbe_draw_rounded_rect(5, 4, 84, 27, UI_RADIUS_SM, btn_color, 255);
-    vbe_draw_string(20, 12, "Narc", COLOR_TEXT);
-
-    vbe_draw_rounded_rect(96, 4, 40, 27, UI_RADIUS_SM, UI_SURFACE_2, 220);
-    vbe_draw_vector_terminal(101, 0);
-    
-    int app_x = 148;
-    int slot_w = 104;
-    int slot_gap = 8;
-    int max_x = (int)w - 118;
+    uint32_t tb_h = 40;
+    int bar_x = 8;
+    int bar_y = 6;
+    int bar_h = 28;
+    int menu_x = bar_x;
+    int term_x = menu_x + 100;
+    int app_x = term_x + 46;
+    int slot_gap = 6;
+    int net_w = 102;
+    int clock_w = 92;
+    int clock_x = (int)w - clock_w - 12;
+    int net_x = clock_x - net_w - 8;
+    int right_x = net_x - 12;
+    int available_w = right_x - app_x - 12;
+    int visible_count = 0;
     extern window_t windows[MAX_WINDOWS];
     extern int window_count;
     extern int active_window_idx;
-    
+
+    vbe_fill_rect_alpha(0, 0, w, tb_h, UI_TASKBAR_BG, 236);
+    vbe_fill_rect_gradient(0, 0, w, tb_h, UI_TASKBAR_MID, UI_TASKBAR_BG, 1);
+    vbe_fill_rect_alpha(0, 0, w, 1, UI_TASKBAR_EDGE, 145);
+    vbe_fill_rect_alpha(0, tb_h - 1, w, 1, UI_BORDER_SOFT, 160);
+    vbe_fill_rect_alpha(0, tb_h, w, 1, 0x000000, 55);
+
+    ui_draw_taskbar_button(menu_x, bar_y, 94, bar_h, start_btn_active, "NarcOS");
+    ui_draw_taskbar_terminal_button(term_x, bar_y, 0);
+
     for (int i = 0; i < window_count; i++) {
-        if (!windows[i].visible) continue;
-        
-        char title_buf[13];
-        uint32_t app_col;
-        if (app_x + slot_w > max_x) break;
-        app_col = (i == active_window_idx) ? UI_ACCENT_DEEP : UI_SURFACE_2;
-        ui_copy_truncated(title_buf, windows[i].title, 12);
-        vbe_draw_rounded_rect(app_x, 4, slot_w, 27, UI_RADIUS_SM, app_col, 220);
-        vbe_draw_string(app_x + 10, 12, title_buf, (i == active_window_idx) ? UI_TEXT : UI_TEXT_MUTED);
-        app_x += slot_w + slot_gap;
+        if (windows[i].visible) visible_count++;
     }
+
+    if (visible_count > 0 && available_w > 90) {
+        int slot_w = (available_w - ((visible_count - 1) * slot_gap)) / visible_count;
+        if (slot_w > 118) slot_w = 118;
+        if (slot_w < 76) slot_w = 76;
+        int strip_w = visible_count * slot_w + (visible_count - 1) * slot_gap;
+        int strip_x = app_x + (available_w - strip_w) / 2;
+        int current_slot_x = strip_x;
+
+        for (int i = 0; i < window_count; i++) {
+            char title_buf[13];
+            int title_chars;
+            if (!windows[i].visible) continue;
+            title_chars = (slot_w - 24) / 7;
+            if (title_chars < 6) title_chars = 6;
+            if (title_chars > 12) title_chars = 12;
+            ui_copy_truncated(title_buf, windows[i].title, title_chars);
+            ui_draw_taskbar_window_slot(current_slot_x, bar_y + 1, slot_w, title_buf, i == active_window_idx);
+            current_slot_x += slot_w + slot_gap;
+        }
+    }
+
+    ui_draw_taskbar_network_panel(net_x, bar_y, net_w, 28);
 }
 
 void vbe_draw_start_menu() {
-    ui_draw_panel(8, 41, 260, 356, UI_RADIUS_LG, UI_SURFACE_1, 244, UI_BORDER_SOFT, 255);
-    vbe_fill_rect_gradient(9, 42, 258, 56, UI_SURFACE_3, UI_SURFACE_2, 1);
-    vbe_draw_string(24, 58, "NarcOS", UI_TEXT);
-    vbe_draw_string(24, 76, "Applications", UI_TEXT_MUTED);
+    ui_draw_panel(10, 42, 276, 324, UI_RADIUS_LG, UI_SURFACE_1, 246, UI_BORDER_SOFT, 255);
+    vbe_draw_string(26, 62, "Applications", UI_TEXT);
+    vbe_draw_string(26, 80, "Quick launch", UI_TEXT_SUBTLE);
 
-    ui_draw_chip(20, 114, 220, 24, UI_SURFACE_2, UI_TEXT, "Terminal");
-    ui_draw_chip(20, 146, 220, 24, UI_SURFACE_2, UI_TEXT, "Snake");
-    ui_draw_chip(20, 178, 220, 24, UI_SURFACE_2, UI_TEXT, "NarcPad");
-    ui_draw_chip(20, 210, 220, 24, UI_SURFACE_2, UI_TEXT, "Settings");
+    ui_draw_chip(22, 106, 116, 26, UI_SURFACE_2, UI_TEXT, "Terminal");
+    ui_draw_chip(148, 106, 116, 26, UI_SURFACE_2, UI_TEXT, "Explorer");
+    ui_draw_chip(22, 140, 116, 26, UI_SURFACE_2, UI_TEXT, "NarcPad");
+    ui_draw_chip(148, 140, 116, 26, UI_SURFACE_2, UI_TEXT, "Settings");
+    ui_draw_chip(22, 174, 116, 26, UI_SURFACE_2, UI_TEXT, "Snake");
 
-    ui_draw_panel_flat(20, 258, 220, 78, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
-    vbe_draw_string(34, 276, "Session", UI_TEXT_SUBTLE);
-    vbe_draw_string(34, 296, "Desktop", UI_TEXT);
-    vbe_draw_string(34, 314, "Local system", UI_TEXT_MUTED);
+    ui_draw_panel_flat(22, 222, 242, 84, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+    vbe_draw_string(38, 242, "Session", UI_TEXT_SUBTLE);
+    vbe_draw_string(38, 260, "NarcOS Desktop", UI_TEXT);
+    vbe_draw_string(38, 278, "Local system", UI_TEXT_MUTED);
 }
 void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2, int vertical) {
     if (x < 0) { w += x; x = 0; }
@@ -980,14 +1224,17 @@ void vbe_fill_rect_gradient(int x, int y, int w, int h, uint32_t c1, uint32_t c2
 void vbe_draw_clock() {
     uint32_t w = mode_info->width;
     char time_str[9];
+    int panel_x = (int)w - 104;
+    int panel_y = 6;
     uint8_t hh = get_hour();
     uint8_t mm = get_minute();
     uint8_t ss = get_second();
     time_str[0] = (hh / 10) + '0'; time_str[1] = (hh % 10) + '0'; time_str[2] = ':';
     time_str[3] = (mm / 10) + '0'; time_str[4] = (mm % 10) + '0'; time_str[5] = ':';
     time_str[6] = (ss / 10) + '0'; time_str[7] = (ss % 10) + '0'; time_str[8] = '\0';
-    ui_draw_chip(w - 104, 8, 90, 20, UI_SURFACE_2, UI_TEXT, 0);
-    vbe_draw_string(w - 96, 14, time_str, UI_ACCENT_ALT);
+    vbe_draw_rounded_rect(panel_x, panel_y, 92, 28, 8, UI_TASKBAR_PANEL, 246);
+    vbe_draw_rounded_rect(panel_x, panel_y, 92, 28, 8, UI_BORDER_SOFT, 150);
+    vbe_draw_string(panel_x + 14, panel_y + 9, time_str, UI_TEXT);
 }
 
 void vbe_draw_vector_folder(int x, int y, int selected) {
@@ -1032,8 +1279,7 @@ void vbe_draw_vector_terminal(int x, int y) {
 
 void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
     if (selected) {
-        vbe_draw_rounded_rect(x - 12, y - 10, 60, 70, UI_RADIUS_MD, UI_SURFACE_2, 220);
-        vbe_draw_rounded_rect(x - 12, y - 10, 60, 70, UI_RADIUS_MD, UI_ACCENT, 160);
+        ui_draw_panel_flat(x - 14, y - 12, 64, 74, UI_RADIUS_MD, UI_SURFACE_2, 210, UI_ACCENT, 180);
     }
     
     if (type == 0) vbe_draw_vector_folder(x, y, selected);
@@ -1045,6 +1291,8 @@ void vbe_draw_icon(int x, int y, int type, const char* label, int selected) {
 }
 #include "fs.h"
 extern disk_fs_node_t dir_cache[MAX_FILES];
+extern void vga_refresh_window(void);
+extern int vga_window_needs_refresh(void);
 
 static int ui_count_children(int parent_idx) {
     int count = 0;
@@ -1081,10 +1329,10 @@ static void ui_build_path_for_dir(int dir_idx, char* out, int out_len) {
 }
 
 static void ui_draw_list_card(int x, int y, int w, int h, int type, const char* name, int size, int selected) {
-    uint32_t fill = selected ? UI_ACCENT_DEEP : ((type == 2) ? UI_SURFACE_2 : UI_SURFACE_1);
+    uint32_t fill = selected ? UI_ACCENT_DEEP : UI_SURFACE_1;
     uint32_t border = selected ? UI_ACCENT_ALT : UI_BORDER_SOFT;
     ui_draw_panel_flat(x, y, w, h, UI_RADIUS_MD, fill, 235, border, 255);
-    if (selected) vbe_fill_rect_alpha(x + 1, y + 1, 3, h - 2, UI_ACCENT_ALT, 255);
+    if (selected) vbe_fill_rect_alpha(x + 8, y + 6, w - 16, 2, UI_ACCENT_ALT, 180);
     if (type == 2) vbe_draw_vector_folder(x + 10, y + 8, selected);
     else vbe_draw_vector_file(x + 10, y + 6, selected);
     vbe_draw_string(x + 56, y + 12, name, UI_TEXT);
@@ -1097,59 +1345,76 @@ static void ui_draw_list_card(int x, int y, int w, int h, int type, const char* 
     }
 }
 
+static int ui_explorer_visible_rows(int panel_h) {
+    int rows = (panel_h - 64) / 54;
+    if (rows < 1) rows = 1;
+    return rows;
+}
+
 void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
-    int sidebar_w = 136;
-    int content_x = x + sidebar_w + 14;
-    int content_w = w - sidebar_w - 26;
+    int compact = w < 620;
+    int sidebar_w = ui_explorer_sidebar_width(w);
+    int content_x = x + sidebar_w + 12;
+    int content_w = w - sidebar_w - 12;
     int panel_y = y;
     int panel_h = h;
-    int toolbar_y = panel_y + 8;
-    int list_y = panel_y + 48;
+    int list_y = panel_y + 12;
     int item_count = ui_count_children(current_dir);
     int content_h = panel_h;
+    int visible_rows = ui_explorer_visible_rows(panel_h);
+    int max_scroll = item_count > visible_rows ? item_count - visible_rows : 0;
+    int start_row;
+    int sidebar_chip_w = sidebar_w - 24;
+    char selected_buf[28];
 
     ui_draw_panel_flat(x, panel_y, sidebar_w, panel_h, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
-    vbe_draw_string(x + 14, panel_y + 16, "PLACES", UI_TEXT_SUBTLE);
-    ui_draw_chip(x + 12, panel_y + 34, 110, 22, current_dir == -1 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "Root");
-    ui_draw_chip(x + 12, panel_y + 62, 110, 22, UI_SURFACE_2, UI_TEXT, "Desktop");
-    ui_draw_chip(x + 12, panel_y + 90, 110, 22, UI_SURFACE_2, UI_TEXT, "Workspace");
-    vbe_fill_rect_alpha(x + 12, panel_y + 128, 110, 1, UI_BORDER_SOFT, 255);
-    vbe_draw_string(x + 14, panel_y + 144, "ITEMS", UI_TEXT_SUBTLE);
-    vbe_draw_int(x + 88, panel_y + 144, item_count, UI_ACCENT_ALT);
-    vbe_draw_string(x + 14, panel_y + panel_h - 44, "Status", UI_TEXT_SUBTLE);
+    vbe_draw_string(x + 16, panel_y + 16, "Places", UI_TEXT);
+    ui_draw_chip(x + 12, panel_y + 40, sidebar_chip_w, 22, current_dir == -1 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "Root");
+    ui_draw_chip(x + 12, panel_y + 68, sidebar_chip_w, 22, UI_SURFACE_2, UI_TEXT, "Desktop");
+    ui_draw_chip(x + 12, panel_y + 96, sidebar_chip_w, 22, UI_SURFACE_2, UI_TEXT, compact ? "Home" : "Workspace");
+    vbe_fill_rect_alpha(x + 12, panel_y + 132, sidebar_chip_w, 1, UI_BORDER_SOFT, 255);
+    vbe_draw_string(x + 16, panel_y + 146, "Items", UI_TEXT_SUBTLE);
+    vbe_draw_int(x + 66, panel_y + 146, item_count, UI_ACCENT_ALT);
+    vbe_draw_string(x + 16, panel_y + panel_h - 44, "Status", UI_TEXT_SUBTLE);
     if (user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
-        vbe_draw_string(x + 14, panel_y + panel_h - 28, dir_cache[user_explorer_state.selected_idx].name, UI_TEXT);
+        ui_copy_truncated(selected_buf, dir_cache[user_explorer_state.selected_idx].name, compact ? 11 : 15);
+        vbe_draw_string(x + 16, panel_y + panel_h - 28, selected_buf, UI_TEXT);
     } else {
-        vbe_draw_string(x + 14, panel_y + panel_h - 28, "No selection", UI_TEXT_MUTED);
+        vbe_draw_string(x + 16, panel_y + panel_h - 28, "No selection", UI_TEXT_MUTED);
     }
 
     ui_draw_panel_flat(content_x, panel_y, content_w, panel_h, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
-    ui_draw_chip(content_x + 12, toolbar_y, 46, 20, UI_SURFACE_2, UI_TEXT, "Back");
-    ui_draw_chip(content_x + 66, toolbar_y, 38, 20, UI_SURFACE_2, UI_TEXT, "Up");
-    ui_draw_chip(content_x + 112, toolbar_y, 70, 20, UI_SURFACE_2, UI_TEXT_MUTED, "New File");
-    ui_draw_chip(content_x + 190, toolbar_y, 84, 20, UI_SURFACE_2, UI_TEXT_MUTED, "New Folder");
-    ui_draw_chip(content_x + 282, toolbar_y, 60, 20, UI_SURFACE_2, UI_TEXT_MUTED, "Rename");
-    ui_draw_chip(content_x + 350, toolbar_y, 54, 20, UI_SURFACE_2, UI_DANGER, "Delete");
-    ui_draw_chip(content_x + content_w - 76, toolbar_y, 60, 20, UI_SURFACE_2, UI_TEXT_MUTED, "Refresh");
-    vbe_fill_rect_alpha(content_x + 12, panel_y + 36, content_w - 24, 1, UI_BORDER_SOFT, 255);
+    vbe_draw_string(content_x + 14, panel_y + 16, "Directory", UI_TEXT);
+    vbe_draw_string(content_x + content_w - (compact ? 38 : 72), panel_y + 16, compact ? "Sync" : "Refresh", UI_TEXT_SUBTLE);
+    vbe_fill_rect_alpha(content_x + 12, panel_y + 30, content_w - 24, 1, UI_BORDER_SOFT, 255);
+    if (user_explorer_state.list_scroll < 0) user_explorer_state.list_scroll = 0;
+    if (user_explorer_state.list_scroll > max_scroll) user_explorer_state.list_scroll = max_scroll;
+    start_row = user_explorer_state.list_scroll;
     if (item_count == 0) {
-        ui_draw_panel_flat(content_x + 18, list_y + 8, content_w - 36, 108, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
-        vbe_draw_vector_folder(content_x + 36, list_y + 32, 0);
-        vbe_draw_string(content_x + 86, list_y + 42, "This directory is empty.", UI_TEXT);
-        vbe_draw_string(content_x + 86, list_y + 60, "Create a file or folder to start using this workspace.", UI_TEXT_MUTED);
-        vbe_draw_string(content_x + 86, list_y + 78, "Right click for actions.", UI_ACCENT_ALT);
+        ui_draw_panel_flat(content_x + 16, list_y + 28, content_w - 32, 96, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+        vbe_draw_vector_folder(content_x + 34, list_y + 52, 0);
+        vbe_draw_string(content_x + 82, list_y + 58, "This directory is empty.", UI_TEXT);
+        if (!compact) {
+            vbe_draw_string(content_x + 82, list_y + 76, "Create a file or folder to start using this workspace.", UI_TEXT_MUTED);
+        } else {
+            vbe_draw_string(content_x + 82, list_y + 76, "Create a file or folder to begin.", UI_TEXT_MUTED);
+        }
         vbe_fill_rect_alpha(content_x + 12, panel_y + panel_h - 26, content_w - 24, 14, UI_SURFACE_0, 255);
         vbe_draw_string(content_x + 18, panel_y + panel_h - 22, "0 items", UI_TEXT_MUTED);
         return;
     }
 
     int row = 0;
+    int matched_row = 0;
     for (int i = 0; i < MAX_FILES; i++) {
         if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == current_dir) {
-            ui_draw_list_card(content_x + 16, list_y + row * 54, content_w - 32, 44,
-                              dir_cache[i].flags, dir_cache[i].name, (int)dir_cache[i].size, user_explorer_state.selected_idx == i);
-            row++;
-            if (list_y + row * 54 > panel_y + panel_h - 56) break;
+            if (matched_row >= start_row && row < visible_rows) {
+                ui_draw_list_card(content_x + 16, list_y + row * 54, content_w - 32, 44,
+                                  dir_cache[i].flags, dir_cache[i].name, (int)dir_cache[i].size, user_explorer_state.selected_idx == i);
+                row++;
+            }
+            matched_row++;
+            if (row >= visible_rows) break;
         }
     }
 
@@ -1157,8 +1422,14 @@ void vbe_draw_explorer_content(int x, int y, int w, int h, int current_dir) {
     vbe_draw_string(content_x + 18, panel_y + content_h - 22, "Ready", UI_TEXT_MUTED);
     vbe_draw_int(content_x + 72, panel_y + content_h - 22, item_count, UI_ACCENT_ALT);
     vbe_draw_string(content_x + 90, panel_y + content_h - 22, "items", UI_TEXT_SUBTLE);
-    if (user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
-        vbe_draw_string(content_x + content_w - 132, panel_y + content_h - 22, dir_cache[user_explorer_state.selected_idx].name, UI_TEXT);
+    if (max_scroll > 0) {
+        vbe_draw_int(content_x + 132, panel_y + content_h - 22, start_row + 1, UI_TEXT_MUTED);
+        vbe_draw_string(content_x + 150, panel_y + content_h - 22, "/", UI_TEXT_SUBTLE);
+        vbe_draw_int(content_x + 160, panel_y + content_h - 22, max_scroll + 1, UI_TEXT_MUTED);
+    }
+    if (content_w > 220 && user_explorer_state.selected_idx >= 0 && dir_cache[user_explorer_state.selected_idx].flags != 0) {
+        ui_copy_truncated(selected_buf, dir_cache[user_explorer_state.selected_idx].name, compact ? 10 : 15);
+        vbe_draw_string(content_x + content_w - (compact ? 84 : 132), panel_y + content_h - 22, selected_buf, UI_TEXT);
     }
 }
 void vbe_draw_desktop_icons(int desktop_dir) {
@@ -1197,71 +1468,128 @@ void* vbe_get_window_buffer() { return window_buffer; }
 void vbe_draw_breadcrumb(int x, int y, int w, int current_dir) {
     char path_buf[128];
     ui_build_path_for_dir(current_dir, path_buf, sizeof(path_buf));
-    ui_draw_panel_flat(x, y, w, 28, UI_RADIUS_SM, UI_SURFACE_0, 235, UI_BORDER_SOFT, 255);
-    ui_draw_chip(x + 8, y + 4, 44, 20, UI_SURFACE_2, UI_TEXT_MUTED, "Path");
-    vbe_draw_string(x + 60, y + 9, path_buf, UI_TEXT);
+    ui_draw_panel_flat(x, y, w, 28, UI_RADIUS_SM, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
+    vbe_draw_string(x + 12, y + 9, path_buf, UI_TEXT);
 }
 void vbe_draw_narcpad(int x, int y, int w, int h, const char* title, const char* content) {
     (void)title;
-    int text_x = x + 8;
-    int text_y = y + 8;
-    int text_w = w - 16;
-    int text_h = h - 34;
+    int text_x = x;
+    int text_y = y;
+    int text_w = w;
+    int text_h = h;
     int line_y = text_y + 12;
-    char line_buf[55];
+    int chars_per_line = (text_w - 16) / 8;
+    int line_h = 15;
+    int visible_lines = (text_h - 24) / line_h;
+    int total_lines = 1;
+    int current_len = 0;
+    int last_line_len = 0;
+    int max_top_line;
+    int top_line;
+    int visual_line = 0;
+    char line_buf[192];
     int char_idx = 0;
-    ui_draw_panel_flat(x, y, w, h, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
-    ui_draw_app_toolbar(x, y, w, 0, 0);
-    vbe_fill_rect_alpha(text_x, text_y, text_w, text_h, 0xFFFFFF, 255);
-    vbe_draw_rect(text_x, text_y, text_w, text_h, 0xD9E2EC);
-    while (*content && line_y < text_y + text_h - 16) {
-        if (*content == '\n' || char_idx == 54) {
-            line_buf[char_idx] = '\0';
-            vbe_draw_string(text_x + 8, line_y, line_buf, UI_TEXT_DARK);
-            line_y += 15;
-            char_idx = 0;
-            if (*content == '\n') { content++; continue; }
+    const char* scan;
+    const char* render;
+    if (chars_per_line < 8) chars_per_line = 8;
+    if (visible_lines < 1) visible_lines = 1;
+    ui_draw_panel_flat(text_x, text_y, text_w, text_h, UI_RADIUS_MD, 0xF5F7FA, 255, 0xD7DEE6, 255);
+    for (scan = content; scan && *scan; scan++) {
+        if (*scan == '\n') {
+            total_lines++;
+            current_len = 0;
+            last_line_len = 0;
+            continue;
         }
-        line_buf[char_idx++] = *content++;
+        if (current_len < chars_per_line) current_len++;
+        last_line_len = current_len;
+        if (current_len >= chars_per_line && scan[1] != '\0') {
+            total_lines++;
+            current_len = 0;
+            last_line_len = 0;
+        }
+    }
+    if (current_len > 0) last_line_len = current_len;
+    max_top_line = total_lines > visible_lines ? total_lines - visible_lines : 0;
+    if (user_narcpad_state.view_scroll < 0) user_narcpad_state.view_scroll = max_top_line;
+    if (user_narcpad_state.view_scroll > max_top_line) user_narcpad_state.view_scroll = max_top_line;
+    top_line = user_narcpad_state.view_scroll;
+
+    for (render = content; render && *render; render++) {
+        if (*render == '\n' || char_idx >= chars_per_line) {
+            line_buf[char_idx] = '\0';
+            if (visual_line >= top_line && visual_line < top_line + visible_lines) {
+                vbe_draw_string(text_x + 8, line_y, line_buf, UI_TEXT_DARK);
+                line_y += line_h;
+            }
+            visual_line++;
+            char_idx = 0;
+            if (*render == '\n') continue;
+        }
+        if (char_idx < (int)sizeof(line_buf) - 1) line_buf[char_idx++] = *render;
     }
     line_buf[char_idx] = '\0';
-    if (char_idx > 0) vbe_draw_string(text_x + 8, line_y, line_buf, UI_TEXT_DARK);
-    
-    extern uint32_t timer_ticks;
-    if ((timer_ticks / 20) % 2 == 0) {
-        int caret_x = text_x + 8 + char_idx * 9;
-        vbe_fill_rect(caret_x, line_y, 2, 12, UI_ACCENT_DEEP);
+    if (visual_line >= top_line && visual_line < top_line + visible_lines) {
+        vbe_draw_string(text_x + 8, line_y, line_buf, UI_TEXT_DARK);
     }
-    vbe_fill_rect_alpha(text_x, y + h - 20, text_w, 12, 0xEEF3F8, 255);
-    vbe_draw_string(text_x + text_w - 92, y + h - 18, "Ctrl+S Save", UI_TEXT_SUBTLE);
+    
+    if ((timer_ticks / 20) % 2 == 0) {
+        int caret_line = total_lines - 1;
+        if (caret_line >= top_line && caret_line < top_line + visible_lines) {
+            int caret_x = text_x + 8 + last_line_len * 8;
+            int caret_y = text_y + 12 + (caret_line - top_line) * line_h;
+            vbe_fill_rect(caret_x, caret_y, 2, 12, UI_ACCENT_DEEP);
+        }
+    }
+    vbe_fill_rect_alpha(text_x + 10, y + h - 18, text_w - 20, 1, 0xD7DEE6, 255);
 }
 void vbe_draw_snake_game(int x, int y, int w, int h, int* px, int* py, int len, int ax, int ay, int dead, int score, int best) {
-    int toolbar_y = y + 4;
-    int board_w = 39 * 9 + 12;
-    int board_h = 29 * 9 + 12;
-    int board_x = x + (w - board_w) / 2;
-    int board_y = y + 34 + ((h - 34 - board_h) > 0 ? (h - 34 - board_h) / 2 : 0);
+    int header_x = x + 14;
+    int header_y = y + 14;
+    int header_w = w - 28;
+    int header_h = 52;
+    int grid_w = 39;
+    int grid_h = 29;
+    int cell_w = (w - 40) / grid_w;
+    int cell_h = (h - 92) / grid_h;
+    int cell = cell_w < cell_h ? cell_w : cell_h;
+    int dot = cell - 2;
+    int board_w;
+    int board_h;
+    int content_top = y + 66;
+    int board_x;
+    int board_y;
     int game_over_x = x + (w - 84) / 2;
     int reset_text_x = x + (w - 128) / 2;
+    if (cell > 9) cell = 9;
+    if (cell < 5) cell = 5;
+    if (dot < 3) dot = 3;
+    board_w = grid_w * cell + 12;
+    board_h = grid_h * cell + 12;
+    board_x = x + (w - board_w) / 2;
+    board_y = content_top + ((h - (content_top - y) - board_h) > 0 ? (h - (content_top - y) - board_h) / 2 : 0);
     if (board_x < x + 8) board_x = x + 8;
-    if (board_y < y + 30) board_y = y + 30;
-    ui_draw_app_toolbar(x, y, w, 0, 0);
+    if (board_y < content_top) board_y = content_top;
     ui_draw_panel_flat(x, y, w, h, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
-    ui_draw_chip(x + 12, toolbar_y + 2, 62, 18, UI_SURFACE_2, UI_SUCCESS, "Score");
-    vbe_draw_int(x + 82, toolbar_y + 7, score, UI_TEXT);
-    ui_draw_chip(x + 118, toolbar_y + 2, 52, 18, UI_SURFACE_2, UI_TEXT_MUTED, "Best");
-    vbe_draw_int(x + 178, toolbar_y + 7, best, UI_TEXT);
-    ui_draw_chip(x + w - 70, toolbar_y + 2, 58, 18, UI_SURFACE_2, UI_TEXT_MUTED, "Reset");
+    ui_draw_panel_flat(header_x, header_y, header_w, header_h, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
+    vbe_draw_string(header_x + 14, header_y + 12, "Snake", UI_TEXT);
+    vbe_draw_string(header_x + 14, header_y + 30, "Score", UI_TEXT_SUBTLE);
+    vbe_draw_int(header_x + 58, header_y + 30, score, UI_TEXT);
+    vbe_draw_string(header_x + 118, header_y + 30, "Best", UI_TEXT_SUBTLE);
+    vbe_draw_int(header_x + 154, header_y + 30, best, UI_TEXT);
+    vbe_draw_string(header_x + header_w - 58, header_y + 30, "R Reset", UI_TEXT_MUTED);
+
+    vbe_fill_rect_alpha(x + 14, header_y + header_h + 2, w - 28, 1, UI_BORDER_SOFT, 255);
     vbe_fill_rect(board_x, board_y, board_w, board_h, 0x10171F);
     vbe_draw_rect(board_x, board_y, board_w, board_h, UI_BORDER_SOFT);
     if (dead) {
         vbe_draw_string(game_over_x, board_y + 112, "GAME OVER", UI_DANGER);
         vbe_draw_string(reset_text_x, board_y + 134, "Press R to Reset", UI_TEXT_MUTED);
     } else {
-        vbe_fill_rect(board_x + 6 + ax * 9, board_y + 6 + ay * 9, 7, 7, UI_DANGER);
+        vbe_fill_rect(board_x + 6 + ax * cell, board_y + 6 + ay * cell, dot, dot, UI_DANGER);
         for (int i = 0; i < len; i++) {
             uint32_t col = (i == 0) ? UI_SUCCESS : 0x37B24D;
-            vbe_fill_rect(board_x + 6 + px[i] * 9, board_y + 6 + py[i] * 9, 7, 7, col);
+            vbe_fill_rect(board_x + 6 + px[i] * cell, board_y + 6 + py[i] * cell, dot, dot, col);
         }
     }
 }
@@ -1285,6 +1613,7 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
         
         switch(windows[i].type) {
             case WIN_TYPE_TERMINAL:
+                if (vga_window_needs_refresh()) vga_refresh_window();
                 vbe_blit_window(&windows[i], window_buffer, is_focused);
                 break;
             case WIN_TYPE_EXPLORER:
@@ -1329,8 +1658,10 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                     char date_str[11];
                     char tz_str[16];
                     int offset = rtc_get_timezone_offset_minutes();
+                    int compact;
                     vbe_get_window_client_rect(&windows[i], &cx, &cy, &cw, &ch);
                     rtc_format_timezone(tz_str, sizeof(tz_str));
+                    compact = ui_settings_compact_layout(cw);
 
                     time_str[0] = (char)('0' + (get_hour() / 10));
                     time_str[1] = (char)('0' + (get_hour() % 10));
@@ -1354,35 +1685,48 @@ void vbe_compose_scene(window_t* windows, int win_count, int active_win_idx, int
                     date_str[9] = (char)('0' + (get_day() % 10));
                     date_str[10] = '\0';
 
-                    ui_draw_panel_flat(cx, cy, cw, ch, UI_RADIUS_MD, UI_SURFACE_1, 235, UI_BORDER_SOFT, 255);
-                    ui_draw_app_toolbar(cx, cy, cw, 0, 0);
+                    vbe_fill_rect_alpha(cx, cy, cw, ch, UI_SURFACE_1, 255);
+                    vbe_draw_string(cx + 16, cy + 16, "Time", UI_TEXT);
+                    vbe_draw_string(cx + 16, cy + 34, "System settings", UI_TEXT_SUBTLE);
+                    vbe_fill_rect_alpha(cx + 16, cy + 48, cw - 32, 1, UI_BORDER_SOFT, 255);
 
-                    ui_draw_panel_flat(cx + 16, cy + 12, cw - 32, 80, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
-                    vbe_draw_string(cx + 28, cy + 24, "LOCAL TIME", UI_TEXT_SUBTLE);
-                    vbe_draw_string_hd(cx + 28, cy + 42, time_str, UI_TEXT, 2);
-                    vbe_draw_string(cx + cw - 164, cy + 24, "DATE", UI_TEXT_SUBTLE);
-                    vbe_draw_string(cx + cw - 164, cy + 44, date_str, UI_ACCENT_ALT);
-                    ui_draw_chip(cx + cw - 164, cy + 62, 112, 20, UI_SURFACE_2, UI_TEXT, tz_str);
+                    vbe_draw_string(cx + 20, cy + 66, "Local Time", UI_TEXT_SUBTLE);
+                    vbe_draw_string_hd(cx + 20, cy + 86, time_str, UI_TEXT, 2);
+                    if (!compact) {
+                        vbe_draw_string(cx + cw - 160, cy + 70, "Date", UI_TEXT_SUBTLE);
+                        vbe_draw_string(cx + cw - 160, cy + 88, date_str, UI_TEXT);
+                        vbe_draw_string(cx + cw - 160, cy + 106, tz_str, UI_ACCENT_ALT);
+                    } else {
+                        vbe_draw_string(cx + 20, cy + 118, date_str, UI_TEXT);
+                        vbe_draw_string(cx + 108, cy + 118, tz_str, UI_ACCENT_ALT);
+                    }
 
-                    ui_draw_panel_flat(cx + 16, cy + 104, cw - 32, ch - 120, UI_RADIUS_MD, UI_SURFACE_0, 255, UI_BORDER_SOFT, 255);
-                    vbe_draw_string(cx + 28, cy + 118, "TIME ZONE", UI_TEXT);
-                    vbe_draw_string(cx + 28, cy + 136, "Current", UI_TEXT_SUBTLE);
-                    ui_draw_chip(cx + 92, cy + 130, 112, 22, UI_ACCENT_DEEP, UI_TEXT, tz_str);
-                    ui_draw_chip(cx + 216, cy + 130, 62, 22, UI_SURFACE_2, UI_TEXT, "-30m");
-                    ui_draw_chip(cx + 286, cy + 130, 62, 22, UI_SURFACE_2, UI_TEXT, "+30m");
-                    ui_draw_chip(cx + 360, cy + 130, 126, 22, UI_SURFACE_2, UI_TEXT_MUTED, "Edit Config");
+                    vbe_fill_rect_alpha(cx + 16, cy + 130, cw - 32, 1, UI_BORDER_SOFT, 255);
+                    vbe_draw_string(cx + 20, cy + 148, "Timezone", UI_TEXT);
+                    ui_draw_chip(cx + 20, cy + 170, 92, 22, UI_ACCENT_DEEP, UI_TEXT, tz_str);
+                    if (!compact) {
+                        ui_draw_chip(cx + 124, cy + 170, 56, 22, UI_SURFACE_2, UI_TEXT, "-30m");
+                        ui_draw_chip(cx + 188, cy + 170, 56, 22, UI_SURFACE_2, UI_TEXT, "+30m");
+                    } else {
+                        ui_draw_chip(cx + 20, cy + 198, 56, 22, UI_SURFACE_2, UI_TEXT, "-30m");
+                        ui_draw_chip(cx + 84, cy + 198, 56, 22, UI_SURFACE_2, UI_TEXT, "+30m");
+                    }
 
-                    vbe_draw_string(cx + 28, cy + 166, "PRESETS", UI_TEXT_SUBTLE);
-                    ui_draw_chip(cx + 24, cy + 180, 68, 22, offset == -300 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC-5");
-                    ui_draw_chip(cx + 102, cy + 180, 48, 22, offset == 0 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC");
-                    ui_draw_chip(cx + 160, cy + 180, 68, 22, offset == 180 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+3");
-                    ui_draw_chip(cx + 238, cy + 180, 96, 22, offset == 330 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+5:30");
-                    ui_draw_chip(cx + 344, cy + 180, 68, 22, offset == 540 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+9");
+                    vbe_draw_string(cx + 20, cy + (compact ? 226 : 206), "Presets", UI_TEXT_SUBTLE);
+                    ui_draw_chip(cx + 20, cy + (compact ? 246 : 226), 64, 22, offset == -300 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC-5");
+                    ui_draw_chip(cx + 92, cy + (compact ? 246 : 226), 44, 22, offset == 0 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC");
+                    ui_draw_chip(cx + 144, cy + (compact ? 246 : 226), 64, 22, offset == 180 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+3");
+                    if (!compact) {
+                        ui_draw_chip(cx + 216, cy + 226, 92, 22, offset == 330 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+5:30");
+                        ui_draw_chip(cx + 316, cy + 226, 64, 22, offset == 540 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+9");
+                    } else {
+                        ui_draw_chip(cx + 20, cy + 274, 92, 22, offset == 330 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+5:30");
+                        ui_draw_chip(cx + 120, cy + 274, 64, 22, offset == 540 ? UI_ACCENT_DEEP : UI_SURFACE_2, UI_TEXT, "UTC+9");
+                    }
 
-                    vbe_draw_string(cx + 28, cy + 220, "Offset", UI_TEXT_SUBTLE);
-                    vbe_draw_int(cx + 84, cy + 220, offset, UI_ACCENT_ALT);
-                    vbe_draw_string(cx + 124, cy + 220, "min", UI_TEXT_MUTED);
-                    vbe_draw_string(cx + 28, cy + 238, "/system/timezone.cfg", UI_TEXT_MUTED);
+                    vbe_draw_string(cx + 20, cy + (compact ? 306 : 262), "Offset", UI_TEXT_SUBTLE);
+                    vbe_draw_int(cx + 72, cy + (compact ? 306 : 262), offset, UI_ACCENT_ALT);
+                    vbe_draw_string(cx + 112, cy + (compact ? 306 : 262), "min", UI_TEXT_MUTED);
                 }
                 break;
         }

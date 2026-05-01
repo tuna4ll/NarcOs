@@ -88,6 +88,8 @@ static int rtl8139_send_frame(const void* frame, uint32_t length) {
     while (timer_ticks <= deadline) {
         uint32_t status = inl((uint16_t)status_reg);
         if ((status & RTL_TSD_TOK) != 0U) {
+            net_state.tx_bytes += tx_length;
+            net_state.tx_packets++;
             net_state.tx_index = (uint8_t)((index + 1U) & 0x03U);
             return 0;
         }
@@ -214,6 +216,8 @@ void rtl8139_poll_receive() {
         }
 
         payload_len = packet_len > 4U ? (uint16_t)(packet_len - 4U) : packet_len;
+        net_state.rx_bytes += payload_len;
+        net_state.rx_packets++;
         net_handle_frame(packet + 4, payload_len);
 
         net_state.rx_offset = (uint16_t)((net_state.rx_offset + packet_len + 4U + 3U) & ~3U);

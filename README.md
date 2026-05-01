@@ -1,75 +1,44 @@
-
 <img width="842" height="245" alt="narcos-final_main" src="https://github.com/user-attachments/assets/4102a490-aec2-40c0-9429-bd1ede27c000" />
 
 # NarcOs
 
-NarcOs is a hobby operating system for `x86` and `x86_64`.
-It boots from BIOS, has its own bootloader, scheduler, filesystem, GUI, and basic network stack.
+A simple hobby operating system. It can run as `i386` or `x86_64`.
 
 ## Requirements
 
-- `gcc` with 32-bit output support
+- `gcc`
 - `ld`
 - `nasm`
 - `objcopy`
 - `qemu-system-i386`
 - `qemu-system-x86_64`
 
-## Build
-
-Default i386 build with exported compatibility artifacts:
+## Run 32-bit
 
 ```bash
-make all
+make run-i386
 ```
 
-Architecture-specific builds:
+Run with networking:
 
 ```bash
-make all-i386
-make all-x86_64
+make run-net-i386
 ```
 
-Only build packaged user programs:
+## Run 64-bit
 
 ```bash
-make user-programs
-make user-programs-x86_64
+make run-x86_64
 ```
 
-Clean generated files:
+Run with networking:
+
+```bash
+make run-x86_64-net
+```
+
+## Clean
 
 ```bash
 make clean
 ```
-
-## Run
-
-```bash
-make run-i386
-make run-net-i386
-make run-x86_64
-make run-x86_64-gui
-make run-x86_64-net
-```
-
-`make run-net` is an alias for `make run-x86_64-net`.
-
-## Output
-
-Main build artifacts are written under:
-
-- `obj/i386/`
-- `obj/x86_64/`
-
-The default `make all` target also exports:
-
-- `kernel.bin`
-- `boot/boot.bin`
-- `boot/stage2.bin`
-- `minios.img`
-
-## Userspace
-
-- `i386` kernel builds and runs `ELF32` userspace
-- `x86_64` kernel builds and runs `ELF64` userspace

@@ -262,10 +262,15 @@ uint16_t net_pick_ephemeral_port(uint16_t base, uint16_t count,
 }
 
 void net_pump_ui() {
+    process_t* current;
     if (timer_ticks == net_last_ui_tick) return;
     net_last_ui_tick = timer_ticks;
-    vbe_compose_scene_basic();
-    vbe_update();
+    current = process_current();
+    if (current && strcmp(current->name, "desktop") == 0) {
+        vbe_compose_scene_basic();
+    } else {
+        gui_needs_redraw = 1;
+    }
 }
 
 void net_write16_be(uint8_t* dst, uint16_t value) {
@@ -471,6 +476,17 @@ int net_is_available() {
 
 int net_is_configured() {
     return net_state.present && net_state.configured;
+}
+
+int net_get_stats(net_stats_t* out_stats) {
+    if (!out_stats) return -1;
+    out_stats->rx_bytes = net_state.rx_bytes;
+    out_stats->tx_bytes = net_state.tx_bytes;
+    out_stats->rx_packets = net_state.rx_packets;
+    out_stats->tx_packets = net_state.tx_packets;
+    out_stats->available = net_state.present;
+    out_stats->configured = net_state.present && net_state.configured;
+    return net_state.present ? 0 : -1;
 }
 
 int net_get_ipv4_config(net_ipv4_config_t* out_config) {

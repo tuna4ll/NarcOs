@@ -40,6 +40,7 @@ static USER_CODE void narcpad_open_new(user_narcpad_state_t* state) {
     state->path[0] = '\0';
     state->request_path[0] = '\0';
     state->content[0] = '\0';
+    state->view_scroll = -1;
     strncpy(state->title, "untitled.txt", sizeof(state->title) - 1U);
     state->title[sizeof(state->title) - 1U] = '\0';
     state->dirty = 1;
@@ -52,6 +53,7 @@ static USER_CODE void narcpad_open_path(user_narcpad_state_t* state) {
     if (user_fs_read(state->path, state->content, sizeof(state->content)) != 0) {
         state->content[0] = '\0';
     }
+    state->view_scroll = -1;
     narcpad_copy_title_from_path(state, state->path);
     state->request_path[0] = '\0';
     state->dirty = 1;
@@ -77,6 +79,7 @@ static USER_CODE void narcpad_backspace(user_narcpad_state_t* state) {
     len = (uint32_t)strlen(state->content);
     if (len == 0U) return;
     state->content[len - 1U] = '\0';
+    state->view_scroll = -1;
     state->dirty = 1;
 }
 
@@ -88,6 +91,7 @@ static USER_CODE void narcpad_append_char(user_narcpad_state_t* state, char c) {
     if (len + 1U >= sizeof(state->content)) return;
     state->content[len] = c;
     state->content[len + 1U] = '\0';
+    state->view_scroll = -1;
     state->dirty = 1;
 }
 

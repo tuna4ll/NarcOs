@@ -10,6 +10,8 @@ BOOT_DIR = boot
 KERN_DIR = kernel
 USER_DIR = user
 ASSET_DIR = assets
+VBE_WIDTH ?= 1920
+VBE_HEIGHT ?= 1080
 
 KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
 USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test neofetch
@@ -119,7 +121,7 @@ $(I386_BOOT_BIN): $(BOOT_DIR)/boot.asm $(I386_STAGE2_BIN)
 $(I386_STAGE2_BIN): $(BOOT_DIR)/stage2.asm $(I386_KERNEL_BIN)
 	@mkdir -p $(dir $@)
 	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(I386_KERNEL_BIN)) + 511) / 512 ))))
-	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -f bin $< -o $@
+	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -DVBE_WIDTH=$(VBE_WIDTH) -DVBE_HEIGHT=$(VBE_HEIGHT) -f bin $< -o $@
 
 $(I386_OBJ_DIR)/%.o: $(KERN_DIR)/%.c
 	@mkdir -p $(dir $@)
@@ -148,7 +150,7 @@ $(I386_OBJ_DIR)/user/embed/%.o: $(I386_OBJ_DIR)/user/bin/%
 
 $(I386_ASSET_BG_RGB): $(ASSET_DIR)/bg.png
 	@mkdir -p $(dir $@)
-	magick $< -resize 240x135^ -gravity center -extent 240x135 -alpha off -depth 8 rgb:$@
+	magick $< -resize 200x112^ -gravity center -extent 200x112 -alpha off -depth 8 rgb:$@
 
 $(I386_ASSET_BG_OBJECT): $(I386_ASSET_BG_RGB)
 	@mkdir -p $(dir $@)
@@ -215,7 +217,7 @@ $(X86_64_KERNEL_BIN): $(X86_64_KERNEL_ELF)
 $(X86_64_STAGE2_BIN): $(BOOT_DIR)/stage2_x86_64.asm $(X86_64_KERNEL_BIN)
 	@mkdir -p $(dir $@)
 	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(X86_64_KERNEL_BIN)) + 511) / 512 ))))
-	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -f bin $< -o $@
+	$(AS) -DKERNEL_SECTORS=$(KERNEL_SECS) -DVBE_WIDTH=$(VBE_WIDTH) -DVBE_HEIGHT=$(VBE_HEIGHT) -f bin $< -o $@
 
 $(X86_64_BOOT_BIN): $(BOOT_DIR)/boot.asm $(X86_64_STAGE2_BIN)
 	@mkdir -p $(dir $@)
@@ -234,10 +236,10 @@ clean:
 	rm -rf $(OBJ_DIR) $(BOOT_DIR)/*.bin *.img kernel.bin kernel64.elf kernel64.bin kernel.tmp
 
 run-i386: all-i386
-	qemu-system-i386 -m 128M -drive format=raw,file=$(I386_IMAGE)
+	qemu-system-i386 -m 128M -drive format=raw,file=$(I386_IMAGE) -serial stdio -no-reboot -no-shutdown
 
 run-net-i386: all-i386
-	qemu-system-i386 -m 128M -drive format=raw,file=$(I386_IMAGE) -netdev user,id=n0 -device rtl8139,netdev=n0
+	qemu-system-i386 -m 128M -drive format=raw,file=$(I386_IMAGE) -serial stdio -netdev user,id=n0 -device rtl8139,netdev=n0 -no-reboot -no-shutdown
 
 run-net: run-x86_64-net
 

@@ -28,6 +28,7 @@ extern void vga_print(const char* str);
 extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_println(const char* str);
 extern void vga_print_int(int num);
+extern void vga_scrollback_lines(int direction);
 extern void init_keyboard();
 extern disk_fs_node_t dir_cache[MAX_FILES];
 
@@ -75,42 +76,194 @@ int exp_drag_armed = 0;
 int snk_px[100], snk_py[100], snk_len = 5, apple_x = 10, apple_y = 10;
 int snk_dead = 0, snk_score = 0, snk_best = 0;
 
+enum {
+    WINDOW_RESIZE_NONE = 0,
+    WINDOW_RESIZE_LEFT = 1 << 0,
+    WINDOW_RESIZE_RIGHT = 1 << 1,
+    WINDOW_RESIZE_BOTTOM = 1 << 2
+};
+
+static int nwm_window_min_w(window_type_t type) {
+    switch (type) {
+        case WIN_TYPE_TERMINAL: return 460;
+        case WIN_TYPE_EXPLORER: return 500;
+        case WIN_TYPE_NARCPAD: return 360;
+        case WIN_TYPE_SNAKE: return 404;
+        case WIN_TYPE_SETTINGS: return 380;
+        default: return 260;
+    }
+}
+
+static int nwm_window_min_h(window_type_t type) {
+    switch (type) {
+        case WIN_TYPE_TERMINAL: return 300;
+        case WIN_TYPE_EXPLORER: return 320;
+        case WIN_TYPE_NARCPAD: return 240;
+        case WIN_TYPE_SNAKE: return 412;
+        case WIN_TYPE_SETTINGS: return 320;
+        default: return 180;
+    }
+}
+
+static int explorer_sidebar_width_for_window_width(int client_w) {
+    if (client_w < 470) return 104;
+    if (client_w < 620) return 116;
+    return 132;
+}
+
+static int settings_compact_layout_for_width(int client_w) {
+    return client_w < 430;
+}
+
+static int nwm_window_default_w(window_type_t type, int screen_w) {
+    int min_w = nwm_window_min_w(type);
+    int max_w = screen_w - 72;
+    int target;
+
+    if (max_w < min_w) max_w = min_w;
+    switch (type) {
+        case WIN_TYPE_TERMINAL: target = (screen_w * 58) / 100; break;
+        case WIN_TYPE_EXPLORER: target = (screen_w * 64) / 100; break;
+        case WIN_TYPE_NARCPAD: target = (screen_w * 46) / 100; break;
+        case WIN_TYPE_SNAKE: target = min_w + 24; break;
+        case WIN_TYPE_SETTINGS: target = (screen_w * 42) / 100; break;
+        default: target = min_w; break;
+    }
+    if (target < min_w) target = min_w;
+    if (target > max_w) target = max_w;
+    return target;
+}
+
+static int nwm_window_default_h(window_type_t type, int screen_h) {
+    int min_h = nwm_window_min_h(type);
+    int max_h = screen_h - 96;
+    int target;
+
+    if (max_h < min_h) max_h = min_h;
+    switch (type) {
+        case WIN_TYPE_TERMINAL: target = (screen_h * 62) / 100; break;
+        case WIN_TYPE_EXPLORER: target = (screen_h * 58) / 100; break;
+        case WIN_TYPE_NARCPAD: target = (screen_h * 54) / 100; break;
+        case WIN_TYPE_SNAKE: target = min_h + 20; break;
+        case WIN_TYPE_SETTINGS: target = (screen_h * 48) / 100; break;
+        default: target = min_h; break;
+    }
+    if (target < min_h) target = min_h;
+    if (target > max_h) target = max_h;
+    return target;
+}
+
+static void nwm_fit_window(window_t* win, int recenter) {
+    int min_w;
+    int min_h;
+    int sw;
+    int sh;
+    int max_w;
+    int max_h;
+
+    if (!win) return;
+    sw = (int)vbe_get_width();
+    sh = (int)vbe_get_height();
+    if (sw <= 0 || sh <= 0) return;
+
+    min_w = nwm_window_min_w(win->type);
+    min_h = nwm_window_min_h(win->type);
+    max_w = sw - 48;
+    max_h = sh - 72;
+    if (max_w < min_w) max_w = min_w;
+    if (max_h < min_h) max_h = min_h;
+
+    if (win->w < min_w) win->w = min_w;
+    if (win->h < min_h) win->h = min_h;
+    if (win->w > max_w) win->w = max_w;
+    if (win->h > max_h) win->h = max_h;
+
+    if (recenter) {
+        win->x = (sw - win->w) / 2;
+        win->y = 42 + ((sh - 74 - win->h) / 2);
+    }
+
+    if (win->x < 12) win->x = 12;
+    if (win->y < 35) win->y = 35;
+    if (win->x + win->w > sw - 12) win->x = sw - 12 - win->w;
+    if (win->y + win->h > sh - 12) win->y = sh - 12 - win->h;
+    if (win->x < 12) win->x = 12;
+    if (win->y < 35) win->y = 35;
+}
+
+static int nwm_resize_hit_test(window_t* win, int mx, int my) {
+    const int edge = 8;
+    int flags = WINDOW_RESIZE_NONE;
+    if (!win || !win->visible || win->minimized) return WINDOW_RESIZE_NONE;
+    if (mx < win->x || mx > win->x + win->w || my < win->y || my > win->y + win->h) return WINDOW_RESIZE_NONE;
+    if (mx >= win->x && mx <= win->x + edge) flags |= WINDOW_RESIZE_LEFT;
+    if (mx >= win->x + win->w - edge && mx <= win->x + win->w) flags |= WINDOW_RESIZE_RIGHT;
+    if (my >= win->y + win->h - edge && my <= win->y + win->h) flags |= WINDOW_RESIZE_BOTTOM;
+    return flags;
+}
+
+static cursor_mode_t nwm_cursor_mode_from_resize_flags(int flags) {
+    if ((flags & WINDOW_RESIZE_LEFT) && (flags & WINDOW_RESIZE_BOTTOM)) return CURSOR_MODE_RESIZE_DIAG_RL;
+    if ((flags & WINDOW_RESIZE_RIGHT) && (flags & WINDOW_RESIZE_BOTTOM)) return CURSOR_MODE_RESIZE_DIAG_LR;
+    if ((flags & WINDOW_RESIZE_LEFT) || (flags & WINDOW_RESIZE_RIGHT)) return CURSOR_MODE_RESIZE_H;
+    if (flags & WINDOW_RESIZE_BOTTOM) return CURSOR_MODE_RESIZE_V;
+    return CURSOR_MODE_ARROW;
+}
+
 void nwm_init_windows() {
+    int sw = (int)vbe_get_width();
+    int sh = (int)vbe_get_height();
+
     windows[0].type = WIN_TYPE_TERMINAL;
-    windows[0].x = 50; windows[0].y = 50;
-    windows[0].w = 700; windows[0].h = 475;
+    windows[0].w = nwm_window_default_w(WIN_TYPE_TERMINAL, sw);
+    windows[0].h = nwm_window_default_h(WIN_TYPE_TERMINAL, sh);
     strcpy(windows[0].title, "Terminal");
     windows[0].visible = 0;
     windows[0].minimized = 0;
     windows[0].id = 0;
+    windows[0].x = 28;
+    windows[0].y = 44;
+    nwm_fit_window(&windows[0], 0);
     windows[1].type = WIN_TYPE_EXPLORER;
-    windows[1].x = 150; windows[1].y = 100;
-    windows[1].w = 760; windows[1].h = 430;
+    windows[1].w = nwm_window_default_w(WIN_TYPE_EXPLORER, sw);
+    windows[1].h = nwm_window_default_h(WIN_TYPE_EXPLORER, sh);
     strcpy(windows[1].title, "Explorer");
     windows[1].visible = 0;
     windows[1].minimized = 0;
     windows[1].id = 1;
+    windows[1].x = 72;
+    windows[1].y = 78;
+    nwm_fit_window(&windows[1], 0);
     windows[2].type = WIN_TYPE_NARCPAD;
-    windows[2].x = 200; windows[2].y = 150;
-    windows[2].w = 500; windows[2].h = 400;
+    windows[2].w = nwm_window_default_w(WIN_TYPE_NARCPAD, sw);
+    windows[2].h = nwm_window_default_h(WIN_TYPE_NARCPAD, sh);
     strcpy(windows[2].title, "Text Editor");
     windows[2].visible = 0;
     windows[2].minimized = 0;
     windows[2].id = 2;
+    windows[2].x = 108;
+    windows[2].y = 112;
+    nwm_fit_window(&windows[2], 0);
     windows[3].type = WIN_TYPE_SNAKE;
-    windows[3].x = 300; windows[3].y = 200;
-    windows[3].w = 400; windows[3].h = 372;
+    windows[3].w = nwm_window_default_w(WIN_TYPE_SNAKE, sw);
+    windows[3].h = nwm_window_default_h(WIN_TYPE_SNAKE, sh);
     strcpy(windows[3].title, "Snake");
     windows[3].visible = 0;
     windows[3].minimized = 0;
     windows[3].id = 3;
+    windows[3].x = 144;
+    windows[3].y = 96;
+    nwm_fit_window(&windows[3], 1);
     windows[4].type = WIN_TYPE_SETTINGS;
-    windows[4].x = 220; windows[4].y = 110;
-    windows[4].w = 520; windows[4].h = 330;
+    windows[4].w = nwm_window_default_w(WIN_TYPE_SETTINGS, sw);
+    windows[4].h = nwm_window_default_h(WIN_TYPE_SETTINGS, sh);
     strcpy(windows[4].title, "Settings");
     windows[4].visible = 0;
     windows[4].minimized = 0;
     windows[4].id = 4;
+    windows[4].x = 176;
+    windows[4].y = 84;
+    nwm_fit_window(&windows[4], 0);
 
     window_count = 5;
 }
@@ -166,30 +319,118 @@ static int get_explorer_list_click_target(int mx, int my, window_t* win) {
     int sidebar_w;
     int content_x;
     int content_w;
+    int panel_h;
     int panel_y;
     int list_y;
     int row_h;
+    int visible_rows;
+    int item_row;
 
     if (!win || win->type != WIN_TYPE_EXPLORER) return DESKTOP_CLICK_TARGET_NONE;
     client_x = win->x + 8;
     client_y = win->y + 40;
     client_w = win->w - 16;
-    sidebar_w = 136;
-    content_x = client_x + sidebar_w + 14;
-    content_w = client_w - sidebar_w - 26;
+    sidebar_w = explorer_sidebar_width_for_window_width(client_w);
+    content_x = client_x + sidebar_w + 12;
+    content_w = client_w - sidebar_w - 12;
+    panel_h = win->h - 76;
     panel_y = client_y + 36;
-    list_y = panel_y + 48;
+    list_y = panel_y + 12;
     row_h = 54;
+    visible_rows = (panel_h - 64) / row_h;
+    if (visible_rows < 1) visible_rows = 1;
 
     if (mx < content_x + 16 || mx > content_x + content_w - 16 || my < list_y) {
         return DESKTOP_CLICK_TARGET_NONE;
     }
-    return DESKTOP_CLICK_TARGET_EXPLORER_BASE + ((my - list_y) / row_h);
+    if (my >= list_y + visible_rows * row_h) return DESKTOP_CLICK_TARGET_NONE;
+    item_row = user_explorer_state.list_scroll + ((my - list_y) / row_h);
+    return DESKTOP_CLICK_TARGET_EXPLORER_BASE + item_row;
+}
+
+static int narcpad_visible_lines_for_window(window_t* win) {
+    int cx;
+    int cy;
+    int cw;
+    int ch;
+    int lines;
+    if (!win) return 1;
+    vbe_get_window_client_rect(win, &cx, &cy, &cw, &ch);
+    lines = (ch - 24) / 15;
+    if (lines < 1) lines = 1;
+    return lines;
+}
+
+static int narcpad_total_visual_lines_for_window(window_t* win) {
+    const char* content = user_narcpad_state.content;
+    int cx;
+    int cy;
+    int cw;
+    int ch;
+    int chars_per_line;
+    int total_lines = 1;
+    int current_len = 0;
+    if (!win) return 1;
+    vbe_get_window_client_rect(win, &cx, &cy, &cw, &ch);
+    chars_per_line = (cw - 16) / 8;
+    if (chars_per_line < 8) chars_per_line = 8;
+    while (content && *content) {
+        if (*content == '\n') {
+            total_lines++;
+            current_len = 0;
+            content++;
+            continue;
+        }
+        if (current_len < chars_per_line) current_len++;
+        if (current_len >= chars_per_line && content[1] != '\0') {
+            total_lines++;
+            current_len = 0;
+        }
+        content++;
+    }
+    return total_lines;
+}
+
+static void narcpad_scroll_by(window_t* win, int wheel_steps) {
+    int total_lines;
+    int visible_lines;
+    int max_top;
+    int top_line;
+    if (!win || wheel_steps == 0) return;
+    total_lines = narcpad_total_visual_lines_for_window(win);
+    visible_lines = narcpad_visible_lines_for_window(win);
+    max_top = total_lines > visible_lines ? total_lines - visible_lines : 0;
+    top_line = user_narcpad_state.view_scroll;
+    if (top_line < 0) top_line = max_top;
+    top_line -= wheel_steps * 3;
+    if (top_line < 0) top_line = 0;
+    if (top_line >= max_top) user_narcpad_state.view_scroll = -1;
+    else user_narcpad_state.view_scroll = top_line;
+    gui_needs_redraw = 1;
+}
+
+static void explorer_scroll_by(window_t* win, int wheel_steps) {
+    int item_count;
+    int visible_rows;
+    int max_scroll;
+    if (!win || wheel_steps == 0) return;
+    item_count = 0;
+    for (int i = 0; i < MAX_FILES; i++) {
+        if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) item_count++;
+    }
+    visible_rows = ((win->h - 76) - 64) / 54;
+    if (visible_rows < 1) visible_rows = 1;
+    max_scroll = item_count > visible_rows ? item_count - visible_rows : 0;
+    user_explorer_state.list_scroll -= wheel_steps * 3;
+    if (user_explorer_state.list_scroll < 0) user_explorer_state.list_scroll = 0;
+    if (user_explorer_state.list_scroll > max_scroll) user_explorer_state.list_scroll = max_scroll;
+    gui_needs_redraw = 1;
 }
 
 static void open_snake_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_SNAKE);
     if (idx == -1) return;
+    nwm_fit_window(&windows[idx], 1);
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -200,6 +441,7 @@ static void open_snake_window() {
 static void open_terminal_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
     if (idx == -1) return;
+    nwm_fit_window(&windows[idx], 0);
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -211,6 +453,7 @@ static void open_explorer_window(int initial_dir) {
     if (idx == -1) return;
     launch_user_explorer(initial_dir);
     queue_user_explorer_event(USER_EXPLORER_EVT_OPEN_DIR, initial_dir);
+    nwm_fit_window(&windows[idx], 0);
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -222,6 +465,7 @@ static void open_narcpad_window() {
     if (idx == -1) return;
     launch_user_narcpad();
     request_user_narcpad_new();
+    nwm_fit_window(&windows[idx], 0);
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -232,6 +476,7 @@ static void open_settings_window() {
     int idx = nwm_get_idx_by_type(WIN_TYPE_SETTINGS);
     if (idx == -1) return;
     launch_user_settings();
+    nwm_fit_window(&windows[idx], 1);
     windows[idx].visible = 1;
     windows[idx].minimized = 0;
     nwm_bring_to_front(idx);
@@ -245,6 +490,7 @@ static void open_file_in_narcpad_by_path(const char* path) {
     {
         int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
         if (pidx == -1) return;
+        nwm_fit_window(&windows[pidx], 0);
         windows[pidx].visible = 1;
         windows[pidx].minimized = 0;
         nwm_bring_to_front(pidx);
@@ -269,22 +515,56 @@ static int settings_handle_click(window_t* win, int mx, int my) {
     if (local_x < 0 || local_y < 0 || local_x >= cw || local_y >= ch) return 0;
     if (!user_settings_running()) launch_user_settings();
 
-    if (local_y >= 130 && local_y <= 152) {
-        if (local_x >= 216 && local_x <= 278) {
+    if (settings_compact_layout_for_width(cw)) {
+        if (local_y >= 170 && local_y <= 192) {
+            if (local_x >= 24 && local_x <= 86) {
+                queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, -30);
+                return 1;
+            }
+            if (local_x >= 96 && local_x <= 158) {
+                queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, 30);
+                return 1;
+            }
+        }
+        if (local_y >= 246 && local_y <= 268) {
+            if (local_x >= 24 && local_x <= 92) {
+                queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, -300);
+                return 1;
+            }
+            if (local_x >= 102 && local_x <= 150) {
+                queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 0);
+                return 1;
+            }
+            if (local_x >= 160 && local_x <= 228) {
+                queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 180);
+                return 1;
+            }
+        }
+        if (local_y >= 274 && local_y <= 296) {
+            if (local_x >= 24 && local_x <= 120) {
+                queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 330);
+                return 1;
+            }
+            if (local_x >= 130 && local_x <= 198) {
+                queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, 540);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    if (local_y >= 170 && local_y <= 192) {
+        if (local_x >= 124 && local_x <= 180) {
             queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, -30);
             return 1;
         }
-        if (local_x >= 286 && local_x <= 348) {
+        if (local_x >= 188 && local_x <= 244) {
             queue_user_settings_event(USER_SETTINGS_EVT_ADJUST_OFFSET, 30);
-            return 1;
-        }
-        if (local_x >= 360 && local_x <= 486) {
-            queue_user_settings_event(USER_SETTINGS_EVT_OPEN_CONFIG, 0);
             return 1;
         }
     }
 
-    if (local_y >= 180 && local_y <= 202) {
+    if (local_y >= 226 && local_y <= 248) {
         if (local_x >= 24 && local_x <= 92) {
             queue_user_settings_event(USER_SETTINGS_EVT_SET_OFFSET, -300);
             return 1;
@@ -958,8 +1238,7 @@ void vbe_compose_scene_basic() {
     
     // Use the global state to redraw the screen
     vbe_compose_scene(windows, window_count, active_window_idx, 0, current_dir_index, -1, mx, my, 0, 0, 0, 0, 0, -1);
-    vbe_prepare_frame_from_composition();
-    vbe_render_mouse(mx, my);
+    vbe_present_composition_with_cursor(mx, my);
 }
 
 static int run_usermode_test_command(void) {
@@ -1257,6 +1536,73 @@ static void print_text_fallback_banner() {
     print_prompt();
 }
 
+static void print_gui_terminal_banner(void) {
+    vga_println("");
+    vga_print_color("  NarcOs Terminal\n", 0x0B);
+    vga_print_color("  ===============\n", 0x08);
+    vga_println("  Local shell session is ready.");
+    vga_println("  Try: help, ls, pwd, ps, date, time");
+    vga_println("");
+}
+
+static void desktop_damage_add_rect(int* valid, int* x, int* y, int* w, int* h,
+                                    int rx, int ry, int rw, int rh) {
+    int x2;
+    int y2;
+    int cur_x2;
+    int cur_y2;
+
+    if (rw <= 0 || rh <= 0) return;
+    if (rx < 0) {
+        rw += rx;
+        rx = 0;
+    }
+    if (ry < 0) {
+        rh += ry;
+        ry = 0;
+    }
+    if (rw <= 0 || rh <= 0) return;
+
+    if (!*valid) {
+        *valid = 1;
+        *x = rx;
+        *y = ry;
+        *w = rw;
+        *h = rh;
+        return;
+    }
+
+    x2 = rx + rw;
+    y2 = ry + rh;
+    cur_x2 = *x + *w;
+    cur_y2 = *y + *h;
+    if (rx < *x) *x = rx;
+    if (ry < *y) *y = ry;
+    if (x2 > cur_x2) cur_x2 = x2;
+    if (y2 > cur_y2) cur_y2 = y2;
+    *w = cur_x2 - *x;
+    *h = cur_y2 - *y;
+}
+
+static void desktop_damage_add_window(int* valid, int* x, int* y, int* w, int* h, window_t* win) {
+    if (!win) return;
+    desktop_damage_add_rect(valid, x, y, w, h, win->x - 6, win->y - 6, win->w + 16, win->h + 18);
+}
+
+static void desktop_damage_add_taskbar_clock(int* valid, int* x, int* y, int* w, int* h) {
+    int cluster_x = (int)vbe_get_width() - 214;
+    desktop_damage_add_rect(valid, x, y, w, h, cluster_x - 2, 4, 204, 32);
+}
+
+static void desktop_damage_add_start_menu(int* valid, int* x, int* y, int* w, int* h) {
+    desktop_damage_add_rect(valid, x, y, w, h, 6, 38, 286, 332);
+}
+
+static void desktop_damage_add_context_menu(int* valid, int* x, int* y, int* w, int* h,
+                                            int ctx_x, int ctx_y, int ctx_count) {
+    desktop_damage_add_rect(valid, x, y, w, h, ctx_x - 4, ctx_y - 4, 162, ctx_count * 22 + 16);
+}
+
 static void console_process_main(void) {
     for (;;) {
         if (cmd_ready) {
@@ -1300,14 +1646,25 @@ static void desktop_process_main(void) {
     
     int dragging_idx = -1;
     int drag_off_x = 0, drag_off_y = 0;
+    int resizing_idx = -1;
+    int resize_mode = WINDOW_RESIZE_NONE;
+    int resize_start_mx = 0, resize_start_my = 0;
+    int resize_start_x = 0, resize_start_y = 0;
+    int resize_start_w = 0, resize_start_h = 0;
     int drag_file_idx = -1;
+    cursor_mode_t cursor_mode = CURSOR_MODE_ARROW;
+    cursor_mode_t last_cursor_mode = CURSOR_MODE_ARROW;
     uint32_t last_snk_tick = 0;
     int snk_dir = 3;
+    int damage_valid = 1;
+    int damage_x = 0;
+    int damage_y = 0;
+    int damage_w = (int)vbe_get_width();
+    int damage_h = (int)vbe_get_height();
 
+    vbe_set_cursor_mode(cursor_mode);
     vbe_compose_scene(windows, window_count, active_window_idx, start_menu_visible, desk_dir_idx, drag_file_idx, mx, my, ctx_visible, ctx_x, ctx_y, ctx_items, ctx_count, ctx_selected);
-    vbe_prepare_frame_from_composition();
-    vbe_render_mouse(mx, my);
-    vbe_update();
+    vbe_present_composition_with_cursor(mx, my);
     last_mx = mx;
     last_my = my;
     last_lp = lp;
@@ -1317,6 +1674,20 @@ static void desktop_process_main(void) {
         lp = mouse_left_pressed();
         int rp = mouse_right_pressed();
         int mouse_moved = mouse_consume_moved();
+        int mouse_wheel = mouse_consume_wheel();
+        cursor_mode = CURSOR_MODE_ARROW;
+        if (mouse_wheel != 0) {
+            int hover_win = nwm_find_window_at(mx, my);
+            if (hover_win != -1) {
+                if (windows[hover_win].type == WIN_TYPE_TERMINAL) {
+                    vga_scrollback_lines(mouse_wheel * 3);
+                } else if (windows[hover_win].type == WIN_TYPE_EXPLORER) {
+                    explorer_scroll_by(&windows[hover_win], mouse_wheel);
+                } else if (windows[hover_win].type == WIN_TYPE_NARCPAD) {
+                    narcpad_scroll_by(&windows[hover_win], mouse_wheel);
+                }
+            }
+        }
         if (!lp && drag_file_idx != -1) {
             int eidx = nwm_get_idx_by_type(WIN_TYPE_EXPLORER);
             if (eidx != -1 && windows[eidx].visible) {
@@ -1326,21 +1697,21 @@ static void desktop_process_main(void) {
                 int client_x = wx + 8;
                 int client_y = wy + 40;
                 int client_w = ww - 16;
-                int sidebar_w = 136;
-                int content_x = client_x + sidebar_w + 14;
-                int content_w = client_w - sidebar_w - 26;
+                int sidebar_w = explorer_sidebar_width_for_window_width(client_w);
+                int content_x = client_x + sidebar_w + 12;
+                int content_w = client_w - sidebar_w - 12;
                 int panel_y = client_y + 36;
-                int list_y = panel_y + 48;
+                int list_y = panel_y + 12;
                 int row_h = 54;
-                if (mx >= client_x + 12 && mx <= client_x + 122) {
-                    if (my >= panel_y + 34 && my <= panel_y + 56) explorer_move_selected_to(-1);
-                    else if (my >= panel_y + 62 && my <= panel_y + 84) explorer_move_selected_to(desk_dir_idx);
-                    else if (my >= panel_y + 90 && my <= panel_y + 112) {
+                if (mx >= client_x + 12 && mx <= client_x + sidebar_w - 12) {
+                    if (my >= panel_y + 40 && my <= panel_y + 62) explorer_move_selected_to(-1);
+                    else if (my >= panel_y + 68 && my <= panel_y + 90) explorer_move_selected_to(desk_dir_idx);
+                    else if (my >= panel_y + 96 && my <= panel_y + 118) {
                         int home_idx = fs_find_node("/home/user");
                         if (home_idx >= 0) explorer_move_selected_to(home_idx);
                     }
                 } else if (mx >= content_x + 16 && mx <= content_x + content_w - 16 && my >= list_y) {
-                    int hit_slot = (my - list_y) / row_h;
+                    int hit_slot = user_explorer_state.list_scroll + ((my - list_y) / row_h);
                     int current_slot = 0;
                     for (int i = 0; i < MAX_FILES; i++) {
                         if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) {
@@ -1364,6 +1735,7 @@ static void desktop_process_main(void) {
                 explorer_cancel_modal();
                 goto process_done;
             }
+            if (ctx_visible) desktop_damage_add_context_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, ctx_x, ctx_y, ctx_count);
             ctx_visible = 1; ctx_x = mx; ctx_y = my; ctx_selected = -1;
             int pidx = nwm_get_idx_by_type(WIN_TYPE_NARCPAD);
             int eidx = nwm_get_idx_by_type(WIN_TYPE_EXPLORER);
@@ -1374,6 +1746,7 @@ static void desktop_process_main(void) {
             } else {
                 ctx_items = ctx_items_desk; ctx_count = 3;
             }
+            desktop_damage_add_context_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, ctx_x, ctx_y, ctx_count);
             gui_needs_redraw = 1;
         }
         if (lp != last_lp && lp) {
@@ -1387,6 +1760,7 @@ static void desktop_process_main(void) {
                 goto process_done;
             }
             if (ctx_visible) {
+                 desktop_damage_add_context_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, ctx_x, ctx_y, ctx_count);
                  if (ctx_selected != -1) {
                      const char* cmd = ctx_items[ctx_selected];
                      if (strcmp(cmd, "Save") == 0) {
@@ -1451,13 +1825,18 @@ static void desktop_process_main(void) {
                                 timer_ticks - last_click_tick < DESKTOP_DOUBLE_CLICK_TICKS);
             last_click_target = click_target;
             last_click_tick = timer_ticks;
-            if (my <= 35) {
-                if (mx >= 5 && mx <= 89) { start_menu_visible = !start_menu_visible; gui_needs_redraw = 1; }
-                else if (mx >= (int)vbe_get_width() - 104 && mx <= (int)vbe_get_width() - 14) {
+            if (my <= 41) {
+                if (mx >= 8 && mx <= 102) {
+                    desktop_damage_add_start_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h);
+                    start_menu_visible = !start_menu_visible;
+                    if (start_menu_visible) desktop_damage_add_start_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h);
+                    gui_needs_redraw = 1;
+                }
+                else if (mx >= (int)vbe_get_width() - 104 && mx <= (int)vbe_get_width() - 12) {
                     open_settings_window();
                     start_menu_visible = 0;
                 }
-                else if (mx >= 96 && mx <= 136) {
+                else if (mx >= 108 && mx <= 142) {
                     int tidx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
                     if (tidx != -1) {
                         if (!windows[tidx].visible) { windows[tidx].visible = 1; windows[tidx].minimized = 0; nwm_bring_to_front(tidx); }
@@ -1468,12 +1847,27 @@ static void desktop_process_main(void) {
                     }
                 }
                 else {
-                    int clicked_slot = (mx - 148) / 112;
-                    if (mx >= 148 && clicked_slot >= 0) {
+                    int right_x = (int)vbe_get_width() - 104;
+                    int app_x = 154;
+                    int available_w = right_x - app_x - 12;
+                    int visible_count = 0;
+                    for (int i = 0; i < window_count; i++) {
+                        if (windows[i].visible) visible_count++;
+                    }
+                    if (visible_count > 0 && mx >= app_x && mx < right_x && available_w > 90) {
+                        int slot_gap = 6;
+                        int slot_w = (available_w - ((visible_count - 1) * slot_gap)) / visible_count;
+                        int strip_w;
+                        int strip_x;
                         int current_slot = 0;
+                        if (slot_w > 118) slot_w = 118;
+                        if (slot_w < 76) slot_w = 76;
+                        strip_w = visible_count * slot_w + (visible_count - 1) * slot_gap;
+                        strip_x = app_x + (available_w - strip_w) / 2;
                         for (int i = 0; i < window_count; i++) {
                             if (!windows[i].visible) continue;
-                            if (current_slot == clicked_slot) {
+                            if (mx >= strip_x + current_slot * (slot_w + slot_gap) &&
+                                mx < strip_x + current_slot * (slot_w + slot_gap) + slot_w) {
                                 if (windows[i].minimized) { windows[i].minimized = 0; nwm_bring_to_front(i); }
                                 else if (i == active_window_idx) { windows[i].minimized = 1; }
                                 else { nwm_bring_to_front(i); }
@@ -1495,11 +1889,29 @@ static void desktop_process_main(void) {
                             windows[hit_win].visible = 0; gui_needs_redraw = 1;
                         } else if (mx >= windows[hit_win].x + windows[hit_win].w - 44) {
                             windows[hit_win].minimized = 1; gui_needs_redraw = 1;
+                        } else if (nwm_resize_hit_test(&windows[hit_win], mx, my) != WINDOW_RESIZE_NONE) {
+                            resizing_idx = hit_win;
+                            resize_mode = nwm_resize_hit_test(&windows[hit_win], mx, my);
+                            resize_start_mx = mx;
+                            resize_start_my = my;
+                            resize_start_x = windows[hit_win].x;
+                            resize_start_y = windows[hit_win].y;
+                            resize_start_w = windows[hit_win].w;
+                            resize_start_h = windows[hit_win].h;
                         } else {
                             dragging_idx = hit_win;
                             drag_off_x = mx - windows[hit_win].x;
                             drag_off_y = my - windows[hit_win].y;
                         }
+                    } else if (nwm_resize_hit_test(&windows[hit_win], mx, my) != WINDOW_RESIZE_NONE) {
+                        resizing_idx = hit_win;
+                        resize_mode = nwm_resize_hit_test(&windows[hit_win], mx, my);
+                        resize_start_mx = mx;
+                        resize_start_my = my;
+                        resize_start_x = windows[hit_win].x;
+                        resize_start_y = windows[hit_win].y;
+                        resize_start_w = windows[hit_win].w;
+                        resize_start_h = windows[hit_win].h;
                     } else if (windows[hit_win].type == WIN_TYPE_EXPLORER) {
                         int wx = windows[hit_win].x, wy = windows[hit_win].y;
                         int ww = windows[hit_win].w;
@@ -1507,41 +1919,29 @@ static void desktop_process_main(void) {
                         int client_y = wy + 40;
                         int client_w = ww - 16;
                         int breadcrumb_y = client_y;
-                        int sidebar_w = 136;
-                        int content_x = client_x + sidebar_w + 14;
-                        int content_w = client_w - sidebar_w - 26;
+                        int sidebar_w = explorer_sidebar_width_for_window_width(client_w);
+                        int content_x = client_x + sidebar_w + 12;
+                        int content_w = client_w - sidebar_w - 12;
                         int panel_y = client_y + 36;
-                        int list_y = panel_y + 48;
+                        int list_y = panel_y + 12;
                         int row_h = 54;
                         if (my >= breadcrumb_y && my <= breadcrumb_y + 28) {
                             if (mx >= client_x && mx <= client_x + client_w) {
                                 explorer_open_dir(-1);
                             }
                         }
-                        else if (my >= panel_y + 8 && my <= panel_y + 28) {
-                            if (mx >= content_x + 12 && mx <= content_x + 58) {
-                                if (user_explorer_state.prev_dir != -1) explorer_open_dir(user_explorer_state.prev_dir);
-                            } else if (mx >= content_x + 66 && mx <= content_x + 104) {
-                                if (user_explorer_state.current_dir != -1) explorer_open_dir(dir_cache[user_explorer_state.current_dir].parent_index);
-                            } else if (mx >= content_x + 112 && mx <= content_x + 182) {
-                                if (explorer_create_in_dir(user_explorer_state.current_dir, 0) == 0) gui_needs_redraw = 1;
-                            } else if (mx >= content_x + 190 && mx <= content_x + 274) {
-                                if (explorer_create_in_dir(user_explorer_state.current_dir, 1) == 0) gui_needs_redraw = 1;
-                            } else if (mx >= content_x + 282 && mx <= content_x + 342) {
-                                explorer_begin_rename_selected();
-                            } else if (mx >= content_x + 350 && mx <= content_x + 404) {
-                                explorer_begin_delete_selected();
-                            } else if (mx >= content_x + content_w - 76 && mx <= content_x + content_w - 16) {
+                        else if (my >= panel_y + 8 && my <= panel_y + 24) {
+                            if (mx >= content_x + content_w - (content_w < 240 ? 54 : 72) && mx <= content_x + content_w - 8) {
                                 if (user_explorer_running()) queue_user_explorer_event(USER_EXPLORER_EVT_REFRESH, 0);
                                 gui_needs_redraw = 1;
                             }
                         }
-                        else if (mx >= client_x + 12 && mx <= client_x + 122) {
-                            if (my >= client_y + 76 && my <= client_y + 98) {
+                        else if (mx >= client_x + 12 && mx <= client_x + sidebar_w - 12) {
+                            if (my >= panel_y + 40 && my <= panel_y + 62) {
                                 explorer_open_dir(-1);
-                            } else if (my >= client_y + 104 && my <= client_y + 126) {
+                            } else if (my >= panel_y + 68 && my <= panel_y + 90) {
                                 explorer_open_dir(desk_dir_idx);
-                            } else if (my >= client_y + 132 && my <= client_y + 154) {
+                            } else if (my >= panel_y + 96 && my <= panel_y + 118) {
                                 {
                                     int home_idx = fs_find_node("/home/user");
                                     if (home_idx >= 0) explorer_open_dir(home_idx);
@@ -1552,7 +1952,7 @@ static void desktop_process_main(void) {
                             int card_x0 = content_x + 16;
                             int card_x1 = content_x + content_w - 16;
                             if (mx >= card_x0 && mx <= card_x1 && my >= list_y) {
-                                int hit_slot = (my - list_y) / row_h;
+                                int hit_slot = user_explorer_state.list_scroll + ((my - list_y) / row_h);
                                 int current_slot = 0;
                                 for (int i = 0; i < MAX_FILES; i++) {
                                     if (dir_cache[i].flags != 0 && dir_cache[i].parent_index == user_explorer_state.current_dir) {
@@ -1572,7 +1972,7 @@ static void desktop_process_main(void) {
                             int card_x0 = content_x + 16;
                             int card_x1 = content_x + content_w - 16;
                             if (mx >= card_x0 && mx <= card_x1 && my >= list_y) {
-                                int hit_slot = (my - list_y) / row_h;
+                                int hit_slot = user_explorer_state.list_scroll + ((my - list_y) / row_h);
                                 int current_slot = 0;
                                 queue_user_explorer_event(USER_EXPLORER_EVT_SELECT_IDX, -1);
                                 exp_drag_idx = -1;
@@ -1597,7 +1997,11 @@ static void desktop_process_main(void) {
                         if (settings_handle_click(&windows[hit_win], mx, my)) goto process_done;
                     }
                 } else {
-                    if (start_menu_visible && (mx > 268 || my > 397)) { start_menu_visible = 0; gui_needs_redraw = 1; }
+                    if (start_menu_visible && (mx > 268 || my > 397)) {
+                        desktop_damage_add_start_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h);
+                        start_menu_visible = 0;
+                        gui_needs_redraw = 1;
+                    }
                     if (mx >= 20 && mx <= 60) {
                         if (my >= 60 && my <= 110 && double_click) { 
                             open_explorer_window(desk_dir_idx);
@@ -1629,12 +2033,16 @@ static void desktop_process_main(void) {
             }
         } else if (!lp) {
             dragging_idx = -1;
+            resizing_idx = -1;
+            resize_mode = WINDOW_RESIZE_NONE;
         }
 
         if (dragging_idx != -1) {
             uint32_t sw = vbe_get_width();
             uint32_t sh = vbe_get_height();
             int win_w = windows[dragging_idx].w;
+            int old_x = windows[dragging_idx].x;
+            int old_y = windows[dragging_idx].y;
             int new_x = mx - drag_off_x;
             int new_y = my - drag_off_y;
 
@@ -1644,9 +2052,76 @@ static void desktop_process_main(void) {
             if (new_x > (int)sw - 40) new_x = (int)sw - 40;
 
             if (windows[dragging_idx].x != new_x || windows[dragging_idx].y != new_y) {
+                desktop_damage_add_window(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, &windows[dragging_idx]);
                 windows[dragging_idx].x = new_x;
                 windows[dragging_idx].y = new_y;
+                (void)old_x;
+                (void)old_y;
+                desktop_damage_add_window(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, &windows[dragging_idx]);
                 gui_needs_redraw = 1;
+            }
+        }
+        if (resizing_idx != -1 && lp) {
+            cursor_mode = nwm_cursor_mode_from_resize_flags(resize_mode);
+            uint32_t sw = vbe_get_width();
+            uint32_t sh = vbe_get_height();
+            int min_w = nwm_window_min_w(windows[resizing_idx].type);
+            int min_h = nwm_window_min_h(windows[resizing_idx].type);
+            int dx = mx - resize_start_mx;
+            int dy = my - resize_start_my;
+            int new_x = resize_start_x;
+            int new_y = resize_start_y;
+            int new_w = resize_start_w;
+            int new_h = resize_start_h;
+
+            if (resize_mode & WINDOW_RESIZE_LEFT) {
+                new_x = resize_start_x + dx;
+                new_w = resize_start_w - dx;
+                if (new_w < min_w) {
+                    new_w = min_w;
+                    new_x = resize_start_x + (resize_start_w - min_w);
+                }
+                if (new_x < 0) {
+                    new_w += new_x;
+                    new_x = 0;
+                }
+            }
+            if (resize_mode & WINDOW_RESIZE_RIGHT) {
+                new_w = resize_start_w + dx;
+                if (new_w < min_w) new_w = min_w;
+                if (new_x + new_w > (int)sw) new_w = (int)sw - new_x;
+            }
+            if (resize_mode & WINDOW_RESIZE_BOTTOM) {
+                new_h = resize_start_h + dy;
+                if (new_h < min_h) new_h = min_h;
+                if (new_y + new_h > (int)sh) new_h = (int)sh - new_y;
+            }
+
+            if (new_w < min_w) new_w = min_w;
+            if (new_h < min_h) new_h = min_h;
+            if (new_x + new_w > (int)sw) {
+                if (resize_mode & WINDOW_RESIZE_LEFT) new_x = (int)sw - new_w;
+                else new_w = (int)sw - new_x;
+            }
+            if (new_y + new_h > (int)sh) new_h = (int)sh - new_y;
+            if (new_y < 35) new_y = 35;
+
+            if (windows[resizing_idx].x != new_x || windows[resizing_idx].y != new_y ||
+                windows[resizing_idx].w != new_w || windows[resizing_idx].h != new_h) {
+                desktop_damage_add_window(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, &windows[resizing_idx]);
+                windows[resizing_idx].x = new_x;
+                windows[resizing_idx].y = new_y;
+                windows[resizing_idx].w = new_w;
+                windows[resizing_idx].h = new_h;
+                desktop_damage_add_window(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, &windows[resizing_idx]);
+                gui_needs_redraw = 1;
+            }
+        }
+        if (resizing_idx == -1) {
+            int hover_win = nwm_find_window_at(mx, my);
+            if (hover_win != -1) {
+                int hover_resize = nwm_resize_hit_test(&windows[hover_win], mx, my);
+                cursor_mode = nwm_cursor_mode_from_resize_flags(hover_resize);
             }
         }
         if (lp && exp_drag_armed && exp_drag_idx != -1 && (mx != last_mx || my != last_my)) {
@@ -1687,22 +2162,48 @@ static void desktop_process_main(void) {
                 if (snk_score > snk_best) snk_best = snk_score;
                 apple_x = (timer_ticks % 37) + 1; apple_y = (timer_ticks % 27) + 1;
             }
+            desktop_damage_add_window(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, &windows[sidx]);
             gui_needs_redraw = 1;
         }
         if (timer_ticks - last_clock_tick >= 100) {
-            read_rtc(); last_clock_tick = timer_ticks; gui_needs_redraw = 1;
+            read_rtc();
+            last_clock_tick = timer_ticks;
+            desktop_damage_add_taskbar_clock(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h);
+            gui_needs_redraw = 1;
+        }
+        if (cursor_mode != last_cursor_mode) {
+            vbe_set_cursor_mode(cursor_mode);
+            last_cursor_mode = cursor_mode;
+            gui_needs_redraw = 1;
         }
         run_user_tasks();
         if (gui_needs_redraw || lp != last_lp || rp != last_rp || cmd_ready) {
+            int scene_damage_valid = damage_valid;
             vbe_compose_scene(windows, window_count, active_window_idx, start_menu_visible, desk_dir_idx, drag_file_idx, mx, my, ctx_visible, ctx_x, ctx_y, ctx_items, ctx_count, ctx_selected);
-            vbe_prepare_frame_from_composition();
-            vbe_render_mouse(mx, my);
             wait_vsync();
-            vbe_update();
+            if (scene_damage_valid) {
+                desktop_damage_add_rect(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h,
+                                        last_mx - 2, last_my - 2, 16, 16);
+                desktop_damage_add_rect(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h,
+                                        mx - 2, my - 2, 16, 16);
+                vbe_present_composition_region(damage_x, damage_y, damage_w, damage_h);
+                vbe_present_cursor_fast(last_mx, last_my, mx, my);
+            } else {
+                vbe_present_composition_with_cursor(mx, my);
+            }
             last_mx = mx; last_my = my; last_lp = lp; last_rp = rp;
             gui_needs_redraw = 0;
+            damage_valid = 0;
+            damage_x = damage_y = damage_w = damage_h = 0;
         } else if (mouse_moved && (mx != last_mx || my != last_my)) {
-            vbe_present_cursor_fast(last_mx, last_my, mx, my);
+            int tidx = nwm_get_idx_by_type(WIN_TYPE_TERMINAL);
+            if (tidx != -1 && windows[tidx].visible && !windows[tidx].minimized) {
+                vbe_compose_scene(windows, window_count, active_window_idx, start_menu_visible, desk_dir_idx,
+                                  drag_file_idx, mx, my, ctx_visible, ctx_x, ctx_y, ctx_items, ctx_count, ctx_selected);
+                vbe_present_composition_with_cursor(mx, my);
+            } else {
+                vbe_present_cursor_fast(last_mx, last_my, mx, my);
+            }
             last_mx = mx;
             last_my = my;
         }
@@ -1713,13 +2214,32 @@ static void desktop_process_main(void) {
                 if (new_sel < 0 || new_sel >= ctx_count) new_sel = -1;
             }
             if (new_sel != ctx_selected) {
+                desktop_damage_add_context_menu(&damage_valid, &damage_x, &damage_y, &damage_w, &damage_h, ctx_x, ctx_y, ctx_count);
                 ctx_selected = new_sel;
                 gui_needs_redraw = 1;
             }
         }
 
         if (cmd_ready) {
-            execute_command(cmd_to_execute); cmd_ready = 0; print_prompt();
+            execute_command(cmd_to_execute);
+            cmd_ready = 0;
+            print_prompt();
+
+            mx = get_mouse_x();
+            my = get_mouse_y();
+            lp = mouse_left_pressed();
+            rp = mouse_right_pressed();
+            vbe_compose_scene(windows, window_count, active_window_idx, start_menu_visible, desk_dir_idx,
+                              drag_file_idx, mx, my, ctx_visible, ctx_x, ctx_y, ctx_items, ctx_count, ctx_selected);
+            wait_vsync();
+            vbe_present_composition_with_cursor(mx, my);
+            last_mx = mx;
+            last_my = my;
+            last_lp = lp;
+            last_rp = rp;
+            gui_needs_redraw = 0;
+            damage_valid = 0;
+            damage_x = damage_y = damage_w = damage_h = 0;
         }
         process_poll();
         asm volatile("hlt");
@@ -1836,18 +2356,9 @@ void kmain() {
     }
     clear_screen();
     if (screen_is_graphics_enabled()) {
-        vga_print_color("\n  NarcOs GUI Initialized.\n", 0x0B);
-        vga_print_color("  ========================\n", 0x0B);
-        vga_println("  Welcome to NarcOs Desktop!");
         nwm_init_windows();
+        print_gui_terminal_banner();
         print_prompt();
-        vga_print("  Video Mode: ");
-        vga_print_int(vbe_get_width());
-        vga_print("x");
-        vga_print_int(vbe_get_height());
-        vga_print(" @ ");
-        vga_print_int(vbe_get_bpp());
-        vga_println("bpp");
     } else {
         print_text_fallback_banner();
     }

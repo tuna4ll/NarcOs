@@ -8,6 +8,7 @@
 #include "io.h"
 #include "pci.h"
 #include "rtc.h"
+#include "process.h"
 #include "string.h"
 
 extern void vga_print(const char* str);
@@ -17,7 +18,7 @@ extern void vga_print_color(const char* str, uint8_t color);
 extern void vga_putchar(char c);
 extern volatile uint32_t timer_ticks;
 extern void vbe_compose_scene_basic();
-extern void vbe_update();
+extern volatile int gui_needs_redraw;
 
 #define RTL8139_VENDOR_ID 0x10EC
 #define RTL8139_DEVICE_ID 0x8139
@@ -183,6 +184,10 @@ typedef struct {
     uint32_t gateway;
     uint32_t dns_server;
     uint32_t dhcp_server;
+    uint32_t rx_bytes;
+    uint32_t tx_bytes;
+    uint32_t rx_packets;
+    uint32_t tx_packets;
     uint16_t next_ip_id;
     uint16_t next_ping_seq;
     int configured;
