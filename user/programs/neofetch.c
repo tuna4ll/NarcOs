@@ -316,7 +316,7 @@ int main(void) {
     line++;
     if (print_uptime_line(neofetch_logo[line], logo_color_for_line((int)line), uptime_ticks) != 0) return 1;
     line++;
-    if (print_static_line(neofetch_logo[line], logo_color_for_line((int)line), "Packages", "11 (/bin)") != 0) return 1;
+    if (print_static_line(neofetch_logo[line], logo_color_for_line((int)line), "Packages", "12 (/bin)") != 0) return 1;
     line++;
     if (print_static_line(neofetch_logo[line], logo_color_for_line((int)line), "Shell", "narcsh") != 0) return 1;
     line++;

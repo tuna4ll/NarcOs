@@ -1339,6 +1339,23 @@ static USER_CODE int shell_spawn_gui_app(const char* path) {
     return user_spawn(path, argv, 1U) >= 0 ? 0 : -1;
 }
 
+static USER_CODE int shell_spawn_gui_command(const char* command, const char* args) {
+    char segment[160];
+    int off = 0;
+
+    if (!command || command[0] == '\0') return -1;
+    segment[0] = '\0';
+    if (shell_append_text(segment, sizeof(segment), &off, command) != 0) return -1;
+    args = shell_skip_spaces(args);
+    if (args && args[0] != '\0') {
+        if (shell_append_char(segment, sizeof(segment), &off, ' ') != 0 ||
+            shell_append_text(segment, sizeof(segment), &off, args) != 0) {
+            return -1;
+        }
+    }
+    return shell_run_external_segment(segment, 0, 0, 0);
+}
+
 static USER_CODE int shell_run_wait_builtin(const char* args) {
     char line[96];
     int off = 0;
@@ -1489,6 +1506,7 @@ static USER_CODE int shell_try_run_builtin(user_shell_state_t* state, const char
 
     if (strcmp(command, "mem") == 0) status = shell_run_privileged(PRIV_CMD_MEM, "", "error: Unable to show memory map.");
     else if (strcmp(command, "snake") == 0) status = shell_spawn_gui_app("/bin/snake");
+    else if (strcmp(command, "doom") == 0) status = shell_spawn_gui_command("doom", args);
     else if (strcmp(command, "settings") == 0) status = shell_spawn_gui_app("/bin/settings");
     else if (strcmp(command, "ps") == 0) status = shell_run_ps();
     else if (strcmp(command, "procdump") == 0) status = shell_run_privileged(PRIV_CMD_PROC_DUMP, "", "error: Unable to dump process table.");

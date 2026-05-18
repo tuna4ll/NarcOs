@@ -399,7 +399,8 @@ enum {
     USER_GUI_ICON_SNAKE = 7,
     USER_GUI_ICON_NARCPAD = 8,
     USER_GUI_ICON_APP = 9,
-    USER_GUI_ICON_INFO = 10
+    USER_GUI_ICON_INFO = 10,
+    USER_GUI_ICON_DOOM = 11
 };
 
 static USER_CODE __attribute__((unused)) int user_gui_icon_scale(int value, int size) {
@@ -511,6 +512,15 @@ static USER_CODE __attribute__((unused)) void user_gui_draw_icon(user_gui_surfac
             user_gui_icon_fill(surface, x, y, size, 19, 14, 5, 5, deep);
             user_gui_icon_fill(surface, x, y, size, 14, 14, 5, 5, deep);
             user_gui_icon_fill(surface, x, y, size, 9, 20, 5, 5, UI_DANGER);
+            break;
+        case USER_GUI_ICON_DOOM:
+            user_gui_icon_rect(surface, x, y, size, 4, 7, 24, 18, 3, deep, 255);
+            user_gui_icon_rect(surface, x, y, size, 6, 9, 20, 14, 2, accent, 255);
+            user_gui_icon_fill(surface, x, y, size, 8, 12, 16, 2, pale);
+            user_gui_icon_fill(surface, x, y, size, 8, 16, 5, 5, 0x18110C);
+            user_gui_icon_fill(surface, x, y, size, 19, 16, 5, 5, 0x18110C);
+            user_gui_icon_fill(surface, x, y, size, 14, 19, 4, 3, UI_DANGER);
+            user_gui_icon_fill(surface, x, y, size, 11, 25, 10, 2, light);
             break;
         case USER_GUI_ICON_NARCPAD:
             user_gui_icon_rect(surface, x, y, size, 7, 4, 18, 24, 3, pale, 255);

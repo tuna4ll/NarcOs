@@ -18,6 +18,7 @@ static int core_help_main(void) {
         "  clear   - Clear the screen",
         "  mem     - Memory map",
         "  snake   - Snake game (requires graphics mode)",
+        "  doom    - Doom port shell (requires graphics mode)",
         "  settings - Open settings (requires graphics mode)",
         "  ver     - Show version",
         "  uptime  - Show system uptime in seconds",

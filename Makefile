@@ -14,10 +14,19 @@ VBE_WIDTH ?= 1920
 VBE_HEIGHT ?= 1080
 BOOT_MANIFEST_LBA = 17
 KERNEL_START_LBA = 18
+DISK_IMAGE_SECTORS = 49152
 
 KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
-USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test neofetch desktop explorer narcpad settings snake core_tools tls_tools
+USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test neofetch desktop explorer narcpad settings snake doom core_tools tls_tools
+USER_EMBED_PROGRAMS = $(filter-out doom,$(USER_PROGRAMS))
 USER_PROGRAM_HEADERS = $(shell find $(USER_DIR)/programs -name '*.h' 2>/dev/null)
+DOOM1_WAD = $(wildcard $(ASSET_DIR)/doom1.wad)
+DOOM_BIN_LBA = 32768
+DOOM_BIN_MAX_SIZE = 1048576
+DOOM1_WAD_LBA = 33792
+DOOM1_WAD_MAX_SIZE = 4489216
+DOOM1_WAD_SIZE = $(if $(DOOM1_WAD),$(shell wc -c < $(ASSET_DIR)/doom1.wad),0)
+DOOM1_WAD_CFLAGS = $(if $(DOOM1_WAD),-DNARCOS_DISK_DOOM1_WAD=1 -DNARCOS_DISK_DOOM1_WAD_LBA=$(DOOM1_WAD_LBA) -DNARCOS_DISK_DOOM1_WAD_SIZE=$(DOOM1_WAD_SIZE),)
 USER_TLS_PROGRAMS = tls_tools
 USER_TLS_SOURCES = \
 	$(KERN_DIR)/apps/user_tls.c \
@@ -32,6 +41,20 @@ USER_TLS_HEADERS = \
 	$(KERN_DIR)/apps/user_tls_x509.h \
 	$(KERN_DIR)/apps/user_tls_pins.h \
 	$(KERN_DIR)/apps/user_string.h
+DOOM_PORT_DIR = $(USER_DIR)/ports/doom
+DOOMGENERIC_DIR = $(DOOM_PORT_DIR)/doomgeneric
+DOOMGENERIC_SOURCE_NAMES = \
+	dummy.c am_map.c doomdef.c doomstat.c dstrings.c d_event.c d_items.c d_iwad.c d_loop.c d_main.c d_mode.c d_net.c \
+	f_finale.c f_wipe.c g_game.c hu_lib.c hu_stuff.c info.c i_cdmus.c i_endoom.c i_joystick.c i_scale.c i_sound.c \
+	i_system.c i_timer.c memio.c m_argv.c m_bbox.c m_cheat.c m_config.c m_controls.c m_fixed.c m_menu.c m_misc.c \
+	m_random.c p_ceilng.c p_doors.c p_enemy.c p_floor.c p_inter.c p_lights.c p_map.c p_maputl.c p_mobj.c p_plats.c \
+	p_pspr.c p_saveg.c p_setup.c p_sight.c p_spec.c p_switch.c p_telept.c p_tick.c p_user.c r_bsp.c r_data.c \
+	r_draw.c r_main.c r_plane.c r_segs.c r_sky.c r_things.c sha1.c sounds.c statdump.c st_lib.c st_stuff.c s_sound.c \
+	tables.c v_video.c wi_stuff.c w_checksum.c w_file.c w_main.c w_wad.c z_zone.c w_file_stdc.c i_input.c i_video.c doomgeneric.c
+DOOMGENERIC_SOURCES = $(addprefix $(DOOMGENERIC_DIR)/,$(DOOMGENERIC_SOURCE_NAMES))
+DOOM_CFLAGS = -I$(DOOM_PORT_DIR)/include -I$(DOOMGENERIC_DIR) -include string.h -include strings.h -DNORMALUNIX -D_DEFAULT_SOURCE -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare
+I386_DOOM_CFLAGS = $(DOOM_CFLAGS)
+X86_64_DOOM_CFLAGS = $(DOOM_CFLAGS) -DNARCOS_DOOM_NO_FLOAT
 
 KERNEL_INCLUDE_FLAGS = $(addprefix -I,$(KERNEL_DIRS))
 COMMON_CFLAGS = -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fcf-protection=none -fno-builtin -fno-strict-aliasing -Wall -Wextra
@@ -59,9 +82,11 @@ I386_C_OBJECTS = $(patsubst $(KERN_DIR)/%.c,$(I386_OBJ_DIR)/%.o,$(I386_C_SOURCES
 I386_ASM_OBJECTS = $(patsubst $(KERN_DIR)/%.asm,$(I386_OBJ_DIR)/%.o,$(I386_ASM_SOURCES))
 I386_USER_PROGRAM_OBJECTS = $(patsubst %,$(I386_OBJ_DIR)/user/programs/%.o,$(USER_PROGRAMS))
 I386_USER_BINARIES = $(patsubst %,$(I386_OBJ_DIR)/user/bin/%,$(USER_PROGRAMS))
-I386_USER_EMBED_OBJECTS = $(patsubst %,$(I386_OBJ_DIR)/user/embed/%.o,$(USER_PROGRAMS))
+I386_USER_EMBED_OBJECTS = $(patsubst %,$(I386_OBJ_DIR)/user/embed/%.o,$(USER_EMBED_PROGRAMS))
 I386_USER_TLS_OBJECTS = $(patsubst $(KERN_DIR)/apps/%.c,$(I386_OBJ_DIR)/user/lib/%.o,$(USER_TLS_SOURCES))
 I386_USER_TLS_BINARIES = $(patsubst %,$(I386_OBJ_DIR)/user/bin/%,$(USER_TLS_PROGRAMS))
+I386_DOOMGENERIC_OBJECTS = $(patsubst $(DOOMGENERIC_DIR)/%.c,$(I386_OBJ_DIR)/doomgeneric/%.o,$(DOOMGENERIC_SOURCES))
+I386_LIBGCC = $(shell $(CC) -m32 -print-libgcc-file-name)
 I386_ASSET_BG_RGB = $(I386_OBJ_DIR)/assets/bg.rgb
 I386_ASSET_BG_OBJECT = $(I386_OBJ_DIR)/assets/bg.o
 I386_ASSET_LOGO_RGB = $(I386_OBJ_DIR)/assets/logo.rgb
@@ -69,6 +94,9 @@ I386_ASSET_LOGO_OBJECT = $(I386_OBJ_DIR)/assets/logo.o
 I386_DESKTOP_ASSET_BG_RGB = $(I386_OBJ_DIR)/user/assets/desktop_bg.rgb
 I386_DESKTOP_ASSET_BG_OBJECT = $(I386_OBJ_DIR)/user/assets/desktop_bg.o
 I386_USER_CRT_OBJECT = $(I386_OBJ_DIR)/user/crt0.o
+I386_DOOM_BINARY = $(I386_OBJ_DIR)/user/bin/doom
+I386_DOOM_BIN_SIZE = $(shell test -f $(I386_DOOM_BINARY) && wc -c < $(I386_DOOM_BINARY) || echo 0)
+I386_DISK_PAYLOAD_CFLAGS = -DNARCOS_DISK_DOOM_BIN=1 -DNARCOS_DISK_DOOM_BIN_LBA=$(DOOM_BIN_LBA) -DNARCOS_DISK_DOOM_BIN_SIZE=$(I386_DOOM_BIN_SIZE) $(DOOM1_WAD_CFLAGS)
 I386_KERNEL_OBJECTS = $(I386_ASM_OBJECTS) $(I386_C_OBJECTS) $(I386_USER_EMBED_OBJECTS) $(I386_ASSET_BG_OBJECT) $(I386_ASSET_LOGO_OBJECT)
 I386_BOOT_BIN = $(I386_OBJ_DIR)/boot/boot.bin
 I386_STAGE2_BIN = $(I386_OBJ_DIR)/boot/stage2.bin
@@ -114,9 +142,11 @@ X86_64_ASM_OBJECTS = $(patsubst $(KERN_DIR)/%.asm,$(X86_64_OBJ_DIR)/%.o,$(X86_64
 X86_64_USER_PROGRAMS = $(USER_PROGRAMS)
 X86_64_USER_PROGRAM_OBJECTS = $(patsubst %,$(X86_64_OBJ_DIR)/user/programs/%.o,$(X86_64_USER_PROGRAMS))
 X86_64_USER_BINARIES = $(patsubst %,$(X86_64_OBJ_DIR)/user/bin/%,$(X86_64_USER_PROGRAMS))
-X86_64_USER_EMBED_OBJECTS = $(patsubst %,$(X86_64_OBJ_DIR)/user/embed/%.o,$(X86_64_USER_PROGRAMS))
+X86_64_USER_EMBED_OBJECTS = $(patsubst %,$(X86_64_OBJ_DIR)/user/embed/%.o,$(USER_EMBED_PROGRAMS))
 X86_64_USER_TLS_OBJECTS = $(patsubst $(KERN_DIR)/apps/%.c,$(X86_64_OBJ_DIR)/user/lib/%.o,$(USER_TLS_SOURCES))
 X86_64_USER_TLS_BINARIES = $(patsubst %,$(X86_64_OBJ_DIR)/user/bin/%,$(USER_TLS_PROGRAMS))
+X86_64_DOOMGENERIC_OBJECTS = $(patsubst $(DOOMGENERIC_DIR)/%.c,$(X86_64_OBJ_DIR)/doomgeneric/%.o,$(DOOMGENERIC_SOURCES))
+X86_64_LIBGCC = $(shell $(CC) -m64 -print-libgcc-file-name)
 X86_64_ASSET_BG_RGB = $(X86_64_OBJ_DIR)/assets/bg.rgb
 X86_64_ASSET_BG_OBJECT = $(X86_64_OBJ_DIR)/assets/bg.o
 X86_64_ASSET_LOGO_RGB = $(X86_64_OBJ_DIR)/assets/logo.rgb
@@ -124,6 +154,9 @@ X86_64_ASSET_LOGO_OBJECT = $(X86_64_OBJ_DIR)/assets/logo.o
 X86_64_DESKTOP_ASSET_BG_RGB = $(X86_64_OBJ_DIR)/user/assets/desktop_bg.rgb
 X86_64_DESKTOP_ASSET_BG_OBJECT = $(X86_64_OBJ_DIR)/user/assets/desktop_bg.o
 X86_64_USER_CRT_OBJECT = $(X86_64_OBJ_DIR)/user/crt0_x86_64.o
+X86_64_DOOM_BINARY = $(X86_64_OBJ_DIR)/user/bin/doom
+X86_64_DOOM_BIN_SIZE = $(shell test -f $(X86_64_DOOM_BINARY) && wc -c < $(X86_64_DOOM_BINARY) || echo 0)
+X86_64_DISK_PAYLOAD_CFLAGS = -DNARCOS_DISK_DOOM_BIN=1 -DNARCOS_DISK_DOOM_BIN_LBA=$(DOOM_BIN_LBA) -DNARCOS_DISK_DOOM_BIN_SIZE=$(X86_64_DOOM_BIN_SIZE) $(DOOM1_WAD_CFLAGS)
 X86_64_KERNEL_OBJECTS = $(X86_64_ASM_OBJECTS) $(X86_64_C_OBJECTS) $(X86_64_USER_EMBED_OBJECTS) $(X86_64_ASSET_BG_OBJECT) $(X86_64_ASSET_LOGO_OBJECT)
 X86_64_KERNEL_ELF = $(X86_64_OBJ_DIR)/kernel64.elf
 X86_64_KERNEL_BIN = $(X86_64_OBJ_DIR)/kernel64.bin
@@ -178,6 +211,9 @@ $(I386_OBJ_DIR)/%.o: $(KERN_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(I386_CFLAGS) -c $< -o $@
 
+$(I386_OBJ_DIR)/fs/fs.o: $(I386_DOOM_BINARY) $(DOOM1_WAD)
+$(I386_OBJ_DIR)/fs/fs.o: I386_CFLAGS += $(I386_DISK_PAYLOAD_CFLAGS)
+
 $(I386_OBJ_DIR)/%.o: $(KERN_DIR)/%.asm
 	@mkdir -p $(dir $@)
 	$(AS) -f elf32 $< -o $@
@@ -190,6 +226,18 @@ $(I386_OBJ_DIR)/user/programs/%.o: $(USER_DIR)/programs/%.c $(USER_DIR)/include/
 	@mkdir -p $(dir $@)
 	$(CC) $(I386_USER_CFLAGS) -c $< -o $@
 
+$(I386_OBJ_DIR)/user/programs/doom.o: $(USER_DIR)/programs/doom.c $(USER_DIR)/include/user_lib.h $(USER_PROGRAM_HEADERS) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(I386_DOOM_CFLAGS) $(I386_USER_CFLAGS) -c $< -o $@
+
+$(I386_OBJ_DIR)/user/programs/doom_libc.o: $(USER_DIR)/programs/doom_libc.c $(USER_DIR)/include/user_lib.h $(USER_PROGRAM_HEADERS) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(I386_DOOM_CFLAGS) $(I386_USER_CFLAGS) -c $< -o $@
+
+$(I386_OBJ_DIR)/doomgeneric/%.o: $(DOOMGENERIC_DIR)/%.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(I386_DOOM_CFLAGS) $(I386_USER_CFLAGS) -c $< -o $@
+
 $(I386_OBJ_DIR)/user/lib/%.o: $(KERN_DIR)/apps/%.c $(USER_TLS_HEADERS) $(USER_DIR)/include/user_lib.h
 	@mkdir -p $(dir $@)
 	$(CC) $(I386_USER_CFLAGS) -c $< -o $@
@@ -197,6 +245,11 @@ $(I386_OBJ_DIR)/user/lib/%.o: $(KERN_DIR)/apps/%.c $(USER_TLS_HEADERS) $(USER_DI
 $(I386_OBJ_DIR)/user/bin/%: $(I386_USER_CRT_OBJECT) $(I386_OBJ_DIR)/user/programs/%.o $(USER_DIR)/linker.ld
 	@mkdir -p $(dir $@)
 	$(LD) $(I386_USER_LDFLAGS) -o $@ $(filter %.o,$^)
+	@echo "[OK] i386 user: $@ ($$(wc -c < $@) byte)"
+
+$(I386_OBJ_DIR)/user/bin/doom: $(I386_USER_CRT_OBJECT) $(I386_OBJ_DIR)/user/programs/doom.o $(I386_OBJ_DIR)/user/programs/doom_libc.o $(I386_DOOMGENERIC_OBJECTS) $(USER_DIR)/linker.ld
+	@mkdir -p $(dir $@)
+	$(LD) $(I386_USER_LDFLAGS) -o $@ $(filter %.o,$^) $(I386_LIBGCC)
 	@echo "[OK] i386 user: $@ ($$(wc -c < $@) byte)"
 
 $(I386_USER_TLS_BINARIES): $(I386_OBJ_DIR)/user/bin/%: $(I386_USER_CRT_OBJECT) $(I386_OBJ_DIR)/user/programs/%.o $(I386_USER_TLS_OBJECTS) $(USER_DIR)/linker.ld
@@ -231,7 +284,7 @@ $(I386_ASSET_LOGO_OBJECT): $(I386_ASSET_LOGO_RGB)
 
 $(I386_DESKTOP_ASSET_BG_RGB): $(ASSET_DIR)/bg.png Makefile
 	@mkdir -p $(dir $@)
-	magick $< -filter Lanczos -resize 448x252^ -gravity center -extent 448x252 -alpha off -depth 8 rgb:$@
+	magick $< -filter Lanczos -resize 320x180^ -gravity center -extent 320x180 -alpha off -depth 8 rgb:$@
 
 $(I386_DESKTOP_ASSET_BG_OBJECT): $(I386_DESKTOP_ASSET_BG_RGB)
 	@mkdir -p $(dir $@)
@@ -252,20 +305,27 @@ $(I386_BOOT_MANIFEST_BIN): $(I386_KERNEL_ELF)
 	python3 -c 'import struct, sys, zlib; src, dst, lba = sys.argv[1], sys.argv[2], int(sys.argv[3]); data = open(src, "rb").read(); sectors = (len(data) + 511) // 512; buf = bytearray(512); struct.pack_into("<IHHIIIIIIIII", buf, 0, 0x4D43524E, 1, 64, 0, lba, sectors, len(data), zlib.crc32(data) & 0xFFFFFFFF, 0, 0, 0, 0); open(dst, "wb").write(buf)' $< $@ $(KERNEL_START_LBA)
 	@echo "[OK] i386 boot manifest: $@"
 
-$(I386_IMAGE): $(I386_BOOT_BIN) $(I386_STAGE2_BIN) $(I386_BOOT_MANIFEST_BIN) $(I386_KERNEL_ELF)
+$(I386_IMAGE): $(I386_BOOT_BIN) $(I386_STAGE2_BIN) $(I386_BOOT_MANIFEST_BIN) $(I386_KERNEL_ELF) $(I386_DOOM_BINARY)
 	@mkdir -p $(dir $@)
 	$(eval KERNEL_SECS := $(shell echo $$(( ($$(wc -c < $(I386_KERNEL_ELF)) + 511) / 512 ))))
 	@echo "[INFO] i386 kernel sector size: $(KERNEL_SECS)"
-	dd if=/dev/zero of=$@ bs=512 count=32768 2>/dev/null
+	dd if=/dev/zero of=$@ bs=512 count=$(DISK_IMAGE_SECTORS) 2>/dev/null
 	dd if=$(I386_BOOT_BIN) of=$@ bs=512 seek=0 conv=notrunc 2>/dev/null
 	dd if=$(I386_STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 	dd if=$(I386_BOOT_MANIFEST_BIN) of=$@ bs=512 seek=$(BOOT_MANIFEST_LBA) conv=notrunc 2>/dev/null
 	dd if=$(I386_KERNEL_ELF) of=$@ bs=512 seek=$(KERNEL_START_LBA) conv=notrunc 2>/dev/null
+	@test $(I386_DOOM_BIN_SIZE) -le $(DOOM_BIN_MAX_SIZE) || (echo "[ERR] i386 doom binary too large for payload slot: $(I386_DOOM_BIN_SIZE) > $(DOOM_BIN_MAX_SIZE)" && exit 1)
+	dd if=$(I386_DOOM_BINARY) of=$@ bs=512 seek=$(DOOM_BIN_LBA) conv=notrunc 2>/dev/null
+	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] assets/doom1.wad too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
+	$(if $(DOOM1_WAD),dd if=$(DOOM1_WAD) of=$@ bs=512 seek=$(DOOM1_WAD_LBA) conv=notrunc 2>/dev/null,)
 	@echo "[OK] i386 image: $@"
 
 $(X86_64_OBJ_DIR)/%.o: $(KERN_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(X86_64_CFLAGS) -c $< -o $@
+
+$(X86_64_OBJ_DIR)/fs/fs.o: $(X86_64_DOOM_BINARY) $(DOOM1_WAD)
+$(X86_64_OBJ_DIR)/fs/fs.o: X86_64_CFLAGS += $(X86_64_DISK_PAYLOAD_CFLAGS)
 
 $(X86_64_OBJ_DIR)/%.o: $(KERN_DIR)/%.asm
 	@mkdir -p $(dir $@)
@@ -279,6 +339,18 @@ $(X86_64_OBJ_DIR)/user/programs/%.o: $(USER_DIR)/programs/%.c $(USER_DIR)/includ
 	@mkdir -p $(dir $@)
 	$(CC) $(X86_64_USER_CFLAGS) -c $< -o $@
 
+$(X86_64_OBJ_DIR)/user/programs/doom.o: $(USER_DIR)/programs/doom.c $(USER_DIR)/include/user_lib.h $(USER_PROGRAM_HEADERS) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(X86_64_DOOM_CFLAGS) $(X86_64_USER_CFLAGS) -c $< -o $@
+
+$(X86_64_OBJ_DIR)/user/programs/doom_libc.o: $(USER_DIR)/programs/doom_libc.c $(USER_DIR)/include/user_lib.h $(USER_PROGRAM_HEADERS) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(X86_64_DOOM_CFLAGS) $(X86_64_USER_CFLAGS) -c $< -o $@
+
+$(X86_64_OBJ_DIR)/doomgeneric/%.o: $(DOOMGENERIC_DIR)/%.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(X86_64_DOOM_CFLAGS) $(X86_64_USER_CFLAGS) -c $< -o $@
+
 $(X86_64_OBJ_DIR)/user/lib/%.o: $(KERN_DIR)/apps/%.c $(USER_TLS_HEADERS) $(USER_DIR)/include/user_lib.h
 	@mkdir -p $(dir $@)
 	$(CC) $(X86_64_USER_CFLAGS) -c $< -o $@
@@ -286,6 +358,11 @@ $(X86_64_OBJ_DIR)/user/lib/%.o: $(KERN_DIR)/apps/%.c $(USER_TLS_HEADERS) $(USER_
 $(X86_64_OBJ_DIR)/user/bin/%: $(X86_64_USER_CRT_OBJECT) $(X86_64_OBJ_DIR)/user/programs/%.o $(USER_DIR)/linker_x86_64.ld
 	@mkdir -p $(dir $@)
 	$(LD) -m elf_x86_64 -T $(USER_DIR)/linker_x86_64.ld -nostdlib -s --strip-all -o $@ $(filter %.o,$^)
+	@echo "[OK] x86_64 user: $@ ($$(wc -c < $@) byte)"
+
+$(X86_64_OBJ_DIR)/user/bin/doom: $(X86_64_USER_CRT_OBJECT) $(X86_64_OBJ_DIR)/user/programs/doom.o $(X86_64_OBJ_DIR)/user/programs/doom_libc.o $(X86_64_DOOMGENERIC_OBJECTS) $(USER_DIR)/linker_x86_64.ld
+	@mkdir -p $(dir $@)
+	$(LD) -m elf_x86_64 -T $(USER_DIR)/linker_x86_64.ld -nostdlib -s --strip-all -o $@ $(filter %.o,$^) $(X86_64_LIBGCC)
 	@echo "[OK] x86_64 user: $@ ($$(wc -c < $@) byte)"
 
 $(X86_64_USER_TLS_BINARIES): $(X86_64_OBJ_DIR)/user/bin/%: $(X86_64_USER_CRT_OBJECT) $(X86_64_OBJ_DIR)/user/programs/%.o $(X86_64_USER_TLS_OBJECTS) $(USER_DIR)/linker_x86_64.ld
@@ -352,13 +429,17 @@ $(X86_64_BOOT_MANIFEST_BIN): $(X86_64_KERNEL_ELF)
 	python3 -c 'import struct, sys, zlib; src, dst, lba = sys.argv[1], sys.argv[2], int(sys.argv[3]); data = open(src, "rb").read(); sectors = (len(data) + 511) // 512; buf = bytearray(512); struct.pack_into("<IHHIIIIIIIII", buf, 0, 0x4D43524E, 1, 64, 0, lba, sectors, len(data), zlib.crc32(data) & 0xFFFFFFFF, 0, 0, 0, 0); open(dst, "wb").write(buf)' $< $@ $(KERNEL_START_LBA)
 	@echo "[OK] x86_64 boot manifest: $@"
 
-$(X86_64_IMAGE): $(X86_64_BOOT_BIN) $(X86_64_STAGE2_BIN) $(X86_64_BOOT_MANIFEST_BIN) $(X86_64_KERNEL_ELF)
+$(X86_64_IMAGE): $(X86_64_BOOT_BIN) $(X86_64_STAGE2_BIN) $(X86_64_BOOT_MANIFEST_BIN) $(X86_64_KERNEL_ELF) $(X86_64_DOOM_BINARY)
 	@mkdir -p $(dir $@)
-	dd if=/dev/zero of=$@ bs=512 count=32768 2>/dev/null
+	dd if=/dev/zero of=$@ bs=512 count=$(DISK_IMAGE_SECTORS) 2>/dev/null
 	dd if=$(X86_64_BOOT_BIN) of=$@ bs=512 seek=0 conv=notrunc 2>/dev/null
 	dd if=$(X86_64_STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc 2>/dev/null
 	dd if=$(X86_64_BOOT_MANIFEST_BIN) of=$@ bs=512 seek=$(BOOT_MANIFEST_LBA) conv=notrunc 2>/dev/null
 	dd if=$(X86_64_KERNEL_ELF) of=$@ bs=512 seek=$(KERNEL_START_LBA) conv=notrunc 2>/dev/null
+	@test $(X86_64_DOOM_BIN_SIZE) -le $(DOOM_BIN_MAX_SIZE) || (echo "[ERR] x86_64 doom binary too large for payload slot: $(X86_64_DOOM_BIN_SIZE) > $(DOOM_BIN_MAX_SIZE)" && exit 1)
+	dd if=$(X86_64_DOOM_BINARY) of=$@ bs=512 seek=$(DOOM_BIN_LBA) conv=notrunc 2>/dev/null
+	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] assets/doom1.wad too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
+	$(if $(DOOM1_WAD),dd if=$(DOOM1_WAD) of=$@ bs=512 seek=$(DOOM1_WAD_LBA) conv=notrunc 2>/dev/null,)
 	@echo "[OK] x86_64 image: $@"
 
 clean:

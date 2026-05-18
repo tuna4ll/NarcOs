@@ -360,21 +360,43 @@ void handle_keyboard()
         if (key == 0x1D) lctrl_pressed = 0;
         if      (key == 0x2A) lshift_pressed = 0;
         else if (key == 0x36) rshift_pressed = 0;
+        if (screen_is_graphics_enabled()) {
+            int is_shift = lshift_pressed || rshift_pressed;
+            int is_ctrl = lctrl_pressed || rctrl_pressed;
+            int modifiers = (is_shift ? 1 : 0) | (is_ctrl ? 2 : 0) | (capslock_active ? 4 : 0);
+
+            nwm_queue_desktop_event(GUI_WIN_EVT_KEY_UP, (int16_t)key, 0, modifiers);
+        }
         outb(0x20, 0x20);
         return;
     }
     if (scancode == 0x1D) {
         lctrl_pressed = 1;
+        if (screen_is_graphics_enabled()) {
+            int modifiers = (lshift_pressed || rshift_pressed ? 1 : 0) | 2 | (capslock_active ? 4 : 0);
+
+            nwm_queue_desktop_event(GUI_WIN_EVT_KEY_DOWN, (int16_t)scancode, 0, modifiers);
+        }
         outb(0x20, 0x20);
         return;
     }
     if (scancode == 0x2A) {
         lshift_pressed = 1;
+        if (screen_is_graphics_enabled()) {
+            int modifiers = 1 | (lctrl_pressed || rctrl_pressed ? 2 : 0) | (capslock_active ? 4 : 0);
+
+            nwm_queue_desktop_event(GUI_WIN_EVT_KEY_DOWN, (int16_t)scancode, 0, modifiers);
+        }
         outb(0x20, 0x20);
         return;
     }
     if (scancode == 0x36) {
         rshift_pressed = 1;
+        if (screen_is_graphics_enabled()) {
+            int modifiers = 1 | (lctrl_pressed || rctrl_pressed ? 2 : 0) | (capslock_active ? 4 : 0);
+
+            nwm_queue_desktop_event(GUI_WIN_EVT_KEY_DOWN, (int16_t)scancode, 0, modifiers);
+        }
         outb(0x20, 0x20);
         return;
     }

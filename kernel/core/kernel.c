@@ -284,6 +284,39 @@ static void nwm_free_window_client_surface(window_t* win) {
     win->client_damage_count = 0;
 }
 
+static int nwm_ensure_window_client_surface(window_t* win, int client_w, int client_h) {
+    size_t surface_bytes;
+    uint32_t surface_pages;
+
+    if (!win || client_w <= 0 || client_h <= 0) return -1;
+    if (win->client_surface != 0 &&
+        win->client_surface_w == (uint32_t)client_w &&
+        win->client_surface_h == (uint32_t)client_h &&
+        win->client_surface_bpp == 4U) {
+        return 0;
+    }
+
+    surface_bytes = (size_t)client_w * (size_t)client_h * 4U;
+    surface_pages = (uint32_t)((surface_bytes + 4095U) / 4096U);
+    nwm_free_window_client_surface(win);
+    win->client_surface = (uint8_t*)alloc_physical_pages(surface_pages);
+    if (!win->client_surface) {
+        win->client_surface_w = 0;
+        win->client_surface_h = 0;
+        win->client_surface_bpp = 0;
+        serial_write("[gui-present] fail alloc bytes=");
+        serial_write_hex32((uint32_t)surface_bytes);
+        serial_write_char('\n');
+        return -1;
+    }
+    memset(win->client_surface, 0, (size_t)surface_pages * 4096U);
+    win->client_surface_pages = surface_pages;
+    win->client_surface_w = (uint32_t)client_w;
+    win->client_surface_h = (uint32_t)client_h;
+    win->client_surface_bpp = 4U;
+    return 0;
+}
+
 static void nwm_consume_window_surface_damage(window_t* win) {
     if (!win || win->client_damage_count == 0U) return;
     for (uint8_t i = 1; i < win->client_damage_count; i++) {
@@ -774,6 +807,7 @@ int nwm_desktop_window_action(int owner_pid, const gui_desktop_window_action_t* 
                     case GUI_WIN_EVT_MOUSE_MOVE:
                     case GUI_WIN_EVT_MOUSE_WHEEL:
                     case GUI_WIN_EVT_KEY_DOWN:
+                    case GUI_WIN_EVT_KEY_UP:
                     case GUI_WIN_EVT_CHAR:
                         return nwm_queue_window_event_idx(idx, (uint16_t)action->event_type,
                                                           (int16_t)action->event_arg0,
@@ -956,6 +990,67 @@ int nwm_set_user_window_title(int owner_pid, int window_id, const char* title) {
     return 0;
 }
 
+static void nwm_stretch_xrgb8888_row(uint32_t* row, uint32_t src_w, uint32_t dst_w) {
+    uint32_t x_step;
+    uint32_t x_acc;
+
+    if (!row || src_w == 0U || dst_w <= src_w) return;
+    x_step = (src_w << 16) / dst_w;
+    if (x_step == 0U) x_step = 1U;
+    x_acc = x_step * (dst_w - 1U);
+    for (uint32_t dx = dst_w; dx > 0U; dx--) {
+        uint32_t x = dx - 1U;
+        uint32_t sx = x_acc >> 16;
+
+        if (sx >= src_w) sx = src_w - 1U;
+        row[x] = row[sx];
+        x_acc -= x_step;
+    }
+}
+
+static int nwm_present_user_window_stretched(window_t* win, const gui_present_params_t* params,
+                                            int client_w, int client_h) {
+    uint32_t src_w = params->width;
+    uint32_t src_h = params->height;
+    uint32_t src_row_bytes;
+    uint32_t dst_row_pixels = (uint32_t)client_w;
+    uint32_t y_step;
+    uint32_t y_acc = 0;
+    int prev_sy = -1;
+    uint32_t* prev_dst = 0;
+
+    if (!win || !params || client_w <= 0 || client_h <= 0) return -1;
+    if (params->x != 0 || params->y != 0) return -1;
+    if (src_w == 0U || src_h == 0U || src_w > (uint32_t)client_w || src_h > (uint32_t)client_h) return -1;
+    src_row_bytes = src_w * 4U;
+    if (params->stride_bytes < src_row_bytes) return -1;
+    if (nwm_ensure_window_client_surface(win, client_w, client_h) != 0) return -1;
+
+    y_step = (src_h << 16) / (uint32_t)client_h;
+    for (int y = 0; y < client_h; y++) {
+        int sy = (int)(y_acc >> 16);
+        uint32_t* dst = (uint32_t*)(win->client_surface + (size_t)y * (size_t)dst_row_pixels * 4U);
+
+        if ((uint32_t)sy >= src_h) sy = (int)src_h - 1;
+        if (sy == prev_sy && prev_dst) {
+            memcpy(dst, prev_dst, (size_t)dst_row_pixels * 4U);
+        } else {
+            if (copy_from_user(dst, (const void*)(uintptr_t)(params->buffer_ptr + (uintptr_t)sy * params->stride_bytes),
+                               src_row_bytes) != 0) {
+                serial_write("[gui-present] fail stretch row=");
+                serial_write_hex32((uint32_t)sy);
+                serial_write_char('\n');
+                return -1;
+            }
+            nwm_stretch_xrgb8888_row(dst, src_w, dst_row_pixels);
+            prev_sy = sy;
+            prev_dst = dst;
+        }
+        y_acc += y_step;
+    }
+    return 0;
+}
+
 int nwm_present_user_window(int owner_pid, int window_id, const gui_present_params_t* params) {
     int idx = nwm_get_idx_by_id(window_id);
     int client_x;
@@ -967,6 +1062,7 @@ int nwm_present_user_window(int owner_pid, int window_id, const gui_present_para
     uint8_t* surface;
     uint32_t row_bytes;
     uint32_t surface_row_bytes;
+    int stretch_client;
 
     if (idx == -1 || !params) {
         serial_write_line("[gui-present] fail invalid-window-or-params");
@@ -981,8 +1077,28 @@ int nwm_present_user_window(int owner_pid, int window_id, const gui_present_para
         serial_write_line("[gui-present] fail empty-buffer");
         return -1;
     }
+    if ((params->flags & ~GUI_PRESENT_FLAG_STRETCH_CLIENT) != 0U) {
+        serial_write_line("[gui-present] fail flags");
+        return -1;
+    }
     present_x = params->x;
     present_y = params->y;
+    stretch_client = (params->flags & GUI_PRESENT_FLAG_STRETCH_CLIENT) != 0U;
+    row_bytes = params->width * 4U;
+    if (params->stride_bytes < row_bytes) {
+        serial_write_line("[gui-present] fail stride");
+        return -1;
+    }
+    if (stretch_client) {
+        if (nwm_present_user_window_stretched(&windows[idx], params, client_w, client_h) != 0) return -1;
+        nwm_mark_window_surface_damage(&windows[idx], 0, 0, client_w, client_h);
+        if (!nwm_window_is_desktop_surface(&windows[idx])) {
+            (void)nwm_queue_desktop_event_internal(GUI_WIN_EVT_PAINT, 0, 0, window_id);
+        }
+        gui_mark_dirty_rect(client_x, client_y, client_w, client_h);
+        gui_needs_redraw = 1;
+        return 0;
+    }
     if (present_x < 0 || present_y < 0) {
         serial_write_line("[gui-present] fail negative-origin");
         return -1;
@@ -1006,36 +1122,8 @@ int nwm_present_user_window(int owner_pid, int window_id, const gui_present_para
         serial_write_char('\n');
         return -1;
     }
-    row_bytes = params->width * 4U;
-    if (params->stride_bytes < row_bytes) {
-        serial_write_line("[gui-present] fail stride");
-        return -1;
-    }
 
-    if (windows[idx].client_surface == 0 ||
-        windows[idx].client_surface_w != (uint32_t)client_w ||
-        windows[idx].client_surface_h != (uint32_t)client_h ||
-        windows[idx].client_surface_bpp != 4U) {
-        size_t surface_bytes = (size_t)client_w * (size_t)client_h * 4U;
-        uint32_t surface_pages = (uint32_t)((surface_bytes + 4095U) / 4096U);
-
-        nwm_free_window_client_surface(&windows[idx]);
-        windows[idx].client_surface = (uint8_t*)alloc_physical_pages(surface_pages);
-        if (!windows[idx].client_surface) {
-            windows[idx].client_surface_w = 0;
-            windows[idx].client_surface_h = 0;
-            windows[idx].client_surface_bpp = 0;
-            serial_write("[gui-present] fail alloc bytes=");
-            serial_write_hex32((uint32_t)surface_bytes);
-            serial_write_char('\n');
-            return -1;
-        }
-        memset(windows[idx].client_surface, 0, (size_t)surface_pages * 4096U);
-        windows[idx].client_surface_pages = surface_pages;
-        windows[idx].client_surface_w = (uint32_t)client_w;
-        windows[idx].client_surface_h = (uint32_t)client_h;
-        windows[idx].client_surface_bpp = 4U;
-    }
+    if (nwm_ensure_window_client_surface(&windows[idx], client_w, client_h) != 0) return -1;
 
     surface = windows[idx].client_surface;
     surface_row_bytes = windows[idx].client_surface_w * 4U;
@@ -1139,6 +1227,12 @@ void nwm_queue_active_window_key_event(int keycode, int modifiers) {
     if (active_window_idx < 0 || active_window_idx >= window_count) return;
     if (windows[active_window_idx].type != WIN_TYPE_USER) return;
     (void)nwm_queue_window_event_idx(active_window_idx, GUI_WIN_EVT_KEY_DOWN, (int16_t)keycode, 0, modifiers);
+}
+
+void nwm_queue_active_window_key_up_event(int keycode, int modifiers) {
+    if (active_window_idx < 0 || active_window_idx >= window_count) return;
+    if (windows[active_window_idx].type != WIN_TYPE_USER) return;
+    (void)nwm_queue_window_event_idx(active_window_idx, GUI_WIN_EVT_KEY_UP, (int16_t)keycode, 0, modifiers);
 }
 
 void nwm_queue_active_window_char_event(char c) {

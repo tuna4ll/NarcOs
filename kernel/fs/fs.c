@@ -17,6 +17,9 @@ disk_fs_node_t dir_cache[MAX_FILES];
 uint8_t sector_buffer[512];
 int current_dir_index = -1;
 
+static int fs_alloc_data_run(uint32_t sectors, int ignore_idx);
+static void fs_zero_sectors(uint32_t lba, uint32_t count);
+
 #define FS_DISTINCT_USER_PROGRAMS(X) \
     X(hello) \
     X(ps) \
@@ -169,6 +172,7 @@ static void fs_sync_packaged_binaries() {
     size_t count = sizeof(fs_packaged_binaries) / sizeof(fs_packaged_binaries[0]);
 
     (void)fs_create_dir("/bin");
+    (void)fs_create_dir("/assets");
     for (size_t i = 0; i < count; i++) {
         const fs_packaged_binary_t* entry = &fs_packaged_binaries[i];
         size_t len = (size_t)(entry->end - entry->start);
@@ -188,6 +192,84 @@ static void fs_sync_packaged_binaries() {
         }
     }
 }
+
+#if defined(NARCOS_DISK_DOOM1_WAD) || defined(NARCOS_DISK_DOOM_BIN)
+static int fs_import_disk_blob(const char* path, uint32_t src_lba, size_t len) {
+    int idx;
+    uint32_t needed_sectors;
+    uint32_t current_sectors;
+    uint32_t old_lba;
+    int new_lba;
+
+    if (!path || len == 0U || len > MAX_FILE_SIZE) return -1;
+    idx = fs_find_node(path);
+    if (idx == -1) {
+        if (fs_create_file(path) == -1) return -1;
+        idx = fs_find_node(path);
+    }
+    if (idx < 0 || idx >= MAX_FILES || dir_cache[idx].flags != FS_NODE_FILE) return -1;
+
+    needed_sectors = (uint32_t)((len + 511U) / 512U);
+    current_sectors = node_sector_count(&dir_cache[idx]);
+    old_lba = dir_cache[idx].lba;
+    if (dir_cache[idx].lba == 0 || current_sectors < needed_sectors) {
+        new_lba = fs_alloc_data_run(needed_sectors, idx);
+        if (new_lba < 0) return -1;
+        dir_cache[idx].lba = (uint32_t)new_lba;
+    }
+
+    dir_cache[idx].size = (uint32_t)len;
+    set_node_sector_count(&dir_cache[idx], needed_sectors);
+    fs_sync();
+
+    for (uint32_t sector = 0; sector < needed_sectors; sector++) {
+        if (storage_read_sector(src_lba + sector, sector_buffer) != 0) return -1;
+        if (storage_write_sector(dir_cache[idx].lba + sector, sector_buffer) != 0) return -1;
+    }
+    if (old_lba != 0 && old_lba != dir_cache[idx].lba && current_sectors != 0U) {
+        fs_zero_sectors(old_lba, current_sectors);
+    } else if (current_sectors > needed_sectors && dir_cache[idx].lba != 0) {
+        fs_zero_sectors(dir_cache[idx].lba + needed_sectors, current_sectors - needed_sectors);
+    }
+    return 0;
+}
+#endif
+
+#if defined(NARCOS_DISK_DOOM_BIN)
+static void fs_sync_disk_doom_binary(void) {
+    int status;
+
+    (void)fs_create_dir("/bin");
+    status = fs_import_disk_blob("/bin/doom",
+                                (uint32_t)NARCOS_DISK_DOOM_BIN_LBA,
+                                (size_t)NARCOS_DISK_DOOM_BIN_SIZE);
+    if (status != 0) {
+        serial_write("[fs] disk doom binary import failed len=");
+        serial_write_hex32((uint32_t)NARCOS_DISK_DOOM_BIN_SIZE);
+        serial_write(" lba=");
+        serial_write_hex32((uint32_t)NARCOS_DISK_DOOM_BIN_LBA);
+        serial_write_char('\n');
+    }
+}
+#endif
+
+#if defined(NARCOS_DISK_DOOM1_WAD)
+static void fs_sync_disk_doom1_wad(void) {
+    int status;
+
+    (void)fs_create_dir("/assets");
+    status = fs_import_disk_blob("/assets/doom1.wad",
+                                (uint32_t)NARCOS_DISK_DOOM1_WAD_LBA,
+                                (size_t)NARCOS_DISK_DOOM1_WAD_SIZE);
+    if (status != 0) {
+        serial_write("[fs] disk doom1.wad import failed len=");
+        serial_write_hex32((uint32_t)NARCOS_DISK_DOOM1_WAD_SIZE);
+        serial_write(" lba=");
+        serial_write_hex32((uint32_t)NARCOS_DISK_DOOM1_WAD_LBA);
+        serial_write_char('\n');
+    }
+}
+#endif
 
 static int fs_find_child(int parent_idx, const char* name, uint32_t type) {
     for (int i = 0; i < MAX_FILES; i++) {
@@ -264,6 +346,7 @@ static void fs_format() {
 
     current_dir_index = FS_ROOT_INDEX;
     fs_create_dir("/bin");
+    fs_create_dir("/assets");
     fs_create_dir("/system");
     fs_create_dir("/home");
     fs_create_dir("/home/user");
@@ -368,6 +451,12 @@ void init_fs() {
     serial_write_hex32((uint32_t)fs_find_node("/home/user/Desktop"));
     serial_write_char('\n');
     fs_sync_packaged_binaries();
+#if defined(NARCOS_DISK_DOOM_BIN)
+    fs_sync_disk_doom_binary();
+#endif
+#if defined(NARCOS_DISK_DOOM1_WAD)
+    fs_sync_disk_doom1_wad();
+#endif
     return;
 #endif
 
@@ -375,6 +464,12 @@ void init_fs() {
     current_dir_index = FS_ROOT_INDEX;
     if (!fs_validate()) fs_format();
     fs_sync_packaged_binaries();
+#if defined(NARCOS_DISK_DOOM_BIN)
+    fs_sync_disk_doom_binary();
+#endif
+#if defined(NARCOS_DISK_DOOM1_WAD)
+    fs_sync_disk_doom1_wad();
+#endif
 }
 int fs_create_file(const char* name) {
     char leaf[32];

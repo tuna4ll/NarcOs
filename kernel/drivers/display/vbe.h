@@ -121,6 +121,7 @@ int nwm_read_window_surface_for_desktop(int owner_pid, gui_window_surface_read_t
 int nwm_desktop_window_action(int owner_pid, const gui_desktop_window_action_t* action);
 void nwm_close_windows_for_owner(int owner_pid);
 void nwm_queue_active_window_key_event(int keycode, int modifiers);
+void nwm_queue_active_window_key_up_event(int keycode, int modifiers);
 void nwm_queue_active_window_char_event(char c);
 void nwm_queue_active_window_mouse_move(int mx, int my);
 #endif

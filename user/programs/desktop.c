@@ -19,10 +19,10 @@
 #define MENU_Y (TASKBAR_HEIGHT + UI_SPACE_3)
 #define MENU_W 260
 #define MENU_ITEM_H UI_MENU_ITEM_H
-#define MENU_ITEMS 6
+#define MENU_ITEMS 7
 #define MENU_HEADER_H UI_MENU_HEADER_H
 #define MENU_SECTION_H UI_MENU_SECTION_H
-#define MENU_PRIMARY_ITEMS 4
+#define MENU_PRIMARY_ITEMS 5
 #define CTX_MENU_W 196
 #define CTX_MENU_ITEM_H 26
 #define CTX_MENU_ITEMS 4
@@ -49,6 +49,7 @@
 #define DESKTOP_ICON_GAP_X 16
 #define DESKTOP_ICON_GAP_Y 16
 #define DESKTOP_ICON_GLYPH_BOX 50
+#define DESKTOP_ICON_GLYPH_SIZE 44
 #define DESKTOP_ICON_LABEL_Y 72
 #define DESKTOP_ICON_TEXT_MAX 11
 #define DESKTOP_ICON_CACHE_TICKS 100U
@@ -64,8 +65,8 @@
 extern const uint8_t _binary_obj_x86_64_user_assets_desktop_bg_rgb_start[];
 extern const uint8_t _binary_obj_x86_64_user_assets_desktop_bg_rgb_end[];
 #else
-#define DESKTOP_BG_W 448
-#define DESKTOP_BG_H 252
+#define DESKTOP_BG_W 320
+#define DESKTOP_BG_H 180
 extern const uint8_t _binary_obj_i386_user_assets_desktop_bg_rgb_start[];
 extern const uint8_t _binary_obj_i386_user_assets_desktop_bg_rgb_end[];
 #endif
@@ -110,7 +111,8 @@ enum {
     DESKTOP_ICON_KIND_FILE = 2,
     DESKTOP_ICON_KIND_DIR = 3,
     DESKTOP_ICON_KIND_SNAKE = 4,
-    DESKTOP_ICON_KIND_SETTINGS = 5
+    DESKTOP_ICON_KIND_SETTINGS = 5,
+    DESKTOP_ICON_KIND_DOOM = 6
 };
 
 enum {
@@ -136,6 +138,7 @@ static const menu_item_t menu_items[MENU_ITEMS] = {
     {"Open Explorer", "Browse the desktop folder"},
     {"Open Settings", "Launch the system settings app"},
     {"Run Snake", "Launch the Snake game"},
+    {"Run Doom", "Launch the Doom port"},
     {"Open Readme", "Launch NarcPad with the desktop readme"},
     {"Run Hello", "Spawn /bin/hello"},
     {"Run Neofetch", "Spawn /bin/neofetch"}
@@ -146,6 +149,7 @@ static const int menu_item_icons[MENU_ITEMS] = {
     USER_GUI_ICON_EXPLORER,
     USER_GUI_ICON_SETTINGS,
     USER_GUI_ICON_SNAKE,
+    USER_GUI_ICON_DOOM,
     USER_GUI_ICON_NARCPAD,
     USER_GUI_ICON_APP,
     USER_GUI_ICON_INFO
@@ -406,6 +410,7 @@ static int desktop_icon_to_user_gui_icon(int kind) {
         case DESKTOP_ICON_KIND_DIR: return USER_GUI_ICON_FOLDER;
         case DESKTOP_ICON_KIND_SETTINGS: return USER_GUI_ICON_SETTINGS;
         case DESKTOP_ICON_KIND_SNAKE: return USER_GUI_ICON_SNAKE;
+        case DESKTOP_ICON_KIND_DOOM: return USER_GUI_ICON_DOOM;
         case DESKTOP_ICON_KIND_FILE: return USER_GUI_ICON_FILE;
         default: return USER_GUI_ICON_APP;
     }
@@ -881,9 +886,11 @@ static void draw_desktop_icon(user_gui_surface_t* surface, int kind, int x, int 
             user_gui_fill_rect_alpha(surface, glyph_box_x + 8, glyph_box_y + 7,
                                      DESKTOP_ICON_GLYPH_BOX - 16, 1, UI_HILITE_SOFT, 26);
         }
-        glyph_x = glyph_box_x + (DESKTOP_ICON_GLYPH_BOX - 36) / 2;
-        glyph_y = hovered ? glyph_box_y + 6 : glyph_box_y + 8;
-        user_gui_draw_icon(surface, desktop_icon_to_user_gui_icon(kind), glyph_x, glyph_y, 36, accent, hovered);
+        glyph_x = glyph_box_x + (DESKTOP_ICON_GLYPH_BOX - DESKTOP_ICON_GLYPH_SIZE) / 2;
+        glyph_y = glyph_box_y + (DESKTOP_ICON_GLYPH_BOX - DESKTOP_ICON_GLYPH_SIZE) / 2;
+        if (hovered) glyph_y -= 1;
+        user_gui_draw_icon(surface, desktop_icon_to_user_gui_icon(kind), glyph_x, glyph_y,
+                           DESKTOP_ICON_GLYPH_SIZE, accent, hovered);
 
         label_len = text_length(label);
         label_chip_w = label_len * 8 + 18;
@@ -1008,6 +1015,16 @@ static int load_desktop_icons(desktop_icon_entry_t* entries, int max_entries, in
     }
 
     if (count < max_entries) {
+        entries[count].kind = DESKTOP_ICON_KIND_DOOM;
+        entries[count].node_idx = -1;
+        desktop_icon_rect(count, screen_w, screen_h, &entries[count].x, &entries[count].y);
+        entries[count].accent = 0xC58C5A;
+        copy_icon_label(entries[count].label, sizeof(entries[count].label), "Doom");
+        entries[count].path[0] = '\0';
+        count++;
+    }
+
+    if (count < max_entries) {
         entries[count].kind = DESKTOP_ICON_KIND_SETTINGS;
         entries[count].node_idx = -1;
         desktop_icon_rect(count, screen_w, screen_h, &entries[count].x, &entries[count].y);
@@ -1089,6 +1106,11 @@ static void activate_desktop_icon(const desktop_icon_entry_t* icon, char* status
             argv[0] = "/bin/snake";
             rc = user_spawn("/bin/snake", argv, 1U);
             copy_text(status_text, status_size, rc == 0 ? "Snake opened" : "Snake open failed");
+            break;
+        case DESKTOP_ICON_KIND_DOOM:
+            argv[0] = "/bin/doom";
+            rc = user_spawn("/bin/doom", argv, 1U);
+            copy_text(status_text, status_size, rc == 0 ? "Doom opened" : "Doom open failed");
             break;
         case DESKTOP_ICON_KIND_SETTINGS:
             argv[0] = "/bin/settings";
@@ -1239,6 +1261,7 @@ static void launch_menu_action(int item_idx, char* status_text, size_t status_si
     static const char* explorer_argv[] = {"/bin/explorer", "/home/user/Desktop"};
     static const char* settings_argv[] = {"/bin/settings"};
     static const char* snake_argv[] = {"/bin/snake"};
+    static const char* doom_argv[] = {"/bin/doom"};
     static const char* narcpad_readme_argv[] = {"/bin/narcpad", "/home/user/Desktop/readme.txt"};
     static const char* hello_argv[] = {"/bin/hello"};
     static const char* neofetch_argv[] = {"/bin/neofetch"};
@@ -1262,14 +1285,18 @@ static void launch_menu_action(int item_idx, char* status_text, size_t status_si
             copy_text(status_text, status_size, rc == 0 ? "Snake opened" : "Snake open failed");
             break;
         case 3:
+            rc = user_spawn("/bin/doom", doom_argv, 1U);
+            copy_text(status_text, status_size, rc == 0 ? "Doom opened" : "Doom open failed");
+            break;
+        case 4:
             rc = user_spawn("/bin/narcpad", narcpad_readme_argv, 2U);
             copy_text(status_text, status_size, rc == 0 ? "Readme opened in NarcPad" : "Readme open failed");
             break;
-        case 4:
+        case 5:
             rc = user_spawn("/bin/hello", hello_argv, 1U);
             copy_text(status_text, status_size, rc >= 0 ? "Spawned /bin/hello" : "Spawn /bin/hello failed");
             break;
-        case 5:
+        case 6:
             rc = user_spawn("/bin/neofetch", neofetch_argv, 1U);
             copy_text(status_text, status_size, rc >= 0 ? "Spawned /bin/neofetch" : "Spawn /bin/neofetch failed");
             break;
@@ -2704,6 +2731,23 @@ int main(void) {
                         redraw = 1;
                     } else if (active_idx != -1) {
                         if (submit_window_input(window_entries[active_idx].window_id, GUI_WIN_EVT_KEY_DOWN,
+                                                event.arg0, event.arg1, event.arg2) == 0) {
+                            surface_cache_dirty = 1;
+                            mark_window_cache_dirty(window_entries, tracked_window_count,
+                                                    surface_cache_flags, TASK_SLOT_MAX,
+                                                    window_entries[active_idx].window_id);
+                            redraw = 1;
+                            yield_after_dispatch = 1;
+                        }
+                    }
+                }
+                break;
+            case GUI_WIN_EVT_KEY_UP:
+                if (event_from_desktop) {
+                    int active_idx = resolve_input_window(window_entries, tracked_window_count, preferred_input_window_id);
+
+                    if (active_idx != -1) {
+                        if (submit_window_input(window_entries[active_idx].window_id, GUI_WIN_EVT_KEY_UP,
                                                 event.arg0, event.arg1, event.arg2) == 0) {
                             surface_cache_dirty = 1;
                             mark_window_cache_dirty(window_entries, tracked_window_count,
