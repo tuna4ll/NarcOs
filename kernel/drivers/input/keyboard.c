@@ -134,7 +134,7 @@ extern void vga_scrollback_follow_live(void);
 
 static const char* shell_commands[] = {
     "help", "clear", "mem", "snake", "settings", "ver", "uptime", "date", "time",
-    "ls", "pwd", "ps", "echo", "spawn", "wait", "kill", "touch", "cat", "write", "edit", "mkdir", "cd",
+    "ls", "pwd", "ps", "credits", "echo", "spawn", "wait", "kill", "touch", "cat", "write", "edit", "mkdir", "cd",
     "rm", "mv", "ren", "net", "dhcp", "dns", "ping", "ntp", "http", "https", "netdemo", "fetch",
     "tls_test", "malloc_test", "usermode_test", "reboot", "poweroff", "hwinfo", "pci", "storage", "log"
 };

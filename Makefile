@@ -17,15 +17,15 @@ KERNEL_START_LBA = 18
 DISK_IMAGE_SECTORS = 49152
 
 KERNEL_DIRS = $(shell find $(KERN_DIR) -type d | sort)
-USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test neofetch desktop explorer narcpad settings snake doom core_tools tls_tools
+USER_PROGRAMS = hello ps cat echo kill proc_test pipe_test credits neofetch desktop explorer narcpad settings snake doom core_tools tls_tools
 USER_EMBED_PROGRAMS = $(filter-out doom,$(USER_PROGRAMS))
 USER_PROGRAM_HEADERS = $(shell find $(USER_DIR)/programs -name '*.h' 2>/dev/null)
-DOOM1_WAD = $(wildcard $(ASSET_DIR)/doom1.wad)
+DOOM1_WAD = $(wildcard $(DOOM_PORT_DIR)/doom1.wad)
 DOOM_BIN_LBA = 32768
 DOOM_BIN_MAX_SIZE = 1048576
 DOOM1_WAD_LBA = 33792
 DOOM1_WAD_MAX_SIZE = 4489216
-DOOM1_WAD_SIZE = $(if $(DOOM1_WAD),$(shell wc -c < $(ASSET_DIR)/doom1.wad),0)
+DOOM1_WAD_SIZE = $(if $(DOOM1_WAD),$(shell wc -c < $(DOOM1_WAD)),0)
 DOOM1_WAD_CFLAGS = $(if $(DOOM1_WAD),-DNARCOS_DISK_DOOM1_WAD=1 -DNARCOS_DISK_DOOM1_WAD_LBA=$(DOOM1_WAD_LBA) -DNARCOS_DISK_DOOM1_WAD_SIZE=$(DOOM1_WAD_SIZE),)
 USER_TLS_PROGRAMS = tls_tools
 USER_TLS_SOURCES = \
@@ -316,7 +316,7 @@ $(I386_IMAGE): $(I386_BOOT_BIN) $(I386_STAGE2_BIN) $(I386_BOOT_MANIFEST_BIN) $(I
 	dd if=$(I386_KERNEL_ELF) of=$@ bs=512 seek=$(KERNEL_START_LBA) conv=notrunc 2>/dev/null
 	@test $(I386_DOOM_BIN_SIZE) -le $(DOOM_BIN_MAX_SIZE) || (echo "[ERR] i386 doom binary too large for payload slot: $(I386_DOOM_BIN_SIZE) > $(DOOM_BIN_MAX_SIZE)" && exit 1)
 	dd if=$(I386_DOOM_BINARY) of=$@ bs=512 seek=$(DOOM_BIN_LBA) conv=notrunc 2>/dev/null
-	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] assets/doom1.wad too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
+	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] $(DOOM1_WAD) too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
 	$(if $(DOOM1_WAD),dd if=$(DOOM1_WAD) of=$@ bs=512 seek=$(DOOM1_WAD_LBA) conv=notrunc 2>/dev/null,)
 	@echo "[OK] i386 image: $@"
 
@@ -438,7 +438,7 @@ $(X86_64_IMAGE): $(X86_64_BOOT_BIN) $(X86_64_STAGE2_BIN) $(X86_64_BOOT_MANIFEST_
 	dd if=$(X86_64_KERNEL_ELF) of=$@ bs=512 seek=$(KERNEL_START_LBA) conv=notrunc 2>/dev/null
 	@test $(X86_64_DOOM_BIN_SIZE) -le $(DOOM_BIN_MAX_SIZE) || (echo "[ERR] x86_64 doom binary too large for payload slot: $(X86_64_DOOM_BIN_SIZE) > $(DOOM_BIN_MAX_SIZE)" && exit 1)
 	dd if=$(X86_64_DOOM_BINARY) of=$@ bs=512 seek=$(DOOM_BIN_LBA) conv=notrunc 2>/dev/null
-	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] assets/doom1.wad too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
+	$(if $(DOOM1_WAD),@test $(DOOM1_WAD_SIZE) -le $(DOOM1_WAD_MAX_SIZE) || (echo "[ERR] $(DOOM1_WAD) too large for payload slot: $(DOOM1_WAD_SIZE) > $(DOOM1_WAD_MAX_SIZE)" && exit 1),)
 	$(if $(DOOM1_WAD),dd if=$(DOOM1_WAD) of=$@ bs=512 seek=$(DOOM1_WAD_LBA) conv=notrunc 2>/dev/null,)
 	@echo "[OK] x86_64 image: $@"
 

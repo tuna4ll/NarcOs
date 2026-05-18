@@ -28,6 +28,7 @@ static void fs_zero_sectors(uint32_t lba, uint32_t count);
     X(kill) \
     X(proc_test) \
     X(pipe_test) \
+    X(credits) \
     X(neofetch) \
     X(desktop) \
     X(explorer) \

@@ -43,6 +43,7 @@ static const char shell_help_lines[][72] USER_RODATA = {
     "  procdump - Dump process table to serial log",
     "  proc_test - Run waitpid/zombie self-test",
     "  pipe_test - Run pipe scheduling self-test",
+    "  credits - Show project credits",
     "  echo    - Print arguments",
     "  spawn   - Launch an external process",
     "  wait    - Wait for a child process",
